@@ -244,6 +244,10 @@ local function SwingOnce()
         return false
     end
 
+    -- Send the synthetic swing OUTSIDE the visible viewport.
+    -- This keeps Auto Swing from clicking buttons / UI under your
+    -- real mouse or touch position while still producing a normal
+    -- MouseButton1 input for the game's swing LocalScript.
     local Camera =
         Workspace.CurrentCamera
 
@@ -255,22 +259,22 @@ local function SwingOnce()
             600
         )
 
-    local X =
+    local OffscreenX =
         math.floor(
-            ViewportSize.X * 0.5
+            ViewportSize.X + 100
         )
 
-    local Y =
+    local OffscreenY =
         math.floor(
-            ViewportSize.Y * 0.5
+            ViewportSize.Y + 100
         )
 
     local InputSuccess =
         pcall(function()
             VirtualInputManager
                 :SendMouseButtonEvent(
-                    X,
-                    Y,
+                    OffscreenX,
+                    OffscreenY,
                     0,
                     true,
                     game,
@@ -281,8 +285,8 @@ local function SwingOnce()
 
             VirtualInputManager
                 :SendMouseButtonEvent(
-                    X,
-                    Y,
+                    OffscreenX,
+                    OffscreenY,
                     0,
                     false,
                     game,
@@ -294,6 +298,8 @@ local function SwingOnce()
         return true
     end
 
+    -- Fallback also uses an offscreen point so it does not target
+    -- your visible interface.
     local FallbackSuccess =
         pcall(function()
             local CameraCFrame =
@@ -305,8 +311,8 @@ local function SwingOnce()
 
             VirtualUser:Button1Down(
                 Vector2.new(
-                    X,
-                    Y
+                    OffscreenX,
+                    OffscreenY
                 ),
                 CameraCFrame
             )
@@ -315,8 +321,8 @@ local function SwingOnce()
 
             VirtualUser:Button1Up(
                 Vector2.new(
-                    X,
-                    Y
+                    OffscreenX,
+                    OffscreenY
                 ),
                 CameraCFrame
             )
