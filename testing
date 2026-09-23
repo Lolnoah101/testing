@@ -1265,6 +1265,15 @@ local QuestController = {
             EnemyName = "Bear Cub",
             RegionName = "Bamboo Grove",
 
+            -- Exact quest GUI captured:
+            -- PlayerGui.ComponentsHolder.LeftCenterFramesHolder
+            -- .zQuestsFrame.Panel["Hunt the Bears"]
+            PanelName = "Hunt the Bears",
+
+            -- Task text shown in the quest card:
+            -- "Bear Cubs hunted 0/4"
+            TaskName = "Bear Cubs hunted",
+
             -- Bamboo Grove quest giver:
             -- workspace.Debree.Regions["Bamboo Grove"].StationaryNpcs.Tom
             NPCPath = {
@@ -1275,12 +1284,10 @@ local QuestController = {
                 "Tom",
             },
 
-            -- Flexible UI matching until an exact quest-card name/path
-            -- is captured. "bear" + "cub" avoids matching a Mother Bear
-            -- quest once that one is added.
+            -- Fallback title matching if the exact panel lookup ever changes.
             MatchTerms = {
+                "hunt",
                 "bear",
-                "cub",
             },
         },
     },
@@ -1447,27 +1454,9 @@ function QuestController:ReadProgress(
     Card,
     Config
 )
-    -- The quest title currently exposes progress like:
-    -- "Defeat 3 bandits 0/1"
-    local Title =
-        self:GetTitle(
-            Card
-        )
-
-    local Current, Total =
-        Title:match(
-            "(%d+)%s*/%s*(%d+)"
-        )
-
-    if Current and Total then
-        return tonumber(Current),
-            tonumber(Total),
-            Title
-    end
-
-    -- Fallback to the task progress path supplied for the
-    -- three-bandit quest:
-    -- cTasksHolder["Bandits remaining"].Holder.Txt
+    -- Prefer a known task line when available. Some quest titles expose
+    -- overall completion like 0/1, while the task itself contains the
+    -- actual kill count (for example "Bear Cubs hunted 0/4").
     if Config.TaskName then
         local Tasks =
             Card:FindFirstChild(
@@ -1501,17 +1490,38 @@ function QuestController:ReadProgress(
                     or ""
                 )
 
-            Current, Total =
+            local Current, Total =
                 TaskText:match(
                     "(%d+)%s*/%s*(%d+)"
                 )
 
-            if Current and Total then
+            if Current
+                and Total
+            then
                 return tonumber(Current),
                     tonumber(Total),
                     TaskText
             end
         end
+    end
+
+    -- Fallback to title progress such as "Hunt the Bears 0/1".
+    local Title =
+        self:GetTitle(
+            Card
+        )
+
+    local Current, Total =
+        Title:match(
+            "(%d+)%s*/%s*(%d+)"
+        )
+
+    if Current
+        and Total
+    then
+        return tonumber(Current),
+            tonumber(Total),
+            Title
     end
 
     return nil, nil, Title
@@ -2070,9 +2080,16 @@ function QuestFarmController:GetEnemyObject(
         return nil
     end
 
-    -- Known structures include:
-    -- Windy Peak: ActiveNpcs.Bandit.Bandit / Zuko.Zuko
-    -- Bamboo Grove: a container containing "Bear Cub"
+    -- Known structures:
+    -- Windy Peak:
+    --   ActiveNpcs.Bandit.Bandit
+    --   ActiveNpcs.Zuko.Zuko
+    --
+    -- Bamboo Grove:
+    --   ActiveNpcs["Bear Cub"]["Bear Cub"]
+    --
+    -- The outer "Bear Cub" is a container/folder and the inner
+    -- "Bear Cub" is the actual NPC model.
     local NamedChild =
         Container:FindFirstChild(
             EnemyName
@@ -2087,13 +2104,29 @@ function QuestFarmController:GetEnemyObject(
         return NamedChild
     end
 
-    if Container.Name == EnemyName
-        and (
-            Container:IsA("Model")
+    if Container.Name == EnemyName then
+        -- If the container itself is the NPC, use it.
+        if Container:IsA("Model")
             or Container:IsA("BasePart")
-        )
-    then
-        return Container
+        then
+            return Container
+        end
+
+        -- Otherwise this is a folder/container such as
+        -- ActiveNpcs["Bear Cub"], so look inside for the actual NPC.
+        local InnerEnemy =
+            Container:FindFirstChild(
+                EnemyName
+            )
+
+        if InnerEnemy
+            and (
+                InnerEnemy:IsA("Model")
+                or InnerEnemy:IsA("BasePart")
+            )
+        then
+            return InnerEnemy
+        end
     end
 
     for _, Object in ipairs(
