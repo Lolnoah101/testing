@@ -1,41 +1,46 @@
 --// ============================================================
---// HOLLOWMOONHUB - NEW GAME
---// Auto Swing + Unload
+--// HOLLOWMOONHUB - AUTO CLICK
+--// Rayfield Gen2
+--//
+--// Captured combat combo:
+--//   1 -> false, 0.13, false, nil
+--//   2 -> false, 0,    false, nil
+--//   3 -> false, 0,    false, nil
+--//   4 -> false, 0,    false, nil
+--//   5 -> false, 0.15, false, nil
+--//
+--// Auto Click continuously runs stages 1 -> 5 in order.
 --// ============================================================
 
 local Players =
     game:GetService("Players")
 
-local Workspace =
-    game:GetService("Workspace")
+local ReplicatedStorage =
+    game:GetService("ReplicatedStorage")
 
 local VirtualUser =
     game:GetService("VirtualUser")
 
-local VirtualInputManager =
-    game:GetService("VirtualInputManager")
+local TweenService =
+    game:GetService("TweenService")
 
 local LocalPlayer =
     Players.LocalPlayer
 
-
---// ============================================================
---// CLEAN OLD COPY
---// ============================================================
-
-if getgenv().__HOLLOWMOON_NEWGAME_UNLOAD then
+if getgenv().__HOLLOWMOON_AUTOCLICK_UNLOAD then
     pcall(
-        getgenv().__HOLLOWMOON_NEWGAME_UNLOAD
+        getgenv().__HOLLOWMOON_AUTOCLICK_UNLOAD
     )
-
-    getgenv().__HOLLOWMOON_NEWGAME_UNLOAD =
-        nil
+    getgenv().__HOLLOWMOON_AUTOCLICK_UNLOAD = nil
 end
 
-
---// ============================================================
---// RAYFIELD GEN2 LOADER
---// ============================================================
+local CombatEvent =
+    ReplicatedStorage
+        :WaitForChild("Communication")
+        :WaitForChild("ServerAndClient")
+        :WaitForChild("Signals")
+        :WaitForChild("SignalEvent")
+        :WaitForChild("Event")
 
 local function IsRayfieldLibrary(Value)
     return type(Value) == "table"
@@ -61,6 +66,144 @@ local function LoadRayfield()
         return CachedLibrary
     end
 
+    local CacheFolder =
+        "HollowMoonHub"
+
+    local CacheFile =
+        CacheFolder
+        .. "/RayfieldGen2Cache.lua"
+
+    local function RunSource(
+        Source,
+        Origin
+    )
+        if type(Source) ~= "string"
+            or Source == ""
+        then
+            return nil,
+                tostring(Origin)
+                .. " returned an empty response"
+        end
+
+        local Chunk,
+            CompileError =
+            loadstring(
+                Source
+            )
+
+        if not Chunk then
+            return nil,
+                tostring(Origin)
+                .. " compile failed: "
+                .. tostring(
+                    CompileError
+                )
+        end
+
+        local RunSuccess,
+            Library =
+            pcall(
+                Chunk
+            )
+
+        if not RunSuccess then
+            return nil,
+                tostring(Origin)
+                .. " runtime failed: "
+                .. tostring(
+                    Library
+                )
+        end
+
+        if not IsRayfieldLibrary(
+            Library
+        ) then
+            return nil,
+                tostring(Origin)
+                .. " did not return CreateWindow"
+        end
+
+        Environment
+            .__HOLLOWMOON_RAYFIELD_GEN2 =
+                Library
+
+        return Library
+    end
+
+    local function SaveSourceCache(
+        Source
+    )
+        if type(writefile) ~= "function"
+            or type(Source) ~= "string"
+            or Source == ""
+        then
+            return
+        end
+
+        pcall(function()
+            if type(isfolder) == "function"
+                and type(makefolder) == "function"
+                and not isfolder(
+                    CacheFolder
+                )
+            then
+                makefolder(
+                    CacheFolder
+                )
+            end
+
+            writefile(
+                CacheFile,
+                Source
+            )
+        end)
+    end
+
+    local function LoadDiskCache()
+        if type(readfile) ~= "function" then
+            return nil
+        end
+
+        if type(isfile) == "function"
+            and not isfile(
+                CacheFile
+            )
+        then
+            return nil
+        end
+
+        local ReadSuccess,
+            Source =
+            pcall(
+                readfile,
+                CacheFile
+            )
+
+        if not ReadSuccess
+            or type(Source) ~= "string"
+            or Source == ""
+        then
+            return nil
+        end
+
+        local Library =
+            RunSource(
+                Source,
+                "Rayfield disk cache"
+            )
+
+        return Library
+    end
+
+    -- If a previous successful launch saved Gen2 locally, use it first.
+    -- That keeps the hub usable during temporary Sirius/CDN outages.
+    local DiskLibrary =
+        LoadDiskCache()
+
+    if DiskLibrary then
+        return DiskLibrary
+    end
+
     local URLs = {
         "https://sirius.menu/gen2",
         "https://sirius.menu/gen2-preview",
@@ -69,85 +212,169 @@ local function LoadRayfield()
     local LastError =
         "Unknown Rayfield loader error"
 
+    local function FetchWithHttpGet(
+        URL
+    )
+        local Success,
+            Source =
+            pcall(function()
+                -- false asks supported executors not to reuse a stale HTTP cache.
+                return game:HttpGet(
+                    URL,
+                    false
+                )
+            end)
+
+        if not Success then
+            return nil,
+                tostring(
+                    Source
+                )
+        end
+
+        if type(Source) ~= "string"
+            or Source == ""
+        then
+            return nil,
+                "empty response"
+        end
+
+        return Source
+    end
+
+    local function FetchWithRequest(
+        URL
+    )
+        local Request =
+            (
+                type(request) == "function"
+                and request
+            )
+            or (
+                type(http_request) == "function"
+                and http_request
+            )
+            or (
+                syn
+                and type(syn.request) == "function"
+                and syn.request
+            )
+
+        if type(Request) ~= "function" then
+            return nil,
+                "request API unavailable"
+        end
+
+        local Success,
+            Response =
+            pcall(
+                Request,
+                {
+                    Url = URL,
+                    Method = "GET",
+                    Headers = {
+                        ["Cache-Control"] = "no-cache",
+                        ["Pragma"] = "no-cache",
+                    },
+                }
+            )
+
+        if not Success then
+            return nil,
+                tostring(
+                    Response
+                )
+        end
+
+        local Body =
+            type(Response) == "table"
+            and (
+                Response.Body
+                or Response.body
+            )
+            or nil
+
+        if type(Body) ~= "string"
+            or Body == ""
+        then
+            return nil,
+                "empty response"
+        end
+
+        return Body
+    end
+
     for _, URL in ipairs(
         URLs
     ) do
         for Attempt = 1, 6 do
-            local Success,
-                Source =
-                pcall(function()
-                    return game:HttpGet(
-                        URL,
-                        false
-                    )
-                end)
+            local Source,
+                FetchError =
+                FetchWithHttpGet(
+                    URL
+                )
 
-            if Success
-                and type(Source) == "string"
-                and Source ~= ""
-            then
-                local Chunk,
-                    CompileError =
-                    loadstring(
+            if not Source then
+                Source,
+                    FetchError =
+                    FetchWithRequest(
+                        URL
+                    )
+            end
+
+            if Source then
+                local Library,
+                    LoadError =
+                    RunSource(
+                        Source,
+                        URL
+                    )
+
+                if Library then
+                    SaveSourceCache(
                         Source
                     )
 
-                if Chunk then
-                    local RunSuccess,
-                        Library =
-                        pcall(
-                            Chunk
-                        )
-
-                    if RunSuccess
-                        and IsRayfieldLibrary(
-                            Library
-                        )
-                    then
-                        Environment
-                            .__HOLLOWMOON_RAYFIELD_GEN2 =
-                                Library
-
-                        return Library
-                    end
-
-                    LastError =
-                        RunSuccess
-                        and "Rayfield did not return CreateWindow"
-                        or tostring(
-                            Library
-                        )
-                else
-                    LastError =
-                        tostring(
-                            CompileError
-                        )
+                    return Library
                 end
+
+                LastError =
+                    tostring(
+                        LoadError
+                    )
             else
                 LastError =
-                    Success
-                    and (
-                        "Empty response from "
-                        .. URL
-                    )
-                    or tostring(
-                        Source
+                    URL
+                    .. ": "
+                    .. tostring(
+                        FetchError
                     )
             end
 
             if Attempt < 6 then
                 task.wait(
                     math.min(
-                        Attempt * 0.5,
-                        2
+                        Attempt,
+                        3
                     )
                 )
             end
         end
     end
 
+    -- One final cache check in case another copy of the hub/library
+    -- finished writing the source while the network attempts were running.
+    DiskLibrary =
+        LoadDiskCache()
+
+    if DiskLibrary then
+        return DiskLibrary
+    end
+
     error(
-        "[HollowMoonHub] Rayfield failed: "
+        "[Auto Click] Rayfield Gen2 could not be loaded. "
+            .. "Both Sirius endpoints returned no usable source and no local cache exists. "
+            .. "Last error: "
             .. tostring(
                 LastError
             ),
@@ -155,30 +382,78 @@ local function LoadRayfield()
     )
 end
 
-
-local Rayfield =
-    LoadRayfield()
-
-
---// ============================================================
---// STATE
---// ============================================================
+local Rayfield = LoadRayfield()
 
 local Settings = {
-    AutoSwing = false,
+    AutoClick = false,
+    AutoOpenChest = false,
+
+    AutoPickUpLoot = false,
+    LootRarity = "Any",
+
+    WeaponSlot = 1,
+    AutoEquipSlot = false,
+
+    AutoQuest = false,
+    AutoFarmQuest = false,
+    SelectedQuest = "Ill take 3 bandits",
+
+    QuestFarmPosition = "Above",
+    QuestFarmDistance = 10,
+
+    -- Smooth quest-farm movement only.
+    QuestTweenSpeed = 100,
+
+    AntiAFK = true,
 }
 
 local HubRunning = true
 
+-- Full captured combo:
+--   1 -> 0.13
+--   2 -> 0
+--   3 -> 0
+--   4 -> 0
+--   5 -> 0.15
+--
+-- The small client-side delay keeps the five requests ordered instead
+-- of pushing every combo stage in the exact same scheduler slice.
+-- Balanced client-side combo pacing.
+-- Going too fast can cause the game/server to ignore later combat
+-- requests, so keep this only moderately faster than the original.
+-- The captured timing values sent to the server stay unchanged.
+local COMBO_STEP_DELAY = 0.04
+local COMBO_RESET_DELAY = 0.08
 
---// ============================================================
---// UI
---// ============================================================
+local AutoClickLoopID = 0
+local AntiAFKConnection = nil
+local ChestAddedConnection = nil
+local LootAddedConnection = nil
+
+local ChestPromptLastAttempt = {}
+local LootPromptLastAttempt = {}
+
+local AutoChestLoopID = 0
+local AutoLootLoopID = 0
+
+local CHEST_SCAN_INTERVAL = 0.20
+local LOOT_SCAN_INTERVAL = 0.15
+local PROMPT_RETRY_DELAY = 0.40
+
+-- Add more rarities here as you discover them.
+local LootRarities = {
+    "Any",
+    "Rare",
+}
+
+local KnownLootRaritySet = {
+    Rare = true,
+}
 
 local Window =
     Rayfield:CreateWindow({
-        name = "HollowMoonHub",
-        subtitle = "New Game",
+        name = "Combat Hub",
+        subtitle = "HollowMoonHub",
         sidebarLayout = true,
         theme = "cobalt",
         fallbackFont = Enum.Font.Gotham,
@@ -186,38 +461,30 @@ local Window =
         configuration = {
             autoSave = true,
             autoLoad = true,
-            fileName = "NewGame_AutoSwing",
+            fileName = "CombatHub",
             customFolder = "HollowMoonHub",
         },
     })
 
-
 Window:CreateSection({
-    name = "Automation",
+    name = "Automation"
 })
-
 
 local MainTab =
     Window:CreateTab({
-        name = "Main",
+        name = "Main"
     })
 
-
 Window:CreateSection({
-    name = "Interface",
+    name = "Interface"
 })
-
 
 local SettingsTab =
     Window:CreateTab({
-        name = "Settings",
+        name = "Settings"
     })
 
-
-local function Toast(
-    Title,
-    Subtitle
-)
+local function Toast(Title, Subtitle)
     pcall(function()
         Window:Toast({
             title = Title,
@@ -227,148 +494,2593 @@ local function Toast(
     end)
 end
 
+local ComboValues = {
+    [1] = 0.13,
+    [2] = 0,
+    [3] = 0,
+    [4] = 0,
+    [5] = 0.15,
+}
 
---// ============================================================
---// AUTO SWING
---//
---// The game's TrainOnceRE argument changes between swings.
---// This avoids guessing that changing value and instead triggers
---// the normal swing input so the game's own LocalScript can produce
---// the correct current argument each time.
---// ============================================================
 
-local function SwingOnce()
-    if not HubRunning
-        or not Settings.AutoSwing
+local function EquipWeaponSlot(
+    Slot
+)
+    Slot =
+        math.clamp(
+            tonumber(Slot)
+                or 1,
+            1,
+            5
+        )
+
+    Settings.WeaponSlot =
+        Slot
+
+    local ItemsConfig =
+        LocalPlayer:FindFirstChild(
+            "Items_Config"
+        )
+
+    local Equipped =
+        ItemsConfig
+        and ItemsConfig:FindFirstChild(
+            "Equipped"
+        )
+
+    if Equipped
+        and Equipped:IsA(
+            "IntValue"
+        )
     then
-        return false
-    end
-
-    -- Send the synthetic swing OUTSIDE the visible viewport.
-    -- This keeps Auto Swing from clicking buttons / UI under your
-    -- real mouse or touch position while still producing a normal
-    -- MouseButton1 input for the game's swing LocalScript.
-    local Camera =
-        Workspace.CurrentCamera
-
-    local ViewportSize =
-        Camera
-        and Camera.ViewportSize
-        or Vector2.new(
-            800,
-            600
-        )
-
-    local OffscreenX =
-        math.floor(
-            ViewportSize.X + 100
-        )
-
-    local OffscreenY =
-        math.floor(
-            ViewportSize.Y + 100
-        )
-
-    local InputSuccess =
-        pcall(function()
-            VirtualInputManager
-                :SendMouseButtonEvent(
-                    OffscreenX,
-                    OffscreenY,
-                    0,
-                    true,
-                    game,
-                    0
+        -- The game's toolbar code listens to Equipped.Changed and
+        -- sends Item_Equip with this value.
+        if Equipped.Value ~= Slot then
+            Equipped.Value =
+                Slot
+        else
+            -- If the slot is already selected locally, send one exact
+            -- captured equip request so selecting the dropdown still
+            -- refreshes the equipped slot.
+            pcall(function()
+                CombatEvent:FireServer(
+                    "Item_Equip",
+                    Slot
                 )
+            end)
+        end
 
-            task.wait(0.025)
-
-            VirtualInputManager
-                :SendMouseButtonEvent(
-                    OffscreenX,
-                    OffscreenY,
-                    0,
-                    false,
-                    game,
-                    0
-                )
-        end)
-
-    if InputSuccess then
         return true
     end
 
-    -- Fallback also uses an offscreen point so it does not target
-    -- your visible interface.
-    local FallbackSuccess =
+    -- Fallback if Items_Config has not replicated yet.
+    local Success =
         pcall(function()
-            local CameraCFrame =
-                Camera
-                and Camera.CFrame
-                or CFrame.new()
-
-            VirtualUser:CaptureController()
-
-            VirtualUser:Button1Down(
-                Vector2.new(
-                    OffscreenX,
-                    OffscreenY
-                ),
-                CameraCFrame
-            )
-
-            task.wait(0.025)
-
-            VirtualUser:Button1Up(
-                Vector2.new(
-                    OffscreenX,
-                    OffscreenY
-                ),
-                CameraCFrame
+            CombatEvent:FireServer(
+                "Item_Equip",
+                Slot
             )
         end)
 
-    return FallbackSuccess
+    return Success
 end
 
 
 task.spawn(function()
     while HubRunning do
-        if Settings.AutoSwing then
-            local Success,
-                ErrorMessage =
-                pcall(
-                    SwingOnce
+        if Settings.AutoEquipSlot then
+            local DesiredSlot =
+                math.clamp(
+                    tonumber(
+                        Settings.WeaponSlot
+                    ) or 1,
+                    1,
+                    5
                 )
 
-            if not Success then
-                warn(
-                    "[HollowMoonHub] Auto Swing: "
-                        .. tostring(
-                            ErrorMessage
-                        )
+            local ItemsConfig =
+                LocalPlayer:FindFirstChild(
+                    "Items_Config"
+                )
+
+            local Equipped =
+                ItemsConfig
+                and ItemsConfig:FindFirstChild(
+                    "Equipped"
+                )
+
+            if not Equipped
+                or not Equipped:IsA(
+                    "IntValue"
+                )
+                or Equipped.Value ~= DesiredSlot
+            then
+                EquipWeaponSlot(
+                    DesiredSlot
                 )
             end
-
-            task.wait(0.08)
-        else
-            task.wait(0.15)
         end
+
+        task.wait(0.20)
     end
 end)
 
 
-MainTab:CreateToggle({
-    name = "Auto Swing",
+local function SendCombatStage(Stage)
+    if not HubRunning
+        or not Settings.AutoClick
+    then
+        return false
+    end
+
+    local TimingValue =
+        ComboValues[Stage]
+
+    if TimingValue == nil then
+        return false
+    end
+
+    local Success, ErrorMessage =
+        pcall(function()
+            CombatEvent:FireServer(
+                "Combat_Service",
+                "Combat",
+                Stage,
+                false,
+                TimingValue,
+                false,
+                nil
+            )
+        end)
+
+    if not Success then
+        warn(
+            "[Combat Hub] Combo "
+                .. tostring(Stage)
+                .. ": "
+                .. tostring(ErrorMessage)
+        )
+
+        return false
+    end
+
+    return true
+end
+
+
+local function StartAutoClick()
+    AutoClickLoopID += 1
+    local LoopID = AutoClickLoopID
+
+    task.spawn(function()
+        while HubRunning
+            and Settings.AutoClick
+            and LoopID == AutoClickLoopID
+        do
+            for Stage = 1, 5 do
+                if not HubRunning
+                    or not Settings.AutoClick
+                    or LoopID ~= AutoClickLoopID
+                then
+                    break
+                end
+
+                SendCombatStage(Stage)
+
+                if Stage < 5 then
+                    task.wait(COMBO_STEP_DELAY)
+                end
+            end
+
+            if HubRunning
+                and Settings.AutoClick
+                and LoopID == AutoClickLoopID
+            then
+                task.wait(COMBO_RESET_DELAY)
+            end
+        end
+    end)
+end
+
+local function StopAutoClick()
+    Settings.AutoClick = false
+    AutoClickLoopID += 1
+end
+
+--// ============================================================
+--// AUTO OPEN CHEST
+--// ============================================================
+
+local function GetChestFolder()
+    return workspace:FindFirstChild("Chests")
+end
+
+local function IsChestPrompt(Object)
+    local ChestFolder =
+        GetChestFolder()
+
+    return ChestFolder
+        and Object
+        and Object:IsA("ProximityPrompt")
+        and Object:IsDescendantOf(ChestFolder)
+end
+
+local function OpenChestPrompt(Prompt)
+    if not HubRunning
+        or not Settings.AutoOpenChest
+        or not IsChestPrompt(Prompt)
+        or not Prompt.Enabled
+    then
+        return false
+    end
+
+    local LastAttempt =
+        ChestPromptLastAttempt[Prompt]
+        or 0
+
+    if os.clock() - LastAttempt
+        < PROMPT_RETRY_DELAY
+    then
+        return false
+    end
+
+    ChestPromptLastAttempt[Prompt] =
+        os.clock()
+
+    local Success, ErrorMessage =
+        pcall(function()
+            if type(fireproximityprompt) ~= "function" then
+                error("fireproximityprompt is unavailable")
+            end
+
+            fireproximityprompt(Prompt)
+        end)
+
+    if not Success then
+        warn(
+            "[Combat Hub] Auto Open Chest: "
+                .. tostring(ErrorMessage)
+        )
+
+        return false
+    end
+
+    -- Do not permanently mark this prompt as completed.
+    -- If the server ignored it because you were too far away,
+    -- the scanner will try again after PROMPT_RETRY_DELAY.
+    return true
+end
+
+local function ScanExistingChests()
+    local ChestFolder =
+        GetChestFolder()
+
+    if not ChestFolder then
+        return
+    end
+
+    for _, Object in ipairs(
+        ChestFolder:GetDescendants()
+    ) do
+        if IsChestPrompt(Object) then
+            OpenChestPrompt(Object)
+        end
+    end
+end
+
+local function StartAutoOpenChest()
+    AutoChestLoopID += 1
+
+    local LoopID =
+        AutoChestLoopID
+
+    table.clear(
+        ChestPromptLastAttempt
+    )
+
+    ScanExistingChests()
+
+    task.spawn(function()
+        while HubRunning
+            and Settings.AutoOpenChest
+            and LoopID == AutoChestLoopID
+        do
+            ScanExistingChests()
+
+            for Prompt in pairs(
+                ChestPromptLastAttempt
+            ) do
+                if not Prompt
+                    or not Prompt.Parent
+                then
+                    ChestPromptLastAttempt[Prompt] =
+                        nil
+                end
+            end
+
+            task.wait(
+                CHEST_SCAN_INTERVAL
+            )
+        end
+    end)
+end
+
+local function StopAutoOpenChest()
+    Settings.AutoOpenChest = false
+
+    AutoChestLoopID += 1
+
+    table.clear(
+        ChestPromptLastAttempt
+    )
+end
+
+ChestAddedConnection =
+    workspace.DescendantAdded:Connect(
+        function(Object)
+            if not HubRunning
+                or not Settings.AutoOpenChest
+            then
+                return
+            end
+
+            local ChestFolder =
+                GetChestFolder()
+
+            if not ChestFolder
+                or not Object:IsDescendantOf(
+                    ChestFolder
+                )
+            then
+                return
+            end
+
+            task.delay(
+                0.08,
+                function()
+                    if HubRunning
+                        and Settings.AutoOpenChest
+                    then
+                        ScanExistingChests()
+                    end
+                end
+            )
+        end
+    )
+
+--// ============================================================
+--// AUTO PICK UP LOOT
+--// ============================================================
+
+local function GetLootFolder()
+    return workspace:FindFirstChild("LootDrops")
+end
+
+
+local function GetLootDropFromPrompt(Prompt)
+    local LootFolder =
+        GetLootFolder()
+
+    if not LootFolder
+        or not Prompt
+        or not Prompt:IsA("ProximityPrompt")
+        or not Prompt:IsDescendantOf(LootFolder)
+    then
+        return nil
+    end
+
+    local Current =
+        Prompt.Parent
+
+    while Current
+        and Current ~= LootFolder
+        and Current ~= workspace
+    do
+        if Current.Parent == LootFolder then
+            return Current
+        end
+
+        Current = Current.Parent
+    end
+
+    return Prompt.Parent
+end
+
+
+local function GetLootRarity(LootDrop)
+    if not LootDrop then
+        return nil
+    end
+
+    -- Prefer explicit attributes if the game exposes them.
+    for _, AttributeName in ipairs({
+        "Rarity",
+        "Tier",
+        "Quality",
+    }) do
+        local Value =
+            LootDrop:GetAttribute(
+                AttributeName
+            )
+
+        if typeof(Value) == "string"
+            and Value ~= ""
+        then
+            return Value
+        end
+    end
+
+    -- From your current capture the rarity appears as a direct child
+    -- of workspace.LootDrops.LootDrop (for example: "Rare").
+    for _, Child in ipairs(
+        LootDrop:GetChildren()
+    ) do
+        if KnownLootRaritySet[
+            Child.Name
+        ] then
+            return Child.Name
+        end
+    end
+
+    return nil
+end
+
+
+local function GetLootName(
+    LootDrop,
+    Prompt
+)
+    if Prompt then
+        local ObjectText =
+            tostring(
+                Prompt.ObjectText
+                or ""
+            )
+
+        if ObjectText ~= "" then
+            return ObjectText
+        end
+    end
+
+    if LootDrop then
+        local AttributeName =
+            LootDrop:GetAttribute(
+                "ItemName"
+            )
+
+        if typeof(AttributeName) == "string"
+            and AttributeName ~= ""
+        then
+            return AttributeName
+        end
+    end
+
+    return LootDrop
+        and LootDrop.Name
+        or "Loot"
+end
+
+
+local function LootMatchesSelection(
+    LootDrop
+)
+    local Selected =
+        Settings.LootRarity
+        or "Any"
+
+    if Selected == "Any" then
+        return true
+    end
+
+    local Rarity =
+        GetLootRarity(
+            LootDrop
+        )
+
+    return Rarity == Selected
+end
+
+
+local function IsLootPrompt(Object)
+    local LootFolder =
+        GetLootFolder()
+
+    return LootFolder
+        and Object
+        and Object:IsA("ProximityPrompt")
+        and Object.Name == "LootDropPrompt"
+        and Object:IsDescendantOf(
+            LootFolder
+        )
+end
+
+
+local function PickUpLootPrompt(Prompt)
+    if not HubRunning
+        or not Settings.AutoPickUpLoot
+        or not IsLootPrompt(Prompt)
+        or not Prompt.Enabled
+    then
+        return false
+    end
+
+    local LootDrop =
+        GetLootDropFromPrompt(
+            Prompt
+        )
+
+    if not LootDrop then
+        return false
+    end
+
+    if not LootMatchesSelection(
+        LootDrop
+    ) then
+        return false
+    end
+
+    local LastAttempt =
+        LootPromptLastAttempt[Prompt]
+        or 0
+
+    if os.clock() - LastAttempt
+        < PROMPT_RETRY_DELAY
+    then
+        return false
+    end
+
+    LootPromptLastAttempt[Prompt] =
+        os.clock()
+
+    local Success, ErrorMessage =
+        pcall(function()
+            if type(
+                fireproximityprompt
+            ) ~= "function"
+            then
+                error(
+                    "fireproximityprompt is unavailable"
+                )
+            end
+
+            fireproximityprompt(
+                Prompt
+            )
+        end)
+
+    if not Success then
+        warn(
+            "[Combat Hub] Auto Loot: "
+                .. tostring(
+                    ErrorMessage
+                )
+        )
+
+        return false
+    end
+
+    -- Keep retrying this same prompt while it still exists.
+    -- That means if you were too far away at first, walking near it
+    -- later will cause the prompt to be fired again automatically.
+    return true
+end
+
+
+local function ScanExistingLoot()
+    local LootFolder =
+        GetLootFolder()
+
+    if not LootFolder then
+        return
+    end
+
+    for _, Object in ipairs(
+        LootFolder:GetDescendants()
+    ) do
+        if IsLootPrompt(Object) then
+            PickUpLootPrompt(
+                Object
+            )
+        end
+    end
+end
+
+
+local function StartAutoPickUpLoot()
+    AutoLootLoopID += 1
+
+    local LoopID =
+        AutoLootLoopID
+
+    table.clear(
+        LootPromptLastAttempt
+    )
+
+    -- Immediate pass for loot that already exists.
+    ScanExistingLoot()
+
+    -- Keep rescanning while enabled.
+    --
+    -- This is important because the game can create LootDropPrompt first,
+    -- then add the item/rarity children a moment later. The old event-only
+    -- version saw the prompt too early and never retried it.
+    task.spawn(function()
+        while HubRunning
+            and Settings.AutoPickUpLoot
+            and LoopID == AutoLootLoopID
+        do
+            ScanExistingLoot()
+
+            for Prompt in pairs(
+                LootPromptLastAttempt
+            ) do
+                if not Prompt
+                    or not Prompt.Parent
+                then
+                    LootPromptLastAttempt[Prompt] =
+                        nil
+                end
+            end
+
+            task.wait(
+                LOOT_SCAN_INTERVAL
+            )
+        end
+    end)
+end
+
+
+local function StopAutoPickUpLoot()
+    Settings.AutoPickUpLoot =
+        false
+
+    AutoLootLoopID += 1
+
+    table.clear(
+        LootPromptLastAttempt
+    )
+end
+
+
+LootAddedConnection =
+    workspace.DescendantAdded:Connect(
+        function(Object)
+            if not HubRunning
+                or not Settings.AutoPickUpLoot
+            then
+                return
+            end
+
+            local LootFolder =
+                GetLootFolder()
+
+            if not LootFolder
+                or not Object:IsDescendantOf(
+                    LootFolder
+                )
+            then
+                return
+            end
+
+            -- New loot often arrives in several replication steps.
+            -- Wait briefly, then scan the whole folder instead of only
+            -- reacting when the prompt object itself is the added child.
+            task.delay(
+                0.08,
+                function()
+                    if HubRunning
+                        and Settings.AutoPickUpLoot
+                    then
+                        ScanExistingLoot()
+                    end
+                end
+            )
+        end
+    )
+
+
+local function AntiAFK()
+    if not HubRunning
+        or not Settings.AntiAFK
+    then
+        return
+    end
+
+    pcall(function()
+        local Camera = workspace.CurrentCamera
+        local CameraCFrame =
+            Camera
+            and Camera.CFrame
+            or CFrame.new()
+
+        VirtualUser:CaptureController()
+        VirtualUser:Button2Down(
+            Vector2.new(0, 0),
+            CameraCFrame
+        )
+        task.wait(0.05)
+        VirtualUser:Button2Up(
+            Vector2.new(0, 0),
+            CameraCFrame
+        )
+    end)
+end
+
+AntiAFKConnection =
+    LocalPlayer.Idled:Connect(AntiAFK)
+
+
+--// ============================================================
+--// AUTO QUEST - KRUE / WINDY PEAK
+--// ============================================================
+
+local QuestController = {
+    LoopID = 0,
+    Busy = false,
+    LastAcceptAt = 0,
+    CompletionSeenAt = nil,
+    TeleportedForAcceptance = false,
+
+    -- Retry AddQuest until the quest is actually confirmed in the UI.
+    AcceptRetryDelay = 0.65,
+    UpdateInterval = 0.15,
+
+    NPCPath = {
+        "Debree",
+        "Regions",
+        "Windy Peak",
+        "StationaryNpcs",
+        "Krue",
+    },
+
+    Order = {
+        "Ill take 3 bandits",
+        "Ill take the bandit boss(Lv 7)",
+    },
+
+    Configs = {
+        ["Ill take 3 bandits"] = {
+            Request = "Ill take 3 bandits",
+            EnemyName = "Bandit",
+            PanelName = "Defeat 3 bandits",
+            MatchTerms = {
+                "3",
+                "bandit",
+            },
+            TaskName = "Bandits remaining",
+        },
+
+        ["Ill take the bandit boss(Lv 7)"] = {
+            Request = "Ill take the bandit boss(Lv 7)",
+            EnemyName = "Zuko",
+            MatchTerms = {
+                "bandit",
+                "boss",
+            },
+        },
+    },
+}
+
+
+function QuestController:GetConfig()
+    return self.Configs[
+        Settings.SelectedQuest
+    ]
+end
+
+
+function QuestController:GetQuestPanel()
+    local PlayerGui =
+        LocalPlayer:FindFirstChild(
+            "PlayerGui"
+        )
+
+    local ComponentsHolder =
+        PlayerGui
+        and PlayerGui:FindFirstChild(
+            "ComponentsHolder"
+        )
+
+    local LeftCenter =
+        ComponentsHolder
+        and ComponentsHolder:FindFirstChild(
+            "LeftCenterFramesHolder"
+        )
+
+    local QuestsFrame =
+        LeftCenter
+        and LeftCenter:FindFirstChild(
+            "zQuestsFrame"
+        )
+
+    return QuestsFrame
+        and QuestsFrame:FindFirstChild(
+            "Panel"
+        )
+end
+
+
+function QuestController:GetTitleObject(Card)
+    local ATitle =
+        Card
+        and Card:FindFirstChild(
+            "aTitle"
+        )
+
+    local Holder =
+        ATitle
+        and ATitle:FindFirstChild(
+            "Holder"
+        )
+
+    return Holder
+        and Holder:FindFirstChild(
+            "Text"
+        )
+end
+
+
+function QuestController:GetTitle(Card)
+    local Object =
+        self:GetTitleObject(
+            Card
+        )
+
+    if not Object then
+        return ""
+    end
+
+    local Value =
+        Object.ContentText
+
+    if type(Value) ~= "string"
+        or Value == ""
+    then
+        Value = Object.Text
+    end
+
+    return tostring(
+        Value or ""
+    )
+end
+
+
+function QuestController:TitleMatches(
+    Title,
+    Config
+)
+    local Lower =
+        string.lower(
+            tostring(Title or "")
+        )
+
+    if Lower == "" then
+        return false
+    end
+
+    for _, Term in ipairs(
+        Config.MatchTerms or {}
+    ) do
+        if not string.find(
+            Lower,
+            string.lower(
+                tostring(Term)
+            ),
+            1,
+            true
+        ) then
+            return false
+        end
+    end
+
+    return true
+end
+
+
+function QuestController:FindQuestCard(
+    Config
+)
+    local Panel =
+        self:GetQuestPanel()
+
+    if not Panel then
+        return nil
+    end
+
+    if Config.PanelName then
+        local Exact =
+            Panel:FindFirstChild(
+                Config.PanelName
+            )
+
+        if Exact then
+            return Exact
+        end
+    end
+
+    for _, Card in ipairs(
+        Panel:GetChildren()
+    ) do
+        local Title =
+            self:GetTitle(
+                Card
+            )
+
+        if self:TitleMatches(
+            Title,
+            Config
+        ) then
+            return Card
+        end
+    end
+
+    return nil
+end
+
+
+function QuestController:ReadProgress(
+    Card,
+    Config
+)
+    -- The quest title currently exposes progress like:
+    -- "Defeat 3 bandits 0/1"
+    local Title =
+        self:GetTitle(
+            Card
+        )
+
+    local Current, Total =
+        Title:match(
+            "(%d+)%s*/%s*(%d+)"
+        )
+
+    if Current and Total then
+        return tonumber(Current),
+            tonumber(Total),
+            Title
+    end
+
+    -- Fallback to the task progress path supplied for the
+    -- three-bandit quest:
+    -- cTasksHolder["Bandits remaining"].Holder.Txt
+    if Config.TaskName then
+        local Tasks =
+            Card:FindFirstChild(
+                "cTasksHolder"
+            )
+
+        local Task =
+            Tasks
+            and Tasks:FindFirstChild(
+                Config.TaskName
+            )
+
+        local Holder =
+            Task
+            and Task:FindFirstChild(
+                "Holder"
+            )
+
+        local Txt =
+            Holder
+            and Holder:FindFirstChild(
+                "Txt"
+            )
+
+        if Txt then
+            local TaskText =
+                tostring(
+                    Txt.ContentText ~= ""
+                    and Txt.ContentText
+                    or Txt.Text
+                    or ""
+                )
+
+            Current, Total =
+                TaskText:match(
+                    "(%d+)%s*/%s*(%d+)"
+                )
+
+            if Current and Total then
+                return tonumber(Current),
+                    tonumber(Total),
+                    TaskText
+            end
+        end
+    end
+
+    return nil, nil, Title
+end
+
+
+function QuestController:IsComplete(
+    Card,
+    Config
+)
+    local Current, Total =
+        self:ReadProgress(
+            Card,
+            Config
+        )
+
+    return Current ~= nil
+        and Total ~= nil
+        and Total > 0
+        and Current >= Total
+end
+
+
+function QuestController:GetNPC()
+    local Current =
+        workspace
+
+    for _, Name in ipairs(
+        self.NPCPath
+    ) do
+        Current =
+            Current
+            and Current:FindFirstChild(
+                Name
+            )
+
+        if not Current then
+            return nil
+        end
+    end
+
+    return Current
+end
+
+
+function QuestController:GetObjectCFrame(
+    Object
+)
+    if not Object then
+        return nil
+    end
+
+    if Object:IsA(
+        "BasePart"
+    ) then
+        return Object.CFrame
+    end
+
+    if Object:IsA(
+        "Model"
+    ) then
+        return Object:GetPivot()
+    end
+
+    if Object:IsA(
+        "Attachment"
+    ) then
+        return Object.WorldCFrame
+    end
+
+    local Part =
+        Object:FindFirstChildWhichIsA(
+            "BasePart",
+            true
+        )
+
+    return Part
+        and Part.CFrame
+        or nil
+end
+
+
+function QuestController:TeleportToKrue()
+    local NPC =
+        self:GetNPC()
+
+    local Target =
+        self:GetObjectCFrame(
+            NPC
+        )
+
+    if not Target then
+        return false,
+            "Krue was not found"
+    end
+
+    local Character =
+        LocalPlayer.Character
+
+    if not Character then
+        return false,
+            "Character was not found"
+    end
+
+    local Root =
+        Character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not Root then
+        return false,
+            "HumanoidRootPart was not found"
+    end
+
+    -- Small offset keeps the character from spawning inside Krue.
+    Character:PivotTo(
+        Target
+        * CFrame.new(
+            0,
+            2.5,
+            4
+        )
+    )
+
+    return true
+end
+
+
+function QuestController:AcceptSelected()
+    if not HubRunning
+        or not Settings.AutoQuest
+        or self.Busy
+    then
+        return false
+    end
+
+    local Config =
+        self:GetConfig()
+
+    if not Config then
+        return false
+    end
+
+    -- Keep retrying until the quest is visibly active, but space
+    -- requests enough that we do not hammer the remote every frame.
+    if os.clock()
+        - self.LastAcceptAt
+        < self.AcceptRetryDelay
+    then
+        return false
+    end
+
+    self.Busy = true
+
+    -- Teleport to Krue once for this acceptance cycle.
+    -- If AddQuest needs to be retried while the UI catches up,
+    -- stay beside Krue instead of repeatedly teleporting.
+    if not self.TeleportedForAcceptance then
+        local TeleportSuccess,
+            TeleportError =
+            self:TeleportToKrue()
+
+        if not TeleportSuccess then
+            self.Busy = false
+
+            warn(
+                "[Combat Hub] Auto Quest: "
+                    .. tostring(
+                        TeleportError
+                    )
+            )
+
+            return false
+        end
+
+        self.TeleportedForAcceptance =
+            true
+
+        task.wait(0.30)
+    end
+
+    local Success, ErrorMessage =
+        pcall(function()
+            CombatEvent:FireServer(
+                "AddQuest",
+                Config.Request
+            )
+        end)
+
+    self.LastAcceptAt =
+        os.clock()
+
+    self.Busy = false
+
+    if not Success then
+        warn(
+            "[Combat Hub] Auto Quest: "
+                .. tostring(
+                    ErrorMessage
+                )
+        )
+
+        return false
+    end
+
+    return true
+end
+
+
+function QuestController:ResetState()
+    self.Busy = false
+    self.LastAcceptAt = 0
+    self.CompletionSeenAt = nil
+    self.TeleportedForAcceptance = false
+end
+
+
+function QuestController:Start()
+    self.LoopID += 1
+
+    local MyLoopID =
+        self.LoopID
+
+    self:ResetState()
+
+    task.spawn(function()
+        while HubRunning
+            and Settings.AutoQuest
+            and MyLoopID == self.LoopID
+        do
+            local Success,
+                ErrorMessage =
+                pcall(function()
+                    local Config =
+                        self:GetConfig()
+
+                    if not Config then
+                        return
+                    end
+
+                    local Card =
+                        self:FindQuestCard(
+                            Config
+                        )
+
+                    local QuestConfirmed =
+                        Card
+                        and not self:IsComplete(
+                            Card,
+                            Config
+                        )
+
+                    if QuestConfirmed then
+                        -- The quest is really active now. Stop sending
+                        -- AddQuest and re-arm the one-time Krue teleport
+                        -- for the NEXT quest cycle.
+                        self.CompletionSeenAt =
+                            nil
+
+                        self.TeleportedForAcceptance =
+                            false
+
+                        return
+                    end
+
+                    -- No active quest, or the old quest card is complete.
+                    -- Keep retrying AddQuest until the UI confirms a fresh,
+                    -- incomplete copy of the selected quest.
+                    if Card then
+                        if not self.CompletionSeenAt then
+                            self.CompletionSeenAt =
+                                os.clock()
+                        end
+                    else
+                        self.CompletionSeenAt =
+                            nil
+                    end
+
+                    self:AcceptSelected()
+                end)
+
+            if not Success then
+                warn(
+                    "[Combat Hub] Auto Quest recovered: "
+                        .. tostring(
+                            ErrorMessage
+                        )
+                )
+
+                self.Busy = false
+            end
+
+            task.wait(
+                self.UpdateInterval
+            )
+        end
+    end)
+end
+
+
+function QuestController:Stop()
+    Settings.AutoQuest =
+        false
+
+    self.LoopID += 1
+    self:ResetState()
+end
+
+
+--// ============================================================
+--// AUTO FARM QUEST
+--// ============================================================
+
+local QuestFarmController = {
+    LoopID = 0,
+    CurrentTarget = nil,
+    ActiveTween = nil,
+
+    LastTweenAt = 0,
+    LastTweenDestination = nil,
+
+    FrozenRoot = nil,
+    FrozenRootWasAnchored = false,
+
+    SpawnConnection = nil,
+    WatchedFolder = nil,
+    LastForcedTargetRefresh = 0,
+    ForcedTargetRefreshInterval = 0.50,
+
+    -- Main farm scan can stay responsive, but actual tween
+    -- retargets are throttled to prevent jitter.
+    UpdateInterval = 0.05,
+    TweenRefreshInterval = 0.15,
+    TweenDestinationEpsilon = 1.25,
+
+    -- Once Above mode reaches the enemy, stop using physics/tweens
+    -- and hard-lock the player's root in the air.
+    FreezeLockDistance = 1.00,
+}
+
+
+function QuestFarmController:GetActiveNpcsFolder()
+    local Humanoids =
+        workspace:FindFirstChild(
+            "Humanoids"
+        )
+
+    local Regions =
+        Humanoids
+        and Humanoids:FindFirstChild(
+            "Regions"
+        )
+
+    local WindyPeak =
+        Regions
+        and Regions:FindFirstChild(
+            "Windy Peak"
+        )
+
+    return WindyPeak
+        and WindyPeak:FindFirstChild(
+            "ActiveNpcs"
+        )
+end
+
+
+function QuestFarmController:DisconnectSpawnWatcher()
+    if self.SpawnConnection then
+        self.SpawnConnection:Disconnect()
+        self.SpawnConnection = nil
+    end
+
+    self.WatchedFolder = nil
+end
+
+
+function QuestFarmController:EnsureSpawnWatcher()
+    local Folder =
+        self:GetActiveNpcsFolder()
+
+    if Folder == self.WatchedFolder
+        and self.SpawnConnection
+    then
+        return
+    end
+
+    self:DisconnectSpawnWatcher()
+
+    if not Folder then
+        return
+    end
+
+    self.WatchedFolder =
+        Folder
+
+    self.SpawnConnection =
+        Folder.DescendantAdded:Connect(
+            function(Object)
+                if not HubRunning
+                    or not Settings.AutoFarmQuest
+                then
+                    return
+                end
+
+                local Config =
+                    QuestController:GetConfig()
+
+                if not Config
+                    or not Config.EnemyName
+                then
+                    return
+                end
+
+                -- New NPCs can replicate as a container first and their
+                -- actual model a moment later. Any matching descendant
+                -- wakes the farm and forces a fresh target search.
+                if Object.Name
+                    == Config.EnemyName
+                    or (
+                        Object.Parent
+                        and Object.Parent.Name
+                            == Config.EnemyName
+                    )
+                then
+                    self.CurrentTarget =
+                        nil
+
+                    self.LastForcedTargetRefresh =
+                        0
+                end
+            end
+        )
+end
+
+
+function QuestFarmController:GetEnemyObject(
+    Container,
+    EnemyName
+)
+    if not Container then
+        return nil
+    end
+
+    -- Current structure is commonly:
+    -- ActiveNpcs.Bandit.Bandit
+    -- ActiveNpcs.Zuko.Zuko
+    local NamedChild =
+        Container:FindFirstChild(
+            EnemyName
+        )
+
+    if NamedChild
+        and (
+            NamedChild:IsA("Model")
+            or NamedChild:IsA("BasePart")
+        )
+    then
+        return NamedChild
+    end
+
+    if Container.Name == EnemyName
+        and (
+            Container:IsA("Model")
+            or Container:IsA("BasePart")
+        )
+    then
+        return Container
+    end
+
+    for _, Object in ipairs(
+        Container:GetDescendants()
+    ) do
+        if Object.Name == EnemyName
+            and (
+                Object:IsA("Model")
+                or Object:IsA("BasePart")
+            )
+        then
+            return Object
+        end
+    end
+
+    return nil
+end
+
+
+function QuestFarmController:GetTargetPosition(
+    Object
+)
+    if not Object
+        or not Object.Parent
+    then
+        return nil
+    end
+
+    if Object:IsA(
+        "BasePart"
+    ) then
+        return Object.Position
+    end
+
+    if Object:IsA(
+        "Model"
+    ) then
+        return Object:GetPivot().Position
+    end
+
+    local Part =
+        Object:FindFirstChildWhichIsA(
+            "BasePart",
+            true
+        )
+
+    return Part
+        and Part.Position
+        or nil
+end
+
+
+function QuestFarmController:GetTargetCFrame(
+    Object
+)
+    if not Object
+        or not Object.Parent
+    then
+        return nil
+    end
+
+    if Object:IsA(
+        "BasePart"
+    ) then
+        return Object.CFrame
+    end
+
+    if Object:IsA(
+        "Model"
+    ) then
+        return Object:GetPivot()
+    end
+
+    local Part =
+        Object:FindFirstChildWhichIsA(
+            "BasePart",
+            true
+        )
+
+    return Part
+        and Part.CFrame
+        or nil
+end
+
+
+function QuestFarmController:IsAlive(
+    Object
+)
+    if not Object
+        or not Object.Parent
+    then
+        return false
+    end
+
+    local Humanoid =
+        Object:FindFirstChildWhichIsA(
+            "Humanoid",
+            true
+        )
+
+    if Humanoid then
+        return Humanoid.Health > 0
+    end
+
+    local Dead =
+        Object:GetAttribute(
+            "Dead"
+        )
+
+    if Dead == true then
+        return false
+    end
+
+    local Health =
+        tonumber(
+            Object:GetAttribute(
+                "Health"
+            )
+            or Object:GetAttribute(
+                "HP"
+            )
+        )
+
+    if Health ~= nil
+        and Health <= 0
+    then
+        return false
+    end
+
+    return true
+end
+
+
+function QuestFarmController:FindTarget(
+    EnemyName
+)
+    local Folder =
+        self:GetActiveNpcsFolder()
+
+    if not Folder then
+        return nil
+    end
+
+    local Character =
+        LocalPlayer.Character
+
+    local Root =
+        Character
+        and Character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    local RootPosition =
+        Root
+        and Root.Position
+        or Vector3.zero
+
+    local BestTarget = nil
+    local BestDistance = math.huge
+    local Seen = {}
+
+    local function Consider(
+        Enemy
+    )
+        if not Enemy
+            or Seen[Enemy]
+            or Enemy.Name ~= EnemyName
+            or not (
+                Enemy:IsA("Model")
+                or Enemy:IsA("BasePart")
+            )
+            or not Enemy:IsDescendantOf(
+                Folder
+            )
+        then
+            return
+        end
+
+        Seen[Enemy] = true
+
+        if not self:IsAlive(
+            Enemy
+        ) then
+            return
+        end
+
+        local TargetRoot =
+            self:GetStableTargetRoot(
+                Enemy
+            )
+
+        if not TargetRoot
+            or not TargetRoot.Parent
+        then
+            return
+        end
+
+        local Position =
+            TargetRoot.Position
+
+        local Distance =
+            (
+                Position
+                - RootPosition
+            ).Magnitude
+
+        if Distance
+            < BestDistance
+        then
+            BestDistance =
+                Distance
+
+            BestTarget =
+                Enemy
+        end
+    end
+
+    -- Keep the known container layout fast.
+    for _, Container in ipairs(
+        Folder:GetChildren()
+    ) do
+        if Container.Name == EnemyName then
+            Consider(
+                self:GetEnemyObject(
+                    Container,
+                    EnemyName
+                )
+            )
+        end
+    end
+
+    -- Fallback: NPC replication/order can change, so also search every
+    -- descendant for a matching model/part.
+    for _, Object in ipairs(
+        Folder:GetDescendants()
+    ) do
+        Consider(
+            Object
+        )
+    end
+
+    return BestTarget
+end
+
+
+function QuestFarmController:GetCurrentTarget(
+    EnemyName
+)
+    local Folder =
+        self:GetActiveNpcsFolder()
+
+    local Target =
+        self.CurrentTarget
+
+    local TargetValid =
+        Folder
+        and Target
+        and Target.Parent
+        and Target.Name == EnemyName
+        and Target:IsDescendantOf(
+            Folder
+        )
+        and self:IsAlive(
+            Target
+        )
+        and self:GetStableTargetRoot(
+            Target
+        ) ~= nil
+
+    local Now =
+        os.clock()
+
+    local ForceRefresh =
+        Now - self.LastForcedTargetRefresh
+            >= self.ForcedTargetRefreshInterval
+
+    if TargetValid
+        and not ForceRefresh
+    then
+        return Target
+    end
+
+    local FreshTarget =
+        self:FindTarget(
+            EnemyName
+        )
+
+    self.LastForcedTargetRefresh =
+        Now
+
+    if FreshTarget then
+        self.CurrentTarget =
+            FreshTarget
+
+        return FreshTarget
+    end
+
+    if not TargetValid then
+        self.CurrentTarget =
+            nil
+
+        return nil
+    end
+
+    -- If the old target is still genuinely valid and no better target
+    -- was found, keep it instead of unnecessarily dropping the farm.
+    return Target
+end
+
+
+function QuestFarmController:GetStableTargetRoot(
+    Target
+)
+    if not Target
+        or not Target.Parent
+    then
+        return nil
+    end
+
+    if Target:IsA(
+        "BasePart"
+    ) then
+        return Target
+    end
+
+    if Target:IsA(
+        "Model"
+    ) then
+        local Root =
+            Target:FindFirstChild(
+                "HumanoidRootPart",
+                true
+            )
+            or Target.PrimaryPart
+            or Target:FindFirstChild(
+                "RootPart",
+                true
+            )
+            or Target:FindFirstChildWhichIsA(
+                "BasePart",
+                true
+            )
+
+        return Root
+    end
+
+    return Target:FindFirstChildWhichIsA(
+        "BasePart",
+        true
+    )
+end
+
+
+function QuestFarmController:UnfreezeCharacter()
+    local Root =
+        self.FrozenRoot
+
+    if Root
+        and Root.Parent
+    then
+        pcall(function()
+            Root.AssemblyLinearVelocity =
+                Vector3.zero
+
+            Root.AssemblyAngularVelocity =
+                Vector3.zero
+
+            Root.Anchored =
+                self.FrozenRootWasAnchored
+        end)
+    end
+
+    self.FrozenRoot = nil
+    self.FrozenRootWasAnchored = false
+end
+
+
+function QuestFarmController:FreezeAt(
+    Root,
+    FarmCFrame
+)
+    if not Root
+        or not Root.Parent
+    then
+        return false
+    end
+
+    self:CancelTween()
+
+    if self.FrozenRoot ~= Root then
+        self:UnfreezeCharacter()
+
+        self.FrozenRoot =
+            Root
+
+        self.FrozenRootWasAnchored =
+            Root.Anchored
+    end
+
+    Root.AssemblyLinearVelocity =
+        Vector3.zero
+
+    Root.AssemblyAngularVelocity =
+        Vector3.zero
+
+    Root.Anchored =
+        true
+
+    -- While anchored there is no physics fighting the farm CFrame,
+    -- so the player stays perfectly fixed above the enemy.
+    Root.CFrame =
+        FarmCFrame
+
+    self.LastTweenDestination =
+        FarmCFrame
+
+    return true
+end
+
+
+function QuestFarmController:CancelTween()
+    local Tween =
+        self.ActiveTween
+
+    self.ActiveTween = nil
+
+    if Tween then
+        pcall(function()
+            Tween:Cancel()
+        end)
+    end
+end
+
+
+function QuestFarmController:MoveToFarmCFrame(
+    Character,
+    Root,
+    FarmCFrame
+)
+    local IsAbove =
+        Settings.QuestFarmPosition
+        == "Above"
+
+    local Distance =
+        (
+            FarmCFrame.Position
+            - Root.Position
+        ).Magnitude
+
+    -- ABOVE MODE:
+    -- Once the tween gets close enough, anchor the HumanoidRootPart.
+    -- From that point on the character is "frozen" in the air and we
+    -- only update the exact locked CFrame as the enemy position changes.
+    if IsAbove then
+        if self.FrozenRoot == Root
+            and Root.Anchored
+        then
+            return self:FreezeAt(
+                Root,
+                FarmCFrame
+            )
+        end
+
+        if Distance
+            <= self.FreezeLockDistance
+        then
+            return self:FreezeAt(
+                Root,
+                FarmCFrame
+            )
+        end
+    else
+        self:UnfreezeCharacter()
+    end
+
+    local Now =
+        os.clock()
+
+    local DestinationMoved =
+        math.huge
+
+    if self.LastTweenDestination then
+        DestinationMoved =
+            (
+                FarmCFrame.Position
+                - self.LastTweenDestination.Position
+            ).Magnitude
+    end
+
+    -- Let the current tween keep running instead of recreating it
+    -- every scan. This is only the travel phase; Above switches to
+    -- a hard anchored lock as soon as it arrives.
+    if self.ActiveTween
+        and Now - self.LastTweenAt
+            < self.TweenRefreshInterval
+        and DestinationMoved
+            < self.TweenDestinationEpsilon
+    then
+        return true
+    end
+
+    local Speed =
+        math.clamp(
+            tonumber(
+                Settings.QuestTweenSpeed
+            )
+            or 100,
+            10,
+            300
+        )
+
+    local Duration =
+        math.max(
+            Distance / Speed,
+            0.06
+        )
+
+    self:CancelTween()
+
+    local Tween =
+        TweenService:Create(
+            Root,
+            TweenInfo.new(
+                Duration,
+                Enum.EasingStyle.Linear,
+                Enum.EasingDirection.Out
+            ),
+            {
+                CFrame = FarmCFrame,
+            }
+        )
+
+    self.ActiveTween =
+        Tween
+
+    self.LastTweenAt =
+        Now
+
+    self.LastTweenDestination =
+        FarmCFrame
+
+    Tween:Play()
+
+    return true
+end
+
+
+function QuestFarmController:HoverOverTarget(
+    Target
+)
+    local TargetCFrame =
+        self:GetTargetCFrame(
+            Target
+        )
+
+    if not TargetCFrame then
+        return false
+    end
+
+    local Character =
+        LocalPlayer.Character
+
+    local Root =
+        Character
+        and Character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not Character
+        or not Root
+    then
+        return false
+    end
+
+    local Distance =
+        math.clamp(
+            tonumber(
+                Settings.QuestFarmDistance
+            )
+            or 10,
+            3,
+            30
+        )
+
+    local Mode =
+        Settings.QuestFarmPosition
+        or "Above"
+
+    local FarmPosition
+    local FarmCFrame
+
+    if Mode == "Behind" then
+        local TargetPosition =
+            TargetCFrame.Position
+
+        FarmPosition =
+            TargetPosition
+            - (
+                TargetCFrame.LookVector
+                * Distance
+            )
+
+        FarmCFrame =
+            CFrame.lookAt(
+                FarmPosition,
+                TargetPosition,
+                Vector3.yAxis
+            )
+
+    elseif Mode == "Below" then
+        local TargetPosition =
+            TargetCFrame.Position
+
+        FarmPosition =
+            TargetPosition
+            - Vector3.new(
+                0,
+                Distance,
+                0
+            )
+
+        FarmCFrame =
+            CFrame.lookAt(
+                FarmPosition,
+                TargetPosition,
+                Vector3.new(
+                    0,
+                    0,
+                    1
+                )
+            )
+
+    else
+        -- ABOVE MODE uses the NPC's stable root instead of the animated
+        -- Model pivot / Head position. That prevents attack animations
+        -- from making the player's locked position shake.
+        local StableTargetRoot =
+            self:GetStableTargetRoot(
+                Target
+            )
+
+        if not StableTargetRoot then
+            return false
+        end
+
+        local StableTargetCFrame =
+            StableTargetRoot.CFrame
+
+        local StableTargetPosition =
+            StableTargetCFrame.Position
+
+        -- Aim approximately at the enemy's head while keeping the actual
+        -- tracking source on HumanoidRootPart for stability.
+        local HeadOffset = 2.5
+
+        local Head =
+            Target:FindFirstChild(
+                "Head",
+                true
+            )
+
+        if Head
+            and Head:IsA(
+                "BasePart"
+            )
+        then
+            HeadOffset =
+                math.clamp(
+                    Head.Position.Y
+                        - StableTargetPosition.Y,
+                    1.5,
+                    4.5
+                )
+        end
+
+        local AimPosition =
+            StableTargetPosition
+            + Vector3.new(
+                0,
+                HeadOffset,
+                0
+            )
+
+        FarmPosition =
+            AimPosition
+            + Vector3.new(
+                0,
+                Distance,
+                0
+            )
+
+        -- Use the enemy's horizontal facing direction as the roll
+        -- reference. The player's FRONT (-Z) points down at the head.
+        local StableUp =
+            Vector3.new(
+                StableTargetCFrame.LookVector.X,
+                0,
+                StableTargetCFrame.LookVector.Z
+            )
+
+        if StableUp.Magnitude
+            < 0.001
+        then
+            StableUp =
+                Vector3.new(
+                    0,
+                    0,
+                    -1
+                )
+        else
+            StableUp =
+                StableUp.Unit
+        end
+
+        FarmCFrame =
+            CFrame.lookAt(
+                FarmPosition,
+                AimPosition,
+                StableUp
+            )
+    end
+
+    return self:MoveToFarmCFrame(
+        Character,
+        Root,
+        FarmCFrame
+    )
+end
+
+
+function QuestFarmController:ResetTarget()
+    self.CurrentTarget = nil
+    self:CancelTween()
+    self:UnfreezeCharacter()
+
+    self.LastTweenAt = 0
+    self.LastTweenDestination = nil
+    self.LastForcedTargetRefresh = 0
+end
+
+
+function QuestFarmController:Start()
+    self.LoopID += 1
+
+    local MyLoopID =
+        self.LoopID
+
+    self:ResetTarget()
+    self:EnsureSpawnWatcher()
+
+    task.spawn(function()
+        while HubRunning
+            and Settings.AutoFarmQuest
+            and MyLoopID == self.LoopID
+        do
+            local Success,
+                ErrorMessage =
+                pcall(function()
+                    self:EnsureSpawnWatcher()
+
+                    local Config =
+                        QuestController:GetConfig()
+
+                    local Card =
+                        Config
+                        and QuestController:FindQuestCard(
+                            Config
+                        )
+                        or nil
+
+                    local QuestActive =
+                        Config
+                        and Config.EnemyName
+                        and Card
+                        and not QuestController:IsComplete(
+                            Card,
+                            Config
+                        )
+
+                    if not QuestActive then
+                        self:ResetTarget()
+                        return
+                    end
+
+                    local Target =
+                        self:GetCurrentTarget(
+                            Config.EnemyName
+                        )
+
+                    if Target then
+                        self:HoverOverTarget(
+                            Target
+                        )
+                    else
+                        -- Do NOT stop the farm worker when the current wave
+                        -- is empty. Keep the loop alive and force another
+                        -- target search as soon as anything respawns.
+                        self.CurrentTarget =
+                            nil
+                    end
+                end)
+
+            if not Success then
+                warn(
+                    "[Combat Hub] Auto Farm Quest recovered: "
+                        .. tostring(
+                            ErrorMessage
+                        )
+                )
+
+                self.CurrentTarget =
+                    nil
+
+                self.LastForcedTargetRefresh =
+                    0
+            end
+
+            task.wait(
+                self.UpdateInterval
+            )
+        end
+    end)
+end
+
+
+function QuestFarmController:Stop()
+    Settings.AutoFarmQuest =
+        false
+
+    self.LoopID += 1
+    self:ResetTarget()
+    self:DisconnectSpawnWatcher()
+end
+
+
+local MainRow =
+    MainTab:CreateGroup()
+
+MainRow:CreateToggle({
+    name = "Auto Click",
     value = false,
-    flag = "AutoSwing",
+    flag = "AutoClick",
 
     callback = function(Value)
-        Settings.AutoSwing =
-            Value
+        Settings.AutoClick = Value
+
+        if Value then
+            StartAutoClick()
+        else
+            StopAutoClick()
+        end
 
         Toast(
-            "Auto Swing",
+            "Auto Click",
+            Value and "Enabled" or "Disabled"
+        )
+    end,
+})
+
+MainRow:CreateToggle({
+    name = "Auto Open Chest",
+    value = false,
+    flag = "AutoOpenChest",
+
+    callback = function(Value)
+        Settings.AutoOpenChest = Value
+
+        if Value then
+            StartAutoOpenChest()
+        else
+            StopAutoOpenChest()
+        end
+
+        Toast(
+            "Auto Open Chest",
+            Value and "Enabled" or "Disabled"
+        )
+    end,
+})
+
+MainRow:CreateToggle({
+    name = "Auto Pick Up Loot",
+    value = false,
+    flag = "AutoPickUpLoot",
+
+    callback = function(Value)
+        Settings.AutoPickUpLoot =
+            Value
+
+        if Value then
+            StartAutoPickUpLoot()
+        else
+            StopAutoPickUpLoot()
+        end
+
+        Toast(
+            "Auto Pick Up Loot",
+            Value and "Enabled" or "Disabled"
+        )
+    end,
+})
+
+
+MainTab:CreateDropdown({
+    name = "Weapon Slot",
+    options = {
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+    },
+    value = "1",
+    flag = "WeaponSlot",
+
+    callback = function(Value)
+        local Slot =
+            tonumber(Value)
+
+        if not Slot
+            or Slot < 1
+            or Slot > 5
+        then
+            return
+        end
+
+        EquipWeaponSlot(
+            Slot
+        )
+
+        Toast(
+            "Weapon Slot",
+            "Equipped Slot "
+                .. tostring(
+                    Slot
+                )
+        )
+    end,
+})
+
+
+local WeaponSlotRow =
+    MainTab:CreateGroup()
+
+WeaponSlotRow:CreateToggle({
+    name = "Auto Equip Slot",
+    value = false,
+    flag = "AutoEquipSlot",
+
+    callback = function(Value)
+        Settings.AutoEquipSlot =
+            Value
+
+        if Value then
+            task.defer(function()
+                EquipWeaponSlot(
+                    Settings.WeaponSlot
+                )
+            end)
+        end
+
+        Toast(
+            "Auto Equip Slot",
+            Value
+                and (
+                    "Keeping Slot "
+                    .. tostring(
+                        Settings.WeaponSlot
+                    )
+                    .. " equipped"
+                )
+                or "Disabled"
+        )
+    end,
+})
+
+
+MainTab:CreateDropdown({
+    name = "Loot Rarity",
+    options = LootRarities,
+    value = "Any",
+    flag = "LootRarity",
+
+    callback = function(Value)
+        Settings.LootRarity =
+            Value or "Any"
+
+        -- Re-scan when changing rarity so existing drops matching
+        -- the new selection can be picked up immediately.
+        table.clear(
+            LootPromptLastAttempt
+        )
+
+        if Settings.AutoPickUpLoot then
+            StartAutoPickUpLoot()
+        end
+
+        Toast(
+            "Loot Rarity",
+            tostring(
+                Settings.LootRarity
+            )
+        )
+    end,
+})
+
+
+MainTab:CreateDivider()
+
+
+MainTab:CreateDropdown({
+    name = "Quest",
+    options = QuestController.Order,
+    value = "Ill take 3 bandits",
+    flag = "SelectedQuest",
+
+    callback = function(Value)
+        if not QuestController.Configs[
+            Value
+        ] then
+            return
+        end
+
+        Settings.SelectedQuest =
+            Value
+
+        QuestController:ResetState()
+        QuestFarmController:ResetTarget()
+
+        if Settings.AutoQuest then
+            task.defer(function()
+                QuestController:AcceptSelected()
+            end)
+        end
+
+        Toast(
+            "Quest",
+            tostring(Value)
+        )
+    end,
+})
+
+
+MainTab:CreateDropdown({
+    name = "Quest Farm Position",
+    options = {
+        "Above",
+        "Behind",
+        "Below",
+    },
+    value = "Above",
+    flag = "QuestFarmPosition",
+
+    callback = function(Value)
+        Settings.QuestFarmPosition =
+            Value or "Above"
+
+        QuestFarmController:ResetTarget()
+
+        Toast(
+            "Quest Farm Position",
+            tostring(
+                Settings.QuestFarmPosition
+            )
+        )
+    end,
+})
+
+
+MainTab:CreateSlider({
+    name = "Quest Farm Distance",
+    range = {
+        3,
+        30,
+    },
+    increment = 1,
+    value = 10,
+    suffix = " studs",
+    flag = "QuestFarmDistance",
+
+    callback = function(Value)
+        Settings.QuestFarmDistance =
+            tonumber(Value)
+            or 10
+    end,
+})
+
+
+MainTab:CreateSlider({
+    name = "Quest Farm Speed",
+    range = {
+        25,
+        250,
+    },
+    increment = 5,
+    value = 100,
+    suffix = " studs/s",
+    flag = "QuestTweenSpeed",
+
+    callback = function(Value)
+        Settings.QuestTweenSpeed =
+            tonumber(Value)
+            or 100
+    end,
+})
+
+
+local QuestRow =
+    MainTab:CreateGroup()
+
+QuestRow:CreateToggle({
+    name = "Auto Quest",
+    value = false,
+    flag = "AutoQuest",
+
+    callback = function(Value)
+        Settings.AutoQuest =
+            Value
+
+        if Value then
+            QuestController:Start()
+        else
+            QuestController:Stop()
+        end
+
+        Toast(
+            "Auto Quest",
             Value
                 and "Enabled"
                 or "Disabled"
@@ -377,9 +3089,42 @@ MainTab:CreateToggle({
 })
 
 
---// ============================================================
---// UNLOAD
---// ============================================================
+QuestRow:CreateToggle({
+    name = "Auto Farm Quest",
+    value = false,
+    flag = "AutoFarmQuest",
+
+    callback = function(Value)
+        Settings.AutoFarmQuest =
+            Value
+
+        if Value then
+            QuestFarmController:Start()
+        else
+            QuestFarmController:Stop()
+        end
+
+        Toast(
+            "Auto Farm Quest",
+            Value
+                and "Enabled"
+                or "Disabled"
+        )
+    end,
+})
+
+local SettingsRow =
+    SettingsTab:CreateGroup()
+
+SettingsRow:CreateToggle({
+    name = "Anti AFK",
+    value = true,
+    flag = "AntiAFK",
+
+    callback = function(Value)
+        Settings.AntiAFK = Value
+    end,
+})
 
 local function UnloadHub()
     if not HubRunning then
@@ -387,28 +3132,45 @@ local function UnloadHub()
     end
 
     HubRunning = false
-    Settings.AutoSwing = false
+    Settings.AutoEquipSlot = false
+    StopAutoClick()
+    StopAutoOpenChest()
+    StopAutoPickUpLoot()
+    QuestController:Stop()
+    QuestFarmController:Stop()
+    Settings.AntiAFK = false
+
+    if ChestAddedConnection then
+        ChestAddedConnection:Disconnect()
+        ChestAddedConnection = nil
+    end
+
+    if LootAddedConnection then
+        LootAddedConnection:Disconnect()
+        LootAddedConnection = nil
+    end
+
+    if AntiAFKConnection then
+        AntiAFKConnection:Disconnect()
+        AntiAFKConnection = nil
+    end
 
     pcall(function()
         Window:Unload()
     end)
 
-    getgenv().__HOLLOWMOON_NEWGAME_UNLOAD =
-        nil
+    getgenv().__HOLLOWMOON_AUTOCLICK_UNLOAD = nil
 end
 
-
-getgenv().__HOLLOWMOON_NEWGAME_UNLOAD =
+getgenv().__HOLLOWMOON_AUTOCLICK_UNLOAD =
     UnloadHub
-
 
 SettingsTab:CreateButton({
     name = "Unload Hub",
     callback = UnloadHub,
 })
 
-
 Toast(
-    "HollowMoonHub",
-    "Auto Swing ready"
+    "Combat Hub",
+    "Combat + Chest/Loot + Auto Quest Farm ready"
 )
