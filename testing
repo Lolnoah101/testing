@@ -1265,10 +1265,15 @@ local QuestController = {
             EnemyName = "Bear Cub",
             RegionName = "Bamboo Grove",
 
-            -- We do not have the Bamboo Grove quest-giver path yet.
-            -- Do not teleport back to Krue for this quest; use the
-            -- verified AddQuest request directly and keep retrying it.
-            SkipQuestNPCTeleport = true,
+            -- Bamboo Grove quest giver:
+            -- workspace.Debree.Regions["Bamboo Grove"].StationaryNpcs.Tom
+            NPCPath = {
+                "Debree",
+                "Regions",
+                "Bamboo Grove",
+                "StationaryNpcs",
+                "Tom",
+            },
 
             -- Flexible UI matching until an exact quest-card name/path
             -- is captured. "bear" + "cub" avoids matching a Mother Bear
@@ -1677,9 +1682,8 @@ function QuestController:AcceptSelected()
     self.Busy = true
 
     -- Teleport to the configured quest NPC once per acceptance cycle.
-    -- The Bamboo Grove Bear Cub quest currently has no captured quest-NPC
-    -- path, so it intentionally skips this step instead of teleporting
-    -- back to Krue in Windy Peak.
+    -- Windy Peak quests use Krue by default; Bamboo Grove bear quests
+    -- can provide Tom through Config.NPCPath.
     if not self.TeleportedForAcceptance then
         if not Config.SkipQuestNPCTeleport then
             local TeleportSuccess,
