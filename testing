@@ -1582,19 +1582,56 @@ function QuestController:GetObjectCFrame(
     end
 
     if Object:IsA(
-        "Model"
-    ) then
-        return Object:GetPivot()
-    end
-
-    if Object:IsA(
         "Attachment"
     ) then
         return Object.WorldCFrame
     end
 
+    if Object:IsA(
+        "Model"
+    ) then
+        -- Prefer the NPC's actual body/root instead of Model:GetPivot().
+        -- Some NPC models have a pivot that is offset from the visible NPC.
+        local Part =
+            Object:FindFirstChild(
+                "HumanoidRootPart",
+                true
+            )
+            or Object.PrimaryPart
+            or Object:FindFirstChild(
+                "UpperTorso",
+                true
+            )
+            or Object:FindFirstChild(
+                "Torso",
+                true
+            )
+            or Object:FindFirstChild(
+                "Head",
+                true
+            )
+            or Object:FindFirstChildWhichIsA(
+                "BasePart",
+                true
+            )
+
+        if Part
+            and Part:IsA(
+                "BasePart"
+            )
+        then
+            return Part.CFrame
+        end
+
+        return Object:GetPivot()
+    end
+
     local Part =
-        Object:FindFirstChildWhichIsA(
+        Object:FindFirstChild(
+            "HumanoidRootPart",
+            true
+        )
+        or Object:FindFirstChildWhichIsA(
             "BasePart",
             true
         )
@@ -1613,6 +1650,11 @@ function QuestController:TeleportToQuestNPC(
             Config
         )
 
+    if not NPC then
+        return false,
+            "Quest NPC was not found at the configured path"
+    end
+
     local Target =
         self:GetObjectCFrame(
             NPC
@@ -1620,7 +1662,7 @@ function QuestController:TeleportToQuestNPC(
 
     if not Target then
         return false,
-            "Quest NPC was not found"
+            "Quest NPC has no usable body/root part"
     end
 
     local Character =
@@ -1641,15 +1683,61 @@ function QuestController:TeleportToQuestNPC(
             "HumanoidRootPart was not found"
     end
 
-    -- Small offset keeps the character from spawning inside Krue.
-    Character:PivotTo(
+    -- Auto Farm's Above mode can leave the root anchored for a moment
+    -- while the quest changes. Unanchor and stop all movement first so
+    -- the quest teleport cannot be immediately fought by old physics.
+    Root.Anchored =
+        false
+
+    Root.AssemblyLinearVelocity =
+        Vector3.zero
+
+    Root.AssemblyAngularVelocity =
+        Vector3.zero
+
+    local Destination =
         Target
         * CFrame.new(
             0,
             2.5,
             4
         )
-    )
+
+    -- Move both the character model and root. Re-applying briefly makes
+    -- the teleport survive character/network updates that happen on the
+    -- same frame as a quest completion.
+    local Success,
+        ErrorMessage =
+        pcall(function()
+            Character:PivotTo(
+                Destination
+            )
+
+            Root.CFrame =
+                Destination
+
+            task.wait(0.06)
+
+            if Root.Parent
+                and Character.Parent
+            then
+                Root.AssemblyLinearVelocity =
+                    Vector3.zero
+
+                Root.AssemblyAngularVelocity =
+                    Vector3.zero
+
+                Root.CFrame =
+                    Destination
+            end
+        end)
+
+    if not Success then
+        return false,
+            tostring(
+                ErrorMessage
+            )
+    end
 
     return true
 end
