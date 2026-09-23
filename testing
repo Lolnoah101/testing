@@ -1236,6 +1236,7 @@ local QuestController = {
     Order = {
         "Ill take 3 bandits",
         "Ill take the bandit boss(Lv 7)",
+        "Ill drive the bears back(Lv 10)",
     },
 
     Configs = {
@@ -1256,6 +1257,25 @@ local QuestController = {
             MatchTerms = {
                 "bandit",
                 "boss",
+            },
+        },
+
+        ["Ill drive the bears back(Lv 10)"] = {
+            Request = "Ill drive the bears back(Lv 10)",
+            EnemyName = "Bear Cub",
+            RegionName = "Bamboo Grove",
+
+            -- We do not have the Bamboo Grove quest-giver path yet.
+            -- Do not teleport back to Krue for this quest; use the
+            -- verified AddQuest request directly and keep retrying it.
+            SkipQuestNPCTeleport = true,
+
+            -- Flexible UI matching until an exact quest-card name/path
+            -- is captured. "bear" + "cub" avoids matching a Mother Bear
+            -- quest once that one is added.
+            MatchTerms = {
+                "bear",
+                "cub",
             },
         },
     },
@@ -1510,12 +1530,23 @@ function QuestController:IsComplete(
 end
 
 
-function QuestController:GetNPC()
+function QuestController:GetNPC(
+    Config
+)
+    local Path =
+        Config
+        and Config.NPCPath
+        or self.NPCPath
+
+    if not Path then
+        return nil
+    end
+
     local Current =
         workspace
 
     for _, Name in ipairs(
-        self.NPCPath
+        Path
     ) do
         Current =
             Current
@@ -1569,9 +1600,13 @@ function QuestController:GetObjectCFrame(
 end
 
 
-function QuestController:TeleportToKrue()
+function QuestController:TeleportToQuestNPC(
+    Config
+)
     local NPC =
-        self:GetNPC()
+        self:GetNPC(
+            Config
+        )
 
     local Target =
         self:GetObjectCFrame(
@@ -1580,7 +1615,7 @@ function QuestController:TeleportToKrue()
 
     if not Target then
         return false,
-            "Krue was not found"
+            "Quest NPC was not found"
     end
 
     local Character =
@@ -1641,31 +1676,36 @@ function QuestController:AcceptSelected()
 
     self.Busy = true
 
-    -- Teleport to Krue once for this acceptance cycle.
-    -- If AddQuest needs to be retried while the UI catches up,
-    -- stay beside Krue instead of repeatedly teleporting.
+    -- Teleport to the configured quest NPC once per acceptance cycle.
+    -- The Bamboo Grove Bear Cub quest currently has no captured quest-NPC
+    -- path, so it intentionally skips this step instead of teleporting
+    -- back to Krue in Windy Peak.
     if not self.TeleportedForAcceptance then
-        local TeleportSuccess,
-            TeleportError =
-            self:TeleportToKrue()
+        if not Config.SkipQuestNPCTeleport then
+            local TeleportSuccess,
+                TeleportError =
+                self:TeleportToQuestNPC(
+                    Config
+                )
 
-        if not TeleportSuccess then
-            self.Busy = false
+            if not TeleportSuccess then
+                self.Busy = false
 
-            warn(
-                "[Combat Hub] Auto Quest: "
-                    .. tostring(
-                        TeleportError
-                    )
-            )
+                warn(
+                    "[Combat Hub] Auto Quest: "
+                        .. tostring(
+                            TeleportError
+                        )
+                )
 
-            return false
+                return false
+            end
+
+            task.wait(0.30)
         end
 
         self.TeleportedForAcceptance =
             true
-
-        task.wait(0.30)
     end
 
     local Success, ErrorMessage =
@@ -1829,6 +1869,14 @@ local QuestFarmController = {
 
 
 function QuestFarmController:GetActiveNpcsFolder()
+    local Config =
+        QuestController:GetConfig()
+
+    local RegionName =
+        Config
+        and Config.RegionName
+        or "Windy Peak"
+
     local Humanoids =
         workspace:FindFirstChild(
             "Humanoids"
@@ -1840,14 +1888,14 @@ function QuestFarmController:GetActiveNpcsFolder()
             "Regions"
         )
 
-    local WindyPeak =
+    local Region =
         Regions
         and Regions:FindFirstChild(
-            "Windy Peak"
+            RegionName
         )
 
-    return WindyPeak
-        and WindyPeak:FindFirstChild(
+    return Region
+        and Region:FindFirstChild(
             "ActiveNpcs"
         )
 end
@@ -1930,9 +1978,9 @@ function QuestFarmController:GetEnemyObject(
         return nil
     end
 
-    -- Current structure is commonly:
-    -- ActiveNpcs.Bandit.Bandit
-    -- ActiveNpcs.Zuko.Zuko
+    -- Known structures include:
+    -- Windy Peak: ActiveNpcs.Bandit.Bandit / Zuko.Zuko
+    -- Bamboo Grove: a container containing "Bear Cub"
     local NamedChild =
         Container:FindFirstChild(
             EnemyName
