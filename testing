@@ -1,0 +1,408 @@
+--// ============================================================
+--// HOLLOWMOONHUB - NEW GAME
+--// Auto Swing + Unload
+--// ============================================================
+
+local Players =
+    game:GetService("Players")
+
+local Workspace =
+    game:GetService("Workspace")
+
+local VirtualUser =
+    game:GetService("VirtualUser")
+
+local VirtualInputManager =
+    game:GetService("VirtualInputManager")
+
+local LocalPlayer =
+    Players.LocalPlayer
+
+
+--// ============================================================
+--// CLEAN OLD COPY
+--// ============================================================
+
+if getgenv().__HOLLOWMOON_NEWGAME_UNLOAD then
+    pcall(
+        getgenv().__HOLLOWMOON_NEWGAME_UNLOAD
+    )
+
+    getgenv().__HOLLOWMOON_NEWGAME_UNLOAD =
+        nil
+end
+
+
+--// ============================================================
+--// RAYFIELD GEN2 LOADER
+--// ============================================================
+
+local function IsRayfieldLibrary(Value)
+    return type(Value) == "table"
+        and type(
+            Value.CreateWindow
+        ) == "function"
+end
+
+
+local function LoadRayfield()
+    local Environment =
+        type(getgenv) == "function"
+        and getgenv()
+        or _G
+
+    local CachedLibrary =
+        Environment
+            .__HOLLOWMOON_RAYFIELD_GEN2
+
+    if IsRayfieldLibrary(
+        CachedLibrary
+    ) then
+        return CachedLibrary
+    end
+
+    local URLs = {
+        "https://sirius.menu/gen2",
+        "https://sirius.menu/gen2-preview",
+    }
+
+    local LastError =
+        "Unknown Rayfield loader error"
+
+    for _, URL in ipairs(
+        URLs
+    ) do
+        for Attempt = 1, 6 do
+            local Success,
+                Source =
+                pcall(function()
+                    return game:HttpGet(
+                        URL,
+                        false
+                    )
+                end)
+
+            if Success
+                and type(Source) == "string"
+                and Source ~= ""
+            then
+                local Chunk,
+                    CompileError =
+                    loadstring(
+                        Source
+                    )
+
+                if Chunk then
+                    local RunSuccess,
+                        Library =
+                        pcall(
+                            Chunk
+                        )
+
+                    if RunSuccess
+                        and IsRayfieldLibrary(
+                            Library
+                        )
+                    then
+                        Environment
+                            .__HOLLOWMOON_RAYFIELD_GEN2 =
+                                Library
+
+                        return Library
+                    end
+
+                    LastError =
+                        RunSuccess
+                        and "Rayfield did not return CreateWindow"
+                        or tostring(
+                            Library
+                        )
+                else
+                    LastError =
+                        tostring(
+                            CompileError
+                        )
+                end
+            else
+                LastError =
+                    Success
+                    and (
+                        "Empty response from "
+                        .. URL
+                    )
+                    or tostring(
+                        Source
+                    )
+            end
+
+            if Attempt < 6 then
+                task.wait(
+                    math.min(
+                        Attempt * 0.5,
+                        2
+                    )
+                )
+            end
+        end
+    end
+
+    error(
+        "[HollowMoonHub] Rayfield failed: "
+            .. tostring(
+                LastError
+            ),
+        0
+    )
+end
+
+
+local Rayfield =
+    LoadRayfield()
+
+
+--// ============================================================
+--// STATE
+--// ============================================================
+
+local Settings = {
+    AutoSwing = false,
+}
+
+local HubRunning = true
+
+
+--// ============================================================
+--// UI
+--// ============================================================
+
+local Window =
+    Rayfield:CreateWindow({
+        name = "HollowMoonHub",
+        subtitle = "New Game",
+        sidebarLayout = true,
+        theme = "cobalt",
+        fallbackFont = Enum.Font.Gotham,
+
+        configuration = {
+            autoSave = true,
+            autoLoad = true,
+            fileName = "NewGame_AutoSwing",
+            customFolder = "HollowMoonHub",
+        },
+    })
+
+
+Window:CreateSection({
+    name = "Automation",
+})
+
+
+local MainTab =
+    Window:CreateTab({
+        name = "Main",
+    })
+
+
+Window:CreateSection({
+    name = "Interface",
+})
+
+
+local SettingsTab =
+    Window:CreateTab({
+        name = "Settings",
+    })
+
+
+local function Toast(
+    Title,
+    Subtitle
+)
+    pcall(function()
+        Window:Toast({
+            title = Title,
+            subtitle = Subtitle or "",
+            duration = 3,
+        })
+    end)
+end
+
+
+--// ============================================================
+--// AUTO SWING
+--//
+--// The game's TrainOnceRE argument changes between swings.
+--// This avoids guessing that changing value and instead triggers
+--// the normal swing input so the game's own LocalScript can produce
+--// the correct current argument each time.
+--// ============================================================
+
+local function SwingOnce()
+    if not HubRunning
+        or not Settings.AutoSwing
+    then
+        return false
+    end
+
+    local Camera =
+        Workspace.CurrentCamera
+
+    local ViewportSize =
+        Camera
+        and Camera.ViewportSize
+        or Vector2.new(
+            800,
+            600
+        )
+
+    local X =
+        math.floor(
+            ViewportSize.X * 0.5
+        )
+
+    local Y =
+        math.floor(
+            ViewportSize.Y * 0.5
+        )
+
+    local InputSuccess =
+        pcall(function()
+            VirtualInputManager
+                :SendMouseButtonEvent(
+                    X,
+                    Y,
+                    0,
+                    true,
+                    game,
+                    0
+                )
+
+            task.wait(0.025)
+
+            VirtualInputManager
+                :SendMouseButtonEvent(
+                    X,
+                    Y,
+                    0,
+                    false,
+                    game,
+                    0
+                )
+        end)
+
+    if InputSuccess then
+        return true
+    end
+
+    local FallbackSuccess =
+        pcall(function()
+            local CameraCFrame =
+                Camera
+                and Camera.CFrame
+                or CFrame.new()
+
+            VirtualUser:CaptureController()
+
+            VirtualUser:Button1Down(
+                Vector2.new(
+                    X,
+                    Y
+                ),
+                CameraCFrame
+            )
+
+            task.wait(0.025)
+
+            VirtualUser:Button1Up(
+                Vector2.new(
+                    X,
+                    Y
+                ),
+                CameraCFrame
+            )
+        end)
+
+    return FallbackSuccess
+end
+
+
+task.spawn(function()
+    while HubRunning do
+        if Settings.AutoSwing then
+            local Success,
+                ErrorMessage =
+                pcall(
+                    SwingOnce
+                )
+
+            if not Success then
+                warn(
+                    "[HollowMoonHub] Auto Swing: "
+                        .. tostring(
+                            ErrorMessage
+                        )
+                )
+            end
+
+            task.wait(0.08)
+        else
+            task.wait(0.15)
+        end
+    end
+end)
+
+
+MainTab:CreateToggle({
+    name = "Auto Swing",
+    value = false,
+    flag = "AutoSwing",
+
+    callback = function(Value)
+        Settings.AutoSwing =
+            Value
+
+        Toast(
+            "Auto Swing",
+            Value
+                and "Enabled"
+                or "Disabled"
+        )
+    end,
+})
+
+
+--// ============================================================
+--// UNLOAD
+--// ============================================================
+
+local function UnloadHub()
+    if not HubRunning then
+        return
+    end
+
+    HubRunning = false
+    Settings.AutoSwing = false
+
+    pcall(function()
+        Window:Unload()
+    end)
+
+    getgenv().__HOLLOWMOON_NEWGAME_UNLOAD =
+        nil
+end
+
+
+getgenv().__HOLLOWMOON_NEWGAME_UNLOAD =
+    UnloadHub
+
+
+SettingsTab:CreateButton({
+    name = "Unload Hub",
+    callback = UnloadHub,
+})
+
+
+Toast(
+    "HollowMoonHub",
+    "Auto Swing ready"
+)
