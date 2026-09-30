@@ -1,5 +1,5 @@
 --[[
-    Full Auto Fishing v15.6 - ISLAND TWEEN 70 SLIDER
+    Full Auto Fishing v16 - BOAT PROGRESSION + WATER LOOK + ROD RECOVERY
     Target place: Place_99925503388128
 
     Modes:
@@ -26,6 +26,7 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local CollectionService = game:GetService("CollectionService")
+local PathfindingService = game:GetService("PathfindingService")
 
 local LocalPlayer = Players.LocalPlayer
 local ENV = (getgenv and getgenv()) or _G
@@ -35,6 +36,7 @@ local ENV = (getgenv and getgenv()) or _G
 --==============================================================
 
 for _, key in ipairs({
+    "__FULL_AUTO_FISHING_DUAL_V16",
     "__FULL_AUTO_FISHING_DUAL_V15_6",
     "__FULL_AUTO_FISHING_DUAL_V15_5",
     "__FULL_AUTO_FISHING_DUAL_V15_1",
@@ -92,6 +94,22 @@ local FishingPackets = require(
         :WaitForChild("Packets")
         :WaitForChild("FishingPackets")
 )
+
+local CastMapGuard = nil
+
+pcall(function()
+    CastMapGuard = require(
+        ReplicatedStorage:WaitForChild("Controllers")
+            :WaitForChild("FishingController")
+            :WaitForChild("CastMapGuard")
+    )
+end)
+
+local SpawnCarPacket =
+    Stardust.Packet(
+        "SpawnCarEvent",
+        Stardust.Packet.String
+    )
 
 local Catalog = require(
     ReplicatedStorage:WaitForChild("Data")
@@ -227,6 +245,7 @@ local CodeRedeemController = waitForController("CodeRedeemController")
 local Config = {
     Enabled = false,
     Mode = "Legit",
+    AutoLookAtWater = false,
 
     -- Full Auto Fishing uses the strongest safe built-in timings.
     -- These are intentionally not exposed as UI sliders anymore.
@@ -312,6 +331,9 @@ local Config = {
     ProgressionAutoEnableFishing = false,
     ProgressionStopAtGoal = true,
     ProgressionCheckInterval = 1.0,
+    ProgressionUseFreeBoat = true,
+    ProgressionBoatArrivalRadius = 135,
+    ProgressionBoatTimeout = 120,
 
     -- Skill Rotation
     SkillRotationMode = "Strongest Ready",
@@ -428,6 +450,7 @@ local State = {
     RodMissingSince = 0,
     LastRodWatchCheck = 0,
     RodRecoveryBusy = false,
+    RodRecoveryHoldUntil = 0,
     RodWatchStatus = "Idle",
     SkillTransferBusy = false,
     SkillTransferStatus = "Idle",
@@ -468,6 +491,15 @@ local State = {
     ProgressionTargetQuestId = nil,
     ProgressionPurchases = 0,
     ProgressionUnlocks = 0,
+    ProgressionNavigationBusy = false,
+    ProgressionNavigationStatus = "Idle",
+    ProgressionBoatTargetIslandId = "",
+    ProgressionBoatLastSpawnAt = 0,
+    BoatKeyState = {
+        W = false,
+        A = false,
+        D = false,
+    },
 
     -- Session / targets
     SessionStartedAt = os.clock(),
@@ -478,6 +510,8 @@ local State = {
     CatchByFish = {},
     TargetStopReason = "",
     CurrentFishModel = nil,
+    WaterLookStatus = "Idle",
+    LastWaterLookAt = 0,
 
     -- Skill / equipment extras
     LastExtraEquipmentCheck = 0,
@@ -552,7 +586,7 @@ local API = {
     State = State,
 }
 
-ENV.__FULL_AUTO_FISHING_DUAL_V15_6 = API
+ENV.__FULL_AUTO_FISHING_DUAL_V16 = API
 
 --==============================================================
 -- HELPERS
@@ -560,12 +594,12 @@ ENV.__FULL_AUTO_FISHING_DUAL_V15_6 = API
 
 local function log(...)
     if Config.Debug then
-        print("[FishingV15.6]", ...)
+        print("[FishingV16]", ...)
     end
 end
 
 local function warnf(...)
-    warn("[FishingV15.6]", ...)
+    warn("[FishingV16]", ...)
 end
 
 local function track(connection)
@@ -846,6 +880,203 @@ local function getWaterY()
     return 0
 end
 
+local WATER_LOOK_OFFSETS = {
+    0,
+    15, -15,
+    30, -30,
+    45, -45,
+    60, -60,
+    75, -75,
+    90, -90,
+    105, -105,
+    120, -120,
+    135, -135,
+    150, -150,
+    165, -165,
+    180,
+}
+
+local function isCastPointMapBlocked(root, target)
+    local world = workspace:FindFirstChild("World")
+    local islands =
+        world and world:FindFirstChild("Islands")
+
+    if not islands then
+        return false
+    end
+
+    if CastMapGuard and CastMapGuard.IsBlocked then
+        local ok, blocked = pcall(function()
+            return CastMapGuard.IsBlocked(
+                root,
+                target,
+                islands
+            )
+        end)
+
+        if ok then
+            return blocked == true
+        end
+    end
+
+    local params = RaycastParams.new()
+    params.FilterType =
+        Enum.RaycastFilterType.Include
+    params.FilterDescendantsInstances = {
+        islands,
+    }
+
+    return workspace:Raycast(
+        target + Vector3.new(0, 100, 0),
+        Vector3.new(0, -100, 0),
+        params
+    ) ~= nil
+end
+
+local function findClearWaterFacing()
+    local character = LocalPlayer.Character
+    local root =
+        character
+        and character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    local humanoid =
+        character
+        and character:FindFirstChildOfClass(
+            "Humanoid"
+        )
+
+    if not root
+        or not root:IsA("BasePart")
+        or not humanoid
+        or humanoid.Health <= 0 then
+        return nil, nil
+    end
+
+    if humanoid.SeatPart ~= nil
+        or humanoid.Sit
+        or humanoid:GetState()
+            == Enum.HumanoidStateType.Swimming then
+        return nil, nil
+    end
+
+    local islandId = getCurrentIslandId()
+
+    if islandId == "" then
+        return nil, nil
+    end
+
+    local look = Vector3.new(
+        root.CFrame.LookVector.X,
+        0,
+        root.CFrame.LookVector.Z
+    )
+
+    if look.Magnitude < 0.001 then
+        look = Vector3.new(0, 0, -1)
+    else
+        look = look.Unit
+    end
+
+    local waterY = getWaterY()
+    local powers =
+        FishingConfig.AutoFishing
+        and FishingConfig.AutoFishing.CastProbePowers
+        or { 1, 0.75, 0.5, 0.25 }
+
+    for _, offset in ipairs(
+        WATER_LOOK_OFFSETS
+    ) do
+        local rotation =
+            CFrame.Angles(
+                0,
+                math.rad(offset),
+                0
+            )
+
+        local direction =
+            rotation:VectorToWorldSpace(look)
+
+        direction = Vector3.new(
+            direction.X,
+            0,
+            direction.Z
+        ).Unit
+
+        for _, power in ipairs(powers) do
+            local distance =
+                FishingConfig.Cast.BaitMinDist
+                + power
+                    * (
+                        FishingConfig.Cast.BaitMaxDist
+                        - FishingConfig.Cast.BaitMinDist
+                    )
+
+            local target = Vector3.new(
+                root.Position.X
+                    + direction.X * distance,
+                waterY,
+                root.Position.Z
+                    + direction.Z * distance
+            )
+
+            if not isCastPointMapBlocked(
+                root,
+                target
+            ) then
+                return direction, target
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+local function ensureLookingAtWater()
+    if not Config.AutoLookAtWater then
+        return true
+    end
+
+    if Config.AutoBossFarm
+        and State.BossSessionActive then
+        return true
+    end
+
+    local direction, target =
+        findClearWaterFacing()
+
+    if not direction then
+        State.WaterLookStatus =
+            "No clear water within cast range"
+        return false
+    end
+
+    local character = LocalPlayer.Character
+    local root =
+        character
+        and character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not root
+        or not root:IsA("BasePart") then
+        return false
+    end
+
+    root.CFrame =
+        CFrame.lookAt(
+            root.Position,
+            root.Position + direction
+        )
+
+    State.WaterLookStatus =
+        "Facing clear water"
+    State.LastWaterLookAt = os.clock()
+
+    return true
+end
+
 local function calculateCastTarget(power)
     if Config.AutoBossFarm
         and State.BossSessionActive
@@ -886,7 +1117,14 @@ local function hasEquippedRod()
         return true
     end
 
-    return data.RodEquip ~= nil and data.RodEquip ~= ""
+    local rodId = data.RodEquip
+
+    return type(rodId) == "string"
+        and rodId ~= ""
+        and rodId ~= "None"
+        and type(data.Rods) == "table"
+        and data.Rods[rodId] ~= nil
+        and Catalog.Rod.GetById(rodId) ~= nil
 end
 
 local function sendOPCast()
@@ -897,6 +1135,12 @@ local function sendOPCast()
     if not hasEquippedRod() then
         State.NextCastAt = os.clock() + 1
         log("OP cast skipped: equip a rod")
+        return false
+    end
+
+    if not ensureLookingAtWater() then
+        State.NextCastAt =
+            os.clock() + 0.50
         return false
     end
 
@@ -1528,6 +1772,10 @@ local SKILL_KEYS = {
 
 local function handleLegitIdling(now)
     if now - State.LastCastStarted < Config.RecastDelay then
+        return
+    end
+
+    if not ensureLookingAtWater() then
         return
     end
 
@@ -2185,25 +2433,19 @@ local function resetFishingAfterSell()
     State.NextSkillAt = 0
     State.NextLootClickAt = 0
 
-    -- Force the rod watchdog to revalidate the rod after the inventory/sell
-    -- trip. This fixes Legit mode getting stuck after returning.
-    State.LastObservedRodId = nil
+    -- The sell path only starts while fishing is already idle.
+    -- Do not send another FishCancel or pretend the rod changed; both
+    -- can leave the client loadout/backpack locked during a teleport.
     State.LastRodWatchCheck = 0
     State.RodMissingSince = 0
+    State.RodRecoveryHoldUntil =
+        os.clock() + 0.50
 
     if Config.Mode == "OP" then
-        pcall(function()
-            safeFire(FishingPackets.FishCancel)
-        end)
-
         State.LastPacketAt = os.clock()
         resetOPSession(0.10)
     else
-        pcall(function()
-            safeFire(FishingPackets.FishCancel)
-        end)
-
-        State.LegitResumeAt = os.clock() + 0.18
+        State.LegitResumeAt = os.clock() + 0.25
         State.CurrentFishingState = getFishingState()
         State.StateEnteredAt = os.clock()
 
@@ -2769,9 +3011,26 @@ function Systems.resetFishingForRodChange(reason)
     State.NextLootClickAt = 0
     State.SkillIndex = 1
 
-    pcall(function()
-        safeFire(FishingPackets.FishCancel)
-    end)
+    local shouldCancel = false
+
+    if Config.Mode == "OP" then
+        shouldCancel =
+            State.Phase ~= "Idle"
+    else
+        local currentState =
+            getFishingState()
+
+        shouldCancel =
+            currentState ~= nil
+            and currentState ~= FState.Idling
+            and currentState ~= FState.Holding
+    end
+
+    if shouldCancel then
+        pcall(function()
+            safeFire(FishingPackets.FishCancel)
+        end)
+    end
 
     if Config.Mode == "OP" then
         State.LastPacketAt = os.clock()
@@ -3064,6 +3323,12 @@ function Systems.stepBestSkillLoadoutWatcher()
         return false
     end
 
+    if State.TravelBusy
+        or State.AutoSellBusy
+        or State.ProgressionNavigationBusy then
+        return true
+    end
+
     local now = os.clock()
 
     if now - State.LastBestSkillCheck < 0.75 then
@@ -3118,6 +3383,15 @@ function Systems.stepFishingRodWatchdog()
 
     local now = os.clock()
 
+    if State.TravelBusy
+        or State.AutoSellBusy
+        or State.ProgressionNavigationBusy
+        or now < State.RodRecoveryHoldUntil then
+
+        mouseUp()
+        return false
+    end
+
     if now - State.LastRodWatchCheck
         < math.max(
             0.10,
@@ -3137,11 +3411,19 @@ function Systems.stepFishingRodWatchdog()
     end
 
     local data = getPlayerData()
-    local currentRod =
+    local rodId =
         data
-        and type(data.RodEquip) == "string"
-        and data.RodEquip ~= ""
         and data.RodEquip
+        or nil
+
+    local currentRod =
+        type(rodId) == "string"
+        and rodId ~= ""
+        and rodId ~= "None"
+        and type(data and data.Rods) == "table"
+        and data.Rods[rodId] ~= nil
+        and Catalog.Rod.GetById(rodId) ~= nil
+        and rodId
         or nil
 
     if not currentRod then
@@ -3157,7 +3439,7 @@ function Systems.stepFishingRodWatchdog()
         end
 
         -- Give manual inventory changes a brief moment to settle.
-        if now - State.RodMissingSince < 0.35 then
+        if now - State.RodMissingSince < 0.80 then
             return false
         end
 
@@ -3807,9 +4089,11 @@ function Systems.travelToIsland(islandId)
 
     mouseUp()
 
-    pcall(function()
-        safeFire(FishingPackets.FishCancel)
-    end)
+    -- waitForTravelSafe already guarantees an idle fishing state.
+    -- Avoid an unnecessary FishCancel here; it can leave the client
+    -- loadout lock out of sync after movement.
+    State.RodRecoveryHoldUntil =
+        os.clock() + 0.50
 
     if Config.Mode == "OP" then
         resetOPSession(0.20)
@@ -3876,8 +4160,9 @@ function Systems.travelToIsland(islandId)
     State.NextReelAt = 0
     State.NextSkillAt = 0
     State.NextLootClickAt = 0
-    State.LastObservedRodId = nil
     State.LastRodWatchCheck = 0
+    State.RodRecoveryHoldUntil =
+        os.clock() + 0.50
 
     if Config.Mode == "OP" then
         resetOPSession(0.15)
@@ -3963,6 +4248,725 @@ end
 
 API.TravelToIsland = Systems.travelToIsland
 API.TravelToHighestUnlockedIsland = Systems.travelToHighestUnlockedIsland
+
+--==============================================================
+-- PROGRESSION NAVIGATION: LAND PATH + FREE BOAT
+--==============================================================
+
+Systems.StarterBoatMerchantFallback =
+    Vector3.new(
+        -37.472511291504,
+        12.386794090271,
+        306.020233154297
+    )
+
+function Systems.setBoatKey(keyName, down)
+    local keyCode =
+        keyName == "W" and Enum.KeyCode.W
+        or keyName == "A" and Enum.KeyCode.A
+        or keyName == "D" and Enum.KeyCode.D
+        or nil
+
+    if not keyCode then
+        return
+    end
+
+    if State.BoatKeyState[keyName] == down then
+        return
+    end
+
+    State.BoatKeyState[keyName] = down
+
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(
+            down,
+            keyCode,
+            false,
+            game
+        )
+    end)
+end
+
+function Systems.releaseBoatControls()
+    Systems.setBoatKey("W", false)
+    Systems.setBoatKey("A", false)
+    Systems.setBoatKey("D", false)
+end
+
+function Systems.getCharacterHumanoid()
+    local character = LocalPlayer.Character
+
+    return character,
+        character
+            and character:FindFirstChildOfClass(
+                "Humanoid"
+            )
+            or nil,
+        character
+            and character:FindFirstChild(
+                "HumanoidRootPart"
+            )
+            or nil
+end
+
+function Systems.walkToPosition(
+    targetPosition,
+    timeoutSeconds
+)
+    if typeof(targetPosition) ~= "Vector3" then
+        return false
+    end
+
+    local character, humanoid, root =
+        Systems.getCharacterHumanoid()
+
+    if not character
+        or not humanoid
+        or not root
+        or humanoid.Health <= 0 then
+        return false
+    end
+
+    if (
+        root.Position - targetPosition
+    ).Magnitude <= 6 then
+        return true
+    end
+
+    local path =
+        PathfindingService:CreatePath({
+            AgentRadius = 2,
+            AgentHeight = 5,
+            AgentCanJump = true,
+            AgentCanClimb = true,
+            WaypointSpacing = 5,
+        })
+
+    local computed = pcall(function()
+        path:ComputeAsync(
+            root.Position,
+            targetPosition
+        )
+    end)
+
+    local deadline =
+        os.clock()
+        + math.max(
+            3,
+            tonumber(timeoutSeconds) or 25
+        )
+
+    local function moveToPoint(
+        point,
+        jump
+    )
+        if jump then
+            humanoid.Jump = true
+        end
+
+        humanoid:MoveTo(point)
+
+        while State.Alive
+            and os.clock() < deadline do
+
+            if not root.Parent
+                or humanoid.Health <= 0 then
+                return false
+            end
+
+            if (
+                root.Position - point
+            ).Magnitude <= 4.5 then
+                return true
+            end
+
+            task.wait(0.08)
+        end
+
+        return false
+    end
+
+    if computed
+        and path.Status
+            == Enum.PathStatus.Success then
+
+        for _, waypoint in ipairs(
+            path:GetWaypoints()
+        ) do
+            if not moveToPoint(
+                waypoint.Position,
+                waypoint.Action
+                    == Enum.PathWaypointAction.Jump
+            ) then
+                break
+            end
+        end
+    else
+        moveToPoint(
+            targetPosition,
+            false
+        )
+    end
+
+    return root.Parent ~= nil
+        and (
+            root.Position - targetPosition
+        ).Magnitude <= 10
+end
+
+function Systems.getStarterBoatMerchantPosition()
+    local world = workspace:FindFirstChild("World")
+    local islands =
+        world and world:FindFirstChild("Islands")
+
+    if islands then
+        local merchant =
+            islands:FindFirstChild(
+                "npc_car_merchant_starter",
+                true
+            )
+
+        if merchant then
+            if merchant:IsA("Model") then
+                local part =
+                    merchant.PrimaryPart
+                    or merchant:FindFirstChild(
+                        "HumanoidRootPart",
+                        true
+                    )
+                    or merchant:FindFirstChild(
+                        "Head",
+                        true
+                    )
+
+                if part
+                    and part:IsA("BasePart") then
+                    return part.Position
+                end
+            elseif merchant:IsA("BasePart") then
+                return merchant.Position
+            end
+        end
+    end
+
+    return Systems.StarterBoatMerchantFallback
+end
+
+function Systems.getOwnedBoat()
+    local cars =
+        workspace:FindFirstChild("Cars")
+
+    if not cars then
+        return nil
+    end
+
+    local boat =
+        cars:FindFirstChild(
+            tostring(LocalPlayer.UserId)
+        )
+
+    if boat and boat:IsA("Model") then
+        local seat =
+            boat:FindFirstChild(
+                "DSeat",
+                true
+            )
+
+        local main =
+            boat:FindFirstChild(
+                "Main",
+                true
+            )
+
+        if seat
+            and seat:IsA("VehicleSeat")
+            and main
+            and main:IsA("BasePart") then
+            return boat, seat, main
+        end
+    end
+
+    return nil
+end
+
+function Systems.spawnFreeProgressionBoat()
+    local boat, seat, main =
+        Systems.getOwnedBoat()
+
+    if boat then
+        return boat, seat, main
+    end
+
+    if getCurrentIslandId()
+        ~= "island_starter" then
+
+        State.ProgressionNavigationStatus =
+            "No boat: return to Starter Island first"
+        return nil
+    end
+
+    local merchantPosition =
+        Systems.getStarterBoatMerchantPosition()
+
+    State.ProgressionNavigationStatus =
+        "Walking to Boat Merchant"
+
+    if not Systems.walkToPosition(
+        merchantPosition,
+        30
+    ) then
+        State.ProgressionNavigationStatus =
+            "Could not reach Boat Merchant"
+        return nil
+    end
+
+    local _, _, root =
+        Systems.getCharacterHumanoid()
+
+    if not root
+        or (
+            root.Position - merchantPosition
+        ).Magnitude > 12 then
+
+        State.ProgressionNavigationStatus =
+            "Too far from Boat Merchant"
+        return nil
+    end
+
+    if os.clock()
+        - State.ProgressionBoatLastSpawnAt
+        >= 1 then
+
+        State.ProgressionBoatLastSpawnAt =
+            os.clock()
+
+        pcall(function()
+            SpawnCarPacket:Fire(
+                "truck/island_starter"
+            )
+        end)
+    end
+
+    local deadline = os.clock() + 8
+
+    repeat
+        boat, seat, main =
+            Systems.getOwnedBoat()
+
+        if boat then
+            return boat, seat, main
+        end
+
+        task.wait(0.10)
+    until os.clock() >= deadline
+
+    State.ProgressionNavigationStatus =
+        "Free boat did not spawn"
+    return nil
+end
+
+function Systems.enterProgressionBoat(
+    boat,
+    seat
+)
+    local _, humanoid, root =
+        Systems.getCharacterHumanoid()
+
+    if not humanoid
+        or not root
+        or not seat
+        or not seat.Parent then
+        return false
+    end
+
+    if seat.Occupant == humanoid then
+        return true
+    end
+
+    State.ProgressionNavigationStatus =
+        "Walking to free boat"
+
+    Systems.walkToPosition(
+        seat.Position,
+        20
+    )
+
+    if (
+        root.Position - seat.Position
+    ).Magnitude > 12 then
+        State.ProgressionNavigationStatus =
+            "Could not reach boat seat"
+        return false
+    end
+
+    pcall(function()
+        seat:Sit(humanoid)
+    end)
+
+    local deadline = os.clock() + 5
+
+    while State.Alive
+        and os.clock() < deadline do
+
+        if seat.Occupant == humanoid then
+            return true
+        end
+
+        task.wait(0.08)
+    end
+
+    State.ProgressionNavigationStatus =
+        "Could not enter free boat"
+    return false
+end
+
+function Systems.driveBoatTowardIsland(
+    islandId,
+    boat,
+    seat,
+    main
+)
+    local destination =
+        Systems.IslandTeleportCFrames[
+            islandId
+        ]
+
+    if not destination then
+        return false
+    end
+
+    local _, humanoid =
+        Systems.getCharacterHumanoid()
+
+    if not humanoid then
+        return false
+    end
+
+    local target = destination.Position
+    local timeout =
+        math.max(
+            30,
+            tonumber(
+                Config.ProgressionBoatTimeout
+            ) or 120
+        )
+
+    local arrivalRadius =
+        math.max(
+            90,
+            tonumber(
+                Config.ProgressionBoatArrivalRadius
+            ) or 135
+        )
+
+    local deadline = os.clock() + timeout
+    local stalledSince = 0
+    local previousPosition = main.Position
+
+    State.ProgressionBoatTargetIslandId =
+        islandId
+
+    while State.Alive
+        and State.ProgressionNavigationBusy
+        and os.clock() < deadline do
+
+        if not boat.Parent
+            or not seat.Parent
+            or not main.Parent then
+            break
+        end
+
+        if seat.Occupant ~= humanoid then
+            State.ProgressionNavigationStatus =
+                "Boat seat lost"
+            break
+        end
+
+        local flatDelta = Vector3.new(
+            target.X - main.Position.X,
+            0,
+            target.Z - main.Position.Z
+        )
+
+        local distance =
+            flatDelta.Magnitude
+
+        local currentIsland =
+            getCurrentIslandId()
+
+        if distance <= arrivalRadius then
+            Systems.releaseBoatControls()
+            break
+        end
+
+        if flatDelta.Magnitude < 0.001 then
+            Systems.releaseBoatControls()
+            break
+        end
+
+        local localDirection =
+            main.CFrame:
+                VectorToObjectSpace(
+                    flatDelta.Unit
+                )
+
+        local angle =
+            math.atan2(
+                localDirection.X,
+                -localDirection.Z
+            )
+
+        local absAngle =
+            math.abs(angle)
+
+        local steerRight =
+            angle > 0.10
+
+        local steerLeft =
+            angle < -0.10
+
+        -- The game's boat rotates even with zero throttle, so point the
+        -- boat first when the destination is far off-axis.
+        local driveForward =
+            absAngle < 0.70
+
+        Systems.setBoatKey(
+            "D",
+            steerRight
+        )
+        Systems.setBoatKey(
+            "A",
+            steerLeft
+        )
+        Systems.setBoatKey(
+            "W",
+            driveForward
+        )
+
+        -- Also keep VehicleSeat state aligned with the same normal
+        -- steering intent. The game's own Car LocalScript consumes it.
+        pcall(function()
+            seat.ThrottleFloat =
+                driveForward and 1 or 0
+            seat.SteerFloat =
+                steerRight and 1
+                or steerLeft and -1
+                or 0
+        end)
+
+        State.ProgressionNavigationStatus =
+            "Boating to "
+            .. tostring(
+                Systems.IslandIdToName[islandId]
+                or islandId
+            )
+            .. " ("
+            .. tostring(
+                math.floor(distance)
+            )
+            .. " studs)"
+
+        task.wait(0.05)
+
+        local moved =
+            (
+                Vector3.new(
+                    main.Position.X,
+                    0,
+                    main.Position.Z
+                )
+                - Vector3.new(
+                    previousPosition.X,
+                    0,
+                    previousPosition.Z
+                )
+            ).Magnitude
+
+        if driveForward and moved < 0.05 then
+            if stalledSince == 0 then
+                stalledSince = os.clock()
+            end
+        else
+            stalledSince = 0
+        end
+
+        previousPosition = main.Position
+
+        -- If the boat has reached the target island and is pressed
+        -- against the shore, stop trying to push farther inland.
+        if currentIsland == islandId
+            and stalledSince > 0
+            and os.clock() - stalledSince > 2 then
+            Systems.releaseBoatControls()
+            break
+        end
+    end
+
+    Systems.releaseBoatControls()
+
+    local finalIsland =
+        getCurrentIslandId()
+
+    local finalDistance =
+        Vector3.new(
+            target.X - main.Position.X,
+            0,
+            target.Z - main.Position.Z
+        ).Magnitude
+
+    return finalIsland == islandId
+        or finalDistance
+            <= arrivalRadius + 75
+end
+
+function Systems.leaveBoatAndReachIsland(
+    islandId
+)
+    local character, humanoid =
+        Systems.getCharacterHumanoid()
+
+    if not character
+        or not humanoid then
+        return false
+    end
+
+    Systems.releaseBoatControls()
+
+    humanoid.Sit = false
+    humanoid.Jump = true
+
+    task.wait(0.50)
+
+    local destination =
+        Systems.IslandTeleportCFrames[
+            islandId
+        ]
+
+    if destination then
+        State.ProgressionNavigationStatus =
+            "Pathfinding onto "
+            .. tostring(
+                Systems.IslandIdToName[islandId]
+                or islandId
+            )
+
+        Systems.walkToPosition(
+            destination.Position,
+            25
+        )
+    end
+
+    task.wait(0.25)
+
+    return Systems.isAtIsland(islandId)
+end
+
+function Systems.progressionNavigateToIsland(
+    islandId
+)
+    if not Config.ProgressionUseFreeBoat then
+        return Systems.travelToIsland(
+            islandId
+        )
+    end
+
+    if Systems.isAtIsland(islandId) then
+        return true
+    end
+
+    if State.ProgressionNavigationBusy then
+        return false
+    end
+
+    State.ProgressionNavigationBusy = true
+    State.ProgressionNavigationStatus =
+        "Preparing free boat"
+    State.TravelBusy = true
+
+    mouseUp()
+    Systems.releaseBoatControls()
+
+    -- Do not send FishCancel here. Progression starts navigation only
+    -- after the fishing state is idle, avoiding the backpack/loadout lock.
+    State.RodRecoveryHoldUntil =
+        os.clock() + 1
+
+    local success = false
+
+    local ok, err = pcall(function()
+        local boat, seat, main =
+            Systems.spawnFreeProgressionBoat()
+
+        if not boat then
+            return
+        end
+
+        if not Systems.enterProgressionBoat(
+            boat,
+            seat
+        ) then
+            return
+        end
+
+        if not Systems.driveBoatTowardIsland(
+            islandId,
+            boat,
+            seat,
+            main
+        ) then
+            return
+        end
+
+        success =
+            Systems.leaveBoatAndReachIsland(
+                islandId
+            )
+    end)
+
+    Systems.releaseBoatControls()
+
+    State.ProgressionNavigationBusy = false
+    State.TravelBusy = false
+    State.RodRecoveryHoldUntil =
+        os.clock() + 0.75
+    State.LastRodWatchCheck = 0
+    State.LastCastStarted = 0
+    State.NextReelAt = 0
+    State.NextSkillAt = 0
+    State.NextLootClickAt = 0
+
+    if Config.Mode == "OP" then
+        resetOPSession(0.20)
+    else
+        State.LegitResumeAt =
+            os.clock() + 0.35
+        State.CurrentFishingState =
+            getFishingState()
+        State.StateEnteredAt = os.clock()
+    end
+
+    if not ok then
+        State.ProgressionNavigationStatus =
+            "Boat navigation error: "
+            .. tostring(err)
+        return false
+    end
+
+    if success then
+        State.ProgressionNavigationStatus =
+            "Arrived: "
+            .. tostring(
+                Systems.IslandIdToName[islandId]
+                or islandId
+            )
+    elseif State.ProgressionNavigationStatus
+        == "Preparing free boat" then
+        State.ProgressionNavigationStatus =
+            "Boat navigation failed"
+    end
+
+    return success
+end
 
 --==============================================================
 -- QUEST AUTOMATION
@@ -4557,7 +5561,15 @@ function Systems.configureQuestFarming(questId)
         and not Systems.isAtIsland(profile.targetIsland)
         and Systems.isTravelSafe() then
 
-        Systems.travelToIsland(profile.targetIsland)
+        if Config.AutoProgression then
+            Systems.progressionNavigateToIsland(
+                profile.targetIsland
+            )
+        else
+            Systems.travelToIsland(
+                profile.targetIsland
+            )
+        end
     end
 end
 
@@ -4934,7 +5946,9 @@ function Systems.progressionFarmIsland(islandId, reason)
 
     if not Systems.isAtIsland(islandId) then
         if Systems.isTravelSafe() then
-            Systems.travelToIsland(islandId)
+            Systems.progressionNavigateToIsland(
+                islandId
+            )
         else
             Systems.setProgressionStatus(
                 "Waiting",
@@ -5042,7 +6056,8 @@ function Systems.stepAutoProgression()
     if not Config.AutoProgression
         or State.AutoSellBusy
         or State.TravelBusy
-        or State.QuestBusy then
+        or State.QuestBusy
+        or State.ProgressionNavigationBusy then
         return
     end
 
@@ -5079,7 +6094,9 @@ function Systems.stepAutoProgression()
 
         if not Systems.isAtIsland(goalId) then
             if Systems.isTravelSafe() then
-                Systems.travelToIsland(goalId)
+                Systems.progressionNavigateToIsland(
+                    goalId
+                )
             end
             return
         end
@@ -6762,6 +7779,7 @@ State.Worker = task.spawn(function()
             if not rodReady
                 or not skillsReady
                 or State.TravelBusy
+                or State.ProgressionNavigationBusy
                 or State.BossBusy
                 or State.ExtraEquipmentBusy
                 or State.QuestBusy
@@ -6815,7 +7833,7 @@ if Rayfield then
     local ok, result = pcall(function()
         return Rayfield:CreateWindow({
             name = "Fishing Automation",
-            subtitle = "Full Suite v15.6 • Island Tween Speed Slider",
+            subtitle = "Full Suite v16 • Boat Progression + Water Look",
             sidebarLayout = true,
             theme = "amethyst",
             profile = "Fishing",
@@ -6823,7 +7841,7 @@ if Rayfield then
             configuration = {
                 autoSave = true,
                 autoLoad = true,
-                fileName = "FullAutoFishing_DualMode_v15_6",
+                fileName = "FullAutoFishing_DualMode_v16",
             },
         })
     end)
@@ -6872,6 +7890,16 @@ if Window then
         value = Config.AutoSkills,
         callback = function(value)
             Config.AutoSkills = value == true
+        end,
+    })
+
+    FishingTab:CreateToggle({
+        name = "Auto Look At Water",
+        flag = "AutoLookAtWater",
+        value = Config.AutoLookAtWater,
+        callback = function(value)
+            Config.AutoLookAtWater = value == true
+            State.LastWaterLookAt = 0
         end,
     })
 
@@ -7664,17 +8692,17 @@ API.Unload = function()
         pcall(State.FallbackGui.Destroy, State.FallbackGui)
     end
 
-    ENV.__FULL_AUTO_FISHING_DUAL_V15_6 = nil
-    print("[FishingV15.6] Unloaded")
+    ENV.__FULL_AUTO_FISHING_DUAL_V16 = nil
+    print("[FishingV16] Unloaded")
 end
 
-print("[FishingV15.6] Loaded")
-print("[FishingV15.6] Default mode:", Config.Mode)
-print("[FishingV15.6] Select Legit or OP in the Rayfield Fishing Mode dropdown.")
-print("[FishingV15.6] Auto Sell uses a multi-select rarity dropdown and sells only when inventory is full.")
-print("[FishingV15.6] Rod automation: Auto Equip Best + Auto Buy Next Rod added.")
-print("[FishingV15.6] Islands: TweenService movement added (no Fast Travel pass).")
-print("[FishingV15.6] Quest automation: Islands/Rods/Souls/Skills quest manager added.")
-print("[FishingV15.6] Auto Progression: movement deadlock + fishing startup fixed.")
-print("[FishingV15.6] Full suite: Boss/Weather, Aura/Cosmetics, Bait, Rewards, Targets, ESP, Dashboard, and Gacha tracking added.")
-print("[FishingV15.6] UI polish + rod watchdog + automatic best-skill transfer added.")
+print("[FishingV16] Loaded")
+print("[FishingV16] Default mode:", Config.Mode)
+print("[FishingV16] Select Legit or OP in the Rayfield Fishing Mode dropdown.")
+print("[FishingV16] Auto Sell uses a multi-select rarity dropdown and sells only when inventory is full.")
+print("[FishingV16] Rod automation: Auto Equip Best + Auto Buy Next Rod added.")
+print("[FishingV16] Islands: TweenService movement added (no Fast Travel pass).")
+print("[FishingV16] Quest automation: Islands/Rods/Souls/Skills quest manager added.")
+print("[FishingV16] Auto Progression: movement deadlock + fishing startup fixed.")
+print("[FishingV16] Full suite: Boss/Weather, Aura/Cosmetics, Bait, Rewards, Targets, ESP, Dashboard, and Gacha tracking added.")
+print("[FishingV16] UI polish + rod watchdog + automatic best-skill transfer added.")
