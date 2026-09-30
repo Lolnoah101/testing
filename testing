@@ -1,5 +1,5 @@
 --[[
-    Full Auto Fishing v16 - BOAT PROGRESSION + WATER LOOK + ROD RECOVERY
+    Full Auto Fishing v16.1 - FAST PATH + PROMPT BOAT ENTRY
     Target place: Place_99925503388128
 
     Modes:
@@ -36,6 +36,7 @@ local ENV = (getgenv and getgenv()) or _G
 --==============================================================
 
 for _, key in ipairs({
+    "__FULL_AUTO_FISHING_DUAL_V16_1",
     "__FULL_AUTO_FISHING_DUAL_V16",
     "__FULL_AUTO_FISHING_DUAL_V15_6",
     "__FULL_AUTO_FISHING_DUAL_V15_5",
@@ -109,6 +110,13 @@ local SpawnCarPacket =
     Stardust.Packet(
         "SpawnCarEvent",
         Stardust.Packet.String
+    )
+
+local ProximityPromptLock =
+    require(
+        ReplicatedStorage:WaitForChild("Shared")
+            :WaitForChild("Lib")
+            :WaitForChild("ProximityPromptLock")
     )
 
 local Catalog = require(
@@ -495,6 +503,8 @@ local State = {
     ProgressionNavigationStatus = "Idle",
     ProgressionBoatTargetIslandId = "",
     ProgressionBoatLastSpawnAt = 0,
+    LastPromptRepairAt = 0,
+    FastPathReplans = 0,
     BoatKeyState = {
         W = false,
         A = false,
@@ -586,7 +596,7 @@ local API = {
     State = State,
 }
 
-ENV.__FULL_AUTO_FISHING_DUAL_V16 = API
+ENV.__FULL_AUTO_FISHING_DUAL_V16_1 = API
 
 --==============================================================
 -- HELPERS
@@ -594,12 +604,12 @@ ENV.__FULL_AUTO_FISHING_DUAL_V16 = API
 
 local function log(...)
     if Config.Debug then
-        print("[FishingV16]", ...)
+        print("[FishingV16.1]", ...)
     end
 end
 
 local function warnf(...)
-    warn("[FishingV16]", ...)
+    warn("[FishingV16.1]", ...)
 end
 
 local function track(connection)
@@ -4309,13 +4319,142 @@ function Systems.getCharacterHumanoid()
             or nil
 end
 
+function Systems.restoreStandingPromptState()
+    local _, humanoid =
+        Systems.getCharacterHumanoid()
+
+    if not humanoid
+        or humanoid.Health <= 0 then
+        return false
+    end
+
+    -- This game disables every ProximityPrompt while CharacterSeated
+    -- is locked. Only clear that specific owner when Roblox confirms
+    -- the player is actually standing.
+    if humanoid.SeatPart == nil
+        and humanoid.Sit ~= true then
+
+        pcall(function()
+            ProximityPromptLock.SetLocked(
+                "CharacterSeated",
+                false
+            )
+        end)
+
+        State.LastPromptRepairAt = os.clock()
+        return true
+    end
+
+    return false
+end
+
+function Systems.forceStandAndRestorePrompts()
+    local _, humanoid =
+        Systems.getCharacterHumanoid()
+
+    if not humanoid then
+        return false
+    end
+
+    if humanoid.SeatPart ~= nil
+        or humanoid.Sit == true then
+
+        humanoid.Sit = false
+        humanoid.Jump = true
+
+        pcall(function()
+            humanoid:ChangeState(
+                Enum.HumanoidStateType.GettingUp
+            )
+        end)
+
+        local deadline = os.clock() + 1.25
+
+        while State.Alive
+            and os.clock() < deadline
+            and humanoid.SeatPart ~= nil do
+
+            task.wait(0.04)
+        end
+    end
+
+    return Systems.restoreStandingPromptState()
+end
+
+function Systems.isDirectWalkClear(
+    root,
+    targetPosition
+)
+    if not root
+        or typeof(targetPosition) ~= "Vector3" then
+        return false
+    end
+
+    local from =
+        root.Position
+        + Vector3.new(0, 2.5, 0)
+
+    local target =
+        Vector3.new(
+            targetPosition.X,
+            from.Y,
+            targetPosition.Z
+        )
+
+    local delta = target - from
+
+    if delta.Magnitude <= 1 then
+        return true
+    end
+
+    local params = RaycastParams.new()
+    params.FilterType =
+        Enum.RaycastFilterType.Exclude
+
+    local exclude = {}
+
+    if LocalPlayer.Character then
+        table.insert(
+            exclude,
+            LocalPlayer.Character
+        )
+    end
+
+    local cars =
+        workspace:FindFirstChild("Cars")
+
+    if cars then
+        table.insert(exclude, cars)
+    end
+
+    params.FilterDescendantsInstances =
+        exclude
+    params.IgnoreWater = true
+
+    local hit =
+        workspace:Raycast(
+            from,
+            delta,
+            params
+        )
+
+    return hit == nil
+end
+
 function Systems.walkToPosition(
     targetPosition,
-    timeoutSeconds
+    timeoutSeconds,
+    stopRadius
 )
     if typeof(targetPosition) ~= "Vector3" then
         return false
     end
+
+    stopRadius =
+        math.max(
+            2.5,
+            tonumber(stopRadius) or 6
+        )
 
     local character, humanoid, root =
         Systems.getCharacterHumanoid()
@@ -4327,37 +4466,33 @@ function Systems.walkToPosition(
         return false
     end
 
-    if (
-        root.Position - targetPosition
-    ).Magnitude <= 6 then
-        return true
-    end
-
-    local path =
-        PathfindingService:CreatePath({
-            AgentRadius = 2,
-            AgentHeight = 5,
-            AgentCanJump = true,
-            AgentCanClimb = true,
-            WaypointSpacing = 5,
-        })
-
-    local computed = pcall(function()
-        path:ComputeAsync(
-            root.Position,
-            targetPosition
-        )
-    end)
+    Systems.restoreStandingPromptState()
 
     local deadline =
         os.clock()
         + math.max(
-            3,
-            tonumber(timeoutSeconds) or 25
+            2,
+            tonumber(timeoutSeconds) or 18
         )
 
-    local function moveToPoint(
+    local function distanceToTarget()
+        if not root.Parent then
+            return math.huge
+        end
+
+        return (
+            root.Position - targetPosition
+        ).Magnitude
+    end
+
+    if distanceToTarget() <= stopRadius then
+        return true
+    end
+
+    local function moveBriefly(
         point,
+        radius,
+        maxSeconds,
         jump
     )
         if jump then
@@ -4366,8 +4501,13 @@ function Systems.walkToPosition(
 
         humanoid:MoveTo(point)
 
+        local started = os.clock()
+        local lastPosition = root.Position
+        local lastProgressAt = started
+
         while State.Alive
-            and os.clock() < deadline do
+            and os.clock() < deadline
+            and os.clock() - started < maxSeconds do
 
             if not root.Parent
                 or humanoid.Health <= 0 then
@@ -4376,43 +4516,236 @@ function Systems.walkToPosition(
 
             if (
                 root.Position - point
-            ).Magnitude <= 4.5 then
+            ).Magnitude <= radius then
                 return true
             end
 
-            task.wait(0.08)
+            local moved =
+                (
+                    root.Position
+                    - lastPosition
+                ).Magnitude
+
+            if moved >= 0.35 then
+                lastPosition = root.Position
+                lastProgressAt = os.clock()
+            elseif os.clock()
+                - lastProgressAt > 0.65 then
+                return false
+            end
+
+            task.wait(0.035)
         end
 
-        return false
+        return (
+            root.Position - point
+        ).Magnitude <= radius
     end
 
-    if computed
-        and path.Status
-            == Enum.PathStatus.Success then
+    -- Fast path: don't ask PathfindingService at all when there is a
+    -- clear planar route. This makes short NPC/boat approaches immediate.
+    if Systems.isDirectWalkClear(
+        root,
+        targetPosition
+    ) then
+        local directBudget =
+            math.min(
+                math.max(
+                    0.75,
+                    distanceToTarget()
+                    / math.max(
+                        humanoid.WalkSpeed,
+                        8
+                    )
+                    + 0.60
+                ),
+                math.max(
+                    0.75,
+                    deadline - os.clock()
+                )
+            )
 
-        for _, waypoint in ipairs(
+        if moveBriefly(
+            targetPosition,
+            stopRadius,
+            directBudget,
+            false
+        ) then
+            return true
+        end
+    end
+
+    local replans = 0
+
+    while State.Alive
+        and os.clock() < deadline
+        and replans < 3 do
+
+        if distanceToTarget()
+            <= stopRadius then
+            return true
+        end
+
+        replans += 1
+        State.FastPathReplans += 1
+
+        local path =
+            PathfindingService:CreatePath({
+                AgentRadius = 2,
+                AgentHeight = 5,
+                AgentCanJump = true,
+                AgentCanClimb = true,
+                WaypointSpacing = 12,
+            })
+
+        local ok = pcall(function()
+            path:ComputeAsync(
+                root.Position,
+                targetPosition
+            )
+        end)
+
+        if not ok
+            or path.Status
+                ~= Enum.PathStatus.Success then
+
+            -- Don't sit around waiting for a bad path result.
+            moveBriefly(
+                targetPosition,
+                stopRadius,
+                math.min(
+                    1.1,
+                    math.max(
+                        0.25,
+                        deadline - os.clock()
+                    )
+                ),
+                false
+            )
+
+            continue
+        end
+
+        local waypoints =
             path:GetWaypoints()
-        ) do
-            if not moveToPoint(
-                waypoint.Position,
-                waypoint.Action
-                    == Enum.PathWaypointAction.Jump
-            ) then
+
+        local index = 1
+
+        while index <= #waypoints
+            and os.clock() < deadline do
+
+            if distanceToTarget()
+                <= stopRadius then
+                return true
+            end
+
+            -- Skip waypoints already behind/under us.
+            while index <= #waypoints
+                and (
+                    root.Position
+                    - waypoints[index].Position
+                ).Magnitude <= 4.5 do
+
+                index += 1
+            end
+
+            if index > #waypoints then
                 break
             end
+
+            -- Look ahead and take the farthest waypoint with a clear
+            -- direct line instead of walking every tiny path node.
+            local chosen = index
+
+            for lookAhead =
+                math.min(index + 4, #waypoints),
+                index + 1,
+                -1 do
+
+                if Systems.isDirectWalkClear(
+                    root,
+                    waypoints[
+                        lookAhead
+                    ].Position
+                ) then
+                    chosen = lookAhead
+                    break
+                end
+            end
+
+            local waypoint =
+                waypoints[chosen]
+
+            local distance =
+                (
+                    root.Position
+                    - waypoint.Position
+                ).Magnitude
+
+            local waypointBudget =
+                math.min(
+                    2.25,
+                    math.max(
+                        0.45,
+                        distance
+                        / math.max(
+                            humanoid.WalkSpeed,
+                            8
+                        )
+                        + 0.45
+                    )
+                )
+
+            local reached =
+                moveBriefly(
+                    waypoint.Position,
+                    4.75,
+                    waypointBudget,
+                    waypoint.Action
+                        == Enum.PathWaypointAction.Jump
+                )
+
+            if not reached then
+                -- Replan immediately from the new position instead of
+                -- waiting out the entire overall timeout.
+                break
+            end
+
+            index = chosen + 1
         end
-    else
-        moveToPoint(
-            targetPosition,
-            false
-        )
     end
 
-    return root.Parent ~= nil
-        and (
-            root.Position - targetPosition
-        ).Magnitude <= 10
+    if distanceToTarget()
+        <= stopRadius then
+        return true
+    end
+
+    -- Last short direct attempt; never wait the old 20–30 seconds.
+    moveBriefly(
+        targetPosition,
+        stopRadius,
+        math.min(
+            0.8,
+            math.max(
+                0.15,
+                deadline - os.clock()
+            )
+        ),
+        false
+    )
+
+    return distanceToTarget()
+        <= stopRadius
 end
+
+task.defer(function()
+    task.wait(0.10)
+
+    if State.Alive
+        and Systems.restoreStandingPromptState then
+        Systems.restoreStandingPromptState()
+    end
+end)
 
 function Systems.getStarterBoatMerchantPosition()
     local world = workspace:FindFirstChild("World")
@@ -4482,6 +4815,18 @@ function Systems.getOwnedBoat()
             and seat:IsA("VehicleSeat")
             and main
             and main:IsA("BasePart") then
+
+            local prompt =
+                seat:FindFirstChildWhichIsA(
+                    "ProximityPrompt",
+                    true
+                )
+
+            if prompt
+                and prompt.Enabled ~= true then
+                prompt.Enabled = true
+            end
+
             return boat, seat, main
         end
     end
@@ -4513,7 +4858,8 @@ function Systems.spawnFreeProgressionBoat()
 
     if not Systems.walkToPosition(
         merchantPosition,
-        30
+        12,
+        8
     ) then
         State.ProgressionNavigationStatus =
             "Could not reach Boat Merchant"
@@ -4583,27 +4929,103 @@ function Systems.enterProgressionBoat(
         return true
     end
 
-    State.ProgressionNavigationStatus =
-        "Walking to free boat"
+    -- Repair any stale CharacterSeated prompt lock left by an older
+    -- failed boat-entry attempt.
+    Systems.forceStandAndRestorePrompts()
 
-    Systems.walkToPosition(
-        seat.Position,
-        20
-    )
+    local prompt =
+        seat:FindFirstChildWhichIsA(
+            "ProximityPrompt",
+            true
+        )
 
-    if (
-        root.Position - seat.Position
-    ).Magnitude > 12 then
+    local promptDeadline =
+        os.clock() + 2
+
+    while not prompt
+        and seat.Parent
+        and os.clock() < promptDeadline do
+
+        task.wait(0.04)
+
+        prompt =
+            seat:FindFirstChildWhichIsA(
+                "ProximityPrompt",
+                true
+            )
+    end
+
+    if not prompt then
         State.ProgressionNavigationStatus =
-            "Could not reach boat seat"
+            "Boat SitPrompt missing"
         return false
     end
 
-    pcall(function()
-        seat:Sit(humanoid)
+    prompt.Enabled = true
+
+    local activationDistance =
+        math.max(
+            4,
+            math.min(
+                9,
+                tonumber(
+                    prompt.MaxActivationDistance
+                ) or 10
+            ) - 1
+        )
+
+    State.ProgressionNavigationStatus =
+        "Moving into boat prompt range"
+
+    if not Systems.walkToPosition(
+        seat.Position,
+        10,
+        activationDistance
+    ) then
+        State.ProgressionNavigationStatus =
+            "Could not reach boat prompt"
+        Systems.forceStandAndRestorePrompts()
+        return false
+    end
+
+    if (
+        root.Position - seat.Position
+    ).Magnitude
+        > (
+            tonumber(
+                prompt.MaxActivationDistance
+            ) or 10
+        ) + 1 then
+
+        State.ProgressionNavigationStatus =
+            "Boat prompt still out of range"
+        Systems.forceStandAndRestorePrompts()
+        return false
+    end
+
+    State.ProgressionNavigationStatus =
+        "Using boat Sit prompt"
+
+    -- Use the boat's real ProximityPrompt instead of force-seating the
+    -- Humanoid. This lets the game's own car/seat controller handle the
+    -- seated state and prompt lock normally.
+    local triggered = pcall(function()
+        prompt:InputHoldBegin()
+
+        task.wait(
+            math.max(
+                tonumber(
+                    prompt.HoldDuration
+                ) or 0,
+                0
+            )
+            + 0.06
+        )
+
+        prompt:InputHoldEnd()
     end)
 
-    local deadline = os.clock() + 5
+    local deadline = os.clock() + 2.5
 
     while State.Alive
         and os.clock() < deadline do
@@ -4612,11 +5034,60 @@ function Systems.enterProgressionBoat(
             return true
         end
 
-        task.wait(0.08)
+        task.wait(0.04)
     end
 
+    -- Fallback to the prompt's configured keyboard input once.
+    if triggered
+        and prompt.KeyboardKeyCode
+            ~= Enum.KeyCode.Unknown then
+
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(
+                true,
+                prompt.KeyboardKeyCode,
+                false,
+                game
+            )
+
+            task.wait(
+                math.max(
+                    tonumber(
+                        prompt.HoldDuration
+                    ) or 0,
+                    0.05
+                )
+                + 0.05
+            )
+
+            VirtualInputManager:SendKeyEvent(
+                false,
+                prompt.KeyboardKeyCode,
+                false,
+                game
+            )
+        end)
+
+        local fallbackDeadline =
+            os.clock() + 1.5
+
+        while State.Alive
+            and os.clock()
+                < fallbackDeadline do
+
+            if seat.Occupant
+                == humanoid then
+                return true
+            end
+
+            task.wait(0.04)
+        end
+    end
+
+    Systems.forceStandAndRestorePrompts()
+
     State.ProgressionNavigationStatus =
-        "Could not enter free boat"
+        "Boat Sit prompt did not seat player"
     return false
 end
 
@@ -4835,7 +5306,24 @@ function Systems.leaveBoatAndReachIsland(
     humanoid.Sit = false
     humanoid.Jump = true
 
-    task.wait(0.50)
+    pcall(function()
+        humanoid:ChangeState(
+            Enum.HumanoidStateType.GettingUp
+        )
+    end)
+
+    local unseatDeadline =
+        os.clock() + 1.25
+
+    while humanoid.SeatPart ~= nil
+        and os.clock() < unseatDeadline do
+
+        task.wait(0.04)
+    end
+
+    Systems.restoreStandingPromptState()
+
+    task.wait(0.15)
 
     local destination =
         Systems.IslandTeleportCFrames[
@@ -4852,7 +5340,8 @@ function Systems.leaveBoatAndReachIsland(
 
         Systems.walkToPosition(
             destination.Position,
-            25
+            14,
+            10
         )
     end
 
@@ -4924,6 +5413,16 @@ function Systems.progressionNavigateToIsland(
     end)
 
     Systems.releaseBoatControls()
+
+    local _, cleanupHumanoid =
+        Systems.getCharacterHumanoid()
+
+    if cleanupHumanoid
+        and cleanupHumanoid.SeatPart == nil then
+        Systems.restoreStandingPromptState()
+    elseif not success then
+        Systems.forceStandAndRestorePrompts()
+    end
 
     State.ProgressionNavigationBusy = false
     State.TravelBusy = false
@@ -7833,7 +8332,7 @@ if Rayfield then
     local ok, result = pcall(function()
         return Rayfield:CreateWindow({
             name = "Fishing Automation",
-            subtitle = "Full Suite v16 • Boat Progression + Water Look",
+            subtitle = "Full Suite v16.1 • Fast Path + Prompt Boat Entry",
             sidebarLayout = true,
             theme = "amethyst",
             profile = "Fishing",
@@ -7841,7 +8340,7 @@ if Rayfield then
             configuration = {
                 autoSave = true,
                 autoLoad = true,
-                fileName = "FullAutoFishing_DualMode_v16",
+                fileName = "FullAutoFishing_DualMode_v16_1",
             },
         })
     end)
@@ -8692,17 +9191,17 @@ API.Unload = function()
         pcall(State.FallbackGui.Destroy, State.FallbackGui)
     end
 
-    ENV.__FULL_AUTO_FISHING_DUAL_V16 = nil
-    print("[FishingV16] Unloaded")
+    ENV.__FULL_AUTO_FISHING_DUAL_V16_1 = nil
+    print("[FishingV16.1] Unloaded")
 end
 
-print("[FishingV16] Loaded")
-print("[FishingV16] Default mode:", Config.Mode)
-print("[FishingV16] Select Legit or OP in the Rayfield Fishing Mode dropdown.")
-print("[FishingV16] Auto Sell uses a multi-select rarity dropdown and sells only when inventory is full.")
-print("[FishingV16] Rod automation: Auto Equip Best + Auto Buy Next Rod added.")
-print("[FishingV16] Islands: TweenService movement added (no Fast Travel pass).")
-print("[FishingV16] Quest automation: Islands/Rods/Souls/Skills quest manager added.")
-print("[FishingV16] Auto Progression: movement deadlock + fishing startup fixed.")
-print("[FishingV16] Full suite: Boss/Weather, Aura/Cosmetics, Bait, Rewards, Targets, ESP, Dashboard, and Gacha tracking added.")
-print("[FishingV16] UI polish + rod watchdog + automatic best-skill transfer added.")
+print("[FishingV16.1] Loaded")
+print("[FishingV16.1] Default mode:", Config.Mode)
+print("[FishingV16.1] Select Legit or OP in the Rayfield Fishing Mode dropdown.")
+print("[FishingV16.1] Auto Sell uses a multi-select rarity dropdown and sells only when inventory is full.")
+print("[FishingV16.1] Rod automation: Auto Equip Best + Auto Buy Next Rod added.")
+print("[FishingV16.1] Islands: TweenService movement added (no Fast Travel pass).")
+print("[FishingV16.1] Quest automation: Islands/Rods/Souls/Skills quest manager added.")
+print("[FishingV16.1] Auto Progression: movement deadlock + fishing startup fixed.")
+print("[FishingV16.1] Full suite: Boss/Weather, Aura/Cosmetics, Bait, Rewards, Targets, ESP, Dashboard, and Gacha tracking added.")
+print("[FishingV16.1] UI polish + rod watchdog + automatic best-skill transfer added.")
