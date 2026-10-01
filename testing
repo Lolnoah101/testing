@@ -1,5 +1,5 @@
 --[[
-    Full Auto Fishing v20.3 - OP ONLY + ANTI AFK
+    Full Auto Fishing v20.4 - OP ONLY + SAFE ROD TRANSACTIONS
     Target place: Place_99925503388128
 
     Modes:
@@ -39,6 +39,7 @@ local ENV = (getgenv and getgenv()) or _G
 --==============================================================
 
 for _, key in ipairs({
+    "__FULL_AUTO_FISHING_DUAL_V20_4",
     "__FULL_AUTO_FISHING_DUAL_V20_3",
     "__FULL_AUTO_FISHING_DUAL_V20_2",
     "__FULL_AUTO_FISHING_DUAL_V20_1",
@@ -552,6 +553,10 @@ local State = {
     -- Rod / Equipment
     LastRodAutomationCheck = 0,
     RodBusy = false,
+    RodTransactionStatus = "Idle",
+    RodTransactionAttempts = 0,
+    RodTransactionFailures = 0,
+    RodTransactionLastAt = 0,
     RodLastStatus = "Idle",
     RodLastPurchased = "",
     RodLastEquipped = "",
@@ -762,7 +767,7 @@ local API = {
 -- variable and the Legit worker crashes with "attempt to index nil".
 local Systems = {}
 
-ENV.__FULL_AUTO_FISHING_DUAL_V20_3 = API
+ENV.__FULL_AUTO_FISHING_DUAL_V20_4 = API
 
 -- Boat Merchant positions that are known even when the destination island
 -- is not streamed into Workspace yet.
@@ -986,7 +991,7 @@ end
 
 
 Systems.LocalSaveFile =
-    "FishingAutomation_v20_3_AutoSave.json"
+    "FishingAutomation_v20_4_AutoSave.json"
 
 local function getExecutorFileFunction(name)
     local env =
@@ -1191,7 +1196,7 @@ function Systems.saveLocalAutoSave()
     cleanConfig.Enabled = nil
 
     local data = {
-        Version = "20.3",
+        Version = "20.4",
         SavedAt = os.time(),
         Config = cleanConfig,
         MerchantPositions =
@@ -1260,12 +1265,12 @@ Config.Mode = "OP"
 
 local function log(...)
     if Config.Debug then
-        print("[FishingV20.3]", ...)
+        print("[FishingV20.4]", ...)
     end
 end
 
 local function warnf(...)
-    warn("[FishingV20.3]", ...)
+    warn("[FishingV20.4]", ...)
 end
 
 local function track(connection)
@@ -4567,8 +4572,21 @@ function Systems.transferBestSkillsToRod(targetRodId)
     end
 
     local function fail(message)
+        pcall(function()
+            Systems.rawEquipRod(targetRodId)
+        end)
+
         State.SkillTransferBusy = false
         State.SkillTransferStatus = message
+        State.LastObservedRodId = nil
+        State.LastRodWatchCheck = 0
+        State.AutoEquipRodLastAt = 0
+        State.AutoEquipRodPendingUntil = 0
+
+        if Config.Enabled then
+            resetOPSession(0.35)
+        end
+
         return false
     end
 
@@ -4736,7 +4754,8 @@ function Systems.stepBestSkillLoadoutWatcher()
     end
 
     if State.SkillTransferBusy
-        or State.RodRecoveryBusy then
+        or State.RodRecoveryBusy
+        or State.RodBusy then
         return false
     end
 
@@ -5584,12 +5603,240 @@ function Systems.getNextPurchasableShopRod(data, requireAffordable)
     return nil
 end
 
-function Systems.isRodChangeSafe()
-    if State.AutoSellBusy or State.RodBusy then
+function Systems.getRodGameReleaseSnapshot()
+    local controllerState = getFishingState()
+    local loadoutLocked = false
+    local preLocked = false
+
+    if FishingController then
+        if type(FishingController.IsLoadoutLocked) == "function" then
+            local ok, value = pcall(function()
+                return FishingController:IsLoadoutLocked()
+            end)
+            if ok then
+                loadoutLocked = value == true
+            end
+        end
+
+        if type(FishingController.IsLoadoutPreLocked) == "function" then
+            local ok, value = pcall(function()
+                return FishingController:IsLoadoutPreLocked()
+            end)
+            if ok then
+                preLocked = value == true
+            end
+        end
+    end
+
+    local skillBusy =
+        LocalPlayer:GetAttribute("IsUsingSkill") == true
+
+    local heldReady = true
+    local heldInputEnabled = true
+
+    if HeldToolController then
+        if type(HeldToolController.IsReady) == "function" then
+            local ok, value = pcall(function()
+                return HeldToolController:IsReady()
+            end)
+            if ok then
+                heldReady = value == true
+            end
+        end
+
+        if type(HeldToolController.IsInputEnabled) == "function" then
+            local ok, value = pcall(function()
+                return HeldToolController:IsInputEnabled()
+            end)
+            if ok then
+                heldInputEnabled = value == true
+            end
+        end
+    end
+
+    local controllerSafe =
+        controllerState == nil
+        or controllerState == FState.Idling
+        or controllerState == FState.Holding
+
+    local released =
+        controllerSafe
+        and not loadoutLocked
+        and not preLocked
+        and not skillBusy
+        and heldReady
+        and heldInputEnabled
+
+    return released,
+        controllerState,
+        loadoutLocked,
+        preLocked,
+        skillBusy,
+        heldReady,
+        heldInputEnabled
+end
+
+function Systems.waitForRodTransactionRelease(reason, timeoutSeconds)
+    State.RodTransactionAttempts += 1
+    State.RodTransactionLastAt = os.clock()
+
+    local deadline =
+        os.clock() + math.max(2.5, tonumber(timeoutSeconds) or 5)
+
+    local cancelSent = false
+    local retrySent = false
+    local retryAt = os.clock() + 0.80
+
+    while State.Alive
+        and os.clock() < deadline do
+
+        local released,
+            controllerState,
+            loadoutLocked,
+            preLocked,
+            skillBusy,
+            heldReady,
+            heldInputEnabled =
+            Systems.getRodGameReleaseSnapshot()
+
+        local opIdle = State.Phase == "Idle"
+
+        if released and opIdle then
+            State.RodTransactionStatus =
+                "Fishing/loadout released"
+
+            task.wait(0.12)
+            return true
+        end
+
+        State.RodTransactionStatus =
+            "Waiting unlock: "
+            .. tostring(controllerState or "nil")
+            .. (loadoutLocked and " [loadout]" or "")
+            .. (preLocked and " [pre-lock]" or "")
+            .. (skillBusy and " [skill]" or "")
+            .. (not heldReady and " [backpack]" or "")
+            .. (not heldInputEnabled and " [input]" or "")
+            .. (
+                not opIdle
+                and " [OP " .. tostring(State.Phase) .. "]"
+                or ""
+            )
+
+        if not cancelSent then
+            cancelSent = true
+            Systems.requestOPCancel(reason or "rod transaction")
+        elseif not retrySent
+            and os.clock() >= retryAt then
+
+            retrySent = true
+            Systems.requestOPCancel("rod unlock retry")
+        end
+
+        task.wait(0.05)
+    end
+
+    State.RodTransactionFailures += 1
+    State.RodTransactionStatus =
+        "Cancelled: fishing/loadout stayed locked"
+
+    return false
+end
+
+function Systems.beginRodTransaction(reason)
+    if State.RodBusy
+        or State.AutoSellBusy
+        or State.TravelBusy
+        or State.BossBusy
+        or State.BossOwnedMovement
+        or State.ProgressionNavigationBusy
+        or State.QuestBusy
+        or State.SkillTransferBusy
+        or State.OPShutdownBusy then
+
         return false
     end
 
-    return State.Phase == "Idle"
+    State.RodBusy = true
+    State.RodTransactionStatus =
+        "Preparing: " .. tostring(reason or "rod change")
+
+    mouseUp()
+
+    local ready =
+        Systems.waitForRodTransactionRelease(reason, 5)
+
+    if not ready then
+        State.RodBusy = false
+        return false
+    end
+
+    resetOPSession(0)
+    return true
+end
+
+function Systems.finishRodTransaction(success, status)
+    State.LastObservedRodId = nil
+    State.LastHeldRodToolId = nil
+    State.LastSkillTransferRodId = nil
+    State.LastRodWatchCheck = 0
+    State.LastBestSkillCheck = 0
+    State.AutoEquipRodLastAt = 0
+    State.AutoEquipRodPendingUntil = 0
+    State.AutoLookForceCheck = true
+    State.AutoLookLastWatchAt = 0
+    State.CoordinatorForceRecheck = true
+
+    State.RodBusy = false
+    State.RodTransactionStatus =
+        tostring(
+            status
+            or (
+                success
+                and "Rod transaction complete"
+                or "Rod transaction failed"
+            )
+        )
+
+    if Config.Enabled then
+        State.LastPacketAt = os.clock()
+        resetOPSession(success and 0.20 or 0.35)
+    end
+
+    if Config.AutoEquipRod then
+        task.delay(0.15, function()
+            if State.Alive
+                and Config.AutoEquipRod
+                and not State.RodBusy then
+
+                pcall(Systems.stepAutoEquipRod)
+            end
+        end)
+    end
+end
+
+function Systems.isRodChangeSafe()
+    if State.AutoSellBusy
+        or State.RodBusy
+        or State.TravelBusy
+        or State.BossBusy
+        or State.BossOwnedMovement
+        or State.ProgressionNavigationBusy
+        or State.QuestBusy
+        or State.SkillTransferBusy
+        or State.OPShutdownBusy then
+
+        return false
+    end
+
+    if State.Phase ~= "Idle" then
+        return false
+    end
+
+    local released =
+        Systems.getRodGameReleaseSnapshot()
+
+    return released == true
 end
 
 function Systems.equipRodById(rodId)
@@ -5599,97 +5846,82 @@ function Systems.equipRodById(rodId)
 
     local data = getPlayerData()
 
-    if not data or type(data.Rods) ~= "table" then
+    if not data
+        or type(data.Rods) ~= "table" then
+
         State.RodLastStatus = "Player data unavailable"
         return false
     end
 
-    if not rodId or data.Rods[rodId] == nil then
+    if not rodId
+        or data.Rods[rodId] == nil then
+
         State.RodLastStatus = "Rod not owned"
         return false
     end
 
     if data.RodEquip == rodId then
         State.RodLastEquipped = rodId
-        State.RodLastStatus = "Already equipped: " .. (Systems.RodIdToName[rodId] or rodId)
+        State.RodLastStatus =
+            "Already equipped: "
+            .. tostring(Systems.RodIdToName[rodId] or rodId)
         return true
     end
 
-    if not Systems.isRodChangeSafe() then
-        State.RodLastStatus = "Waiting for fishing to become idle"
-        return false
-    end
+    if not EquipmentsController
+        or not EquipmentsController.EquipmentEquip then
 
-    if not EquipmentsController or not EquipmentsController.EquipmentEquip then
         State.RodLastStatus = "Equipment controller unavailable"
         return false
     end
 
-    State.RodBusy = true
+    if not Systems.beginRodTransaction(
+        "equip "
+        .. tostring(Systems.RodIdToName[rodId] or rodId)
+    ) then
+
+        State.RodLastStatus = State.RodTransactionStatus
+        return false
+    end
+
+    State.RodTransactionStatus =
+        "Equipping "
+        .. tostring(Systems.RodIdToName[rodId] or rodId)
 
     local ok, accepted = pcall(function()
         return EquipmentsController.EquipmentEquip:Fire("rod", rodId)
     end)
 
-    State.RodBusy = false
-
     if not ok or accepted ~= true then
-        State.RodLastStatus = "Equip rejected: " .. (Systems.RodIdToName[rodId] or rodId)
-        return false
-    end
-
-    local replicated =
-        Systems.waitForRodEquip(
-            rodId,
-            2
-        )
-
-    if not replicated then
         State.RodLastStatus =
-            "Equip sent; waiting for rod data: "
-            .. tostring(
-                Systems.RodIdToName[
-                    rodId
-                ]
-                or rodId
-            )
+            "Equip rejected: "
+            .. tostring(Systems.RodIdToName[rodId] or rodId)
 
+        Systems.finishRodTransaction(false, State.RodLastStatus)
         return false
     end
 
-    State.RodLastEquipped =
-        rodId
+    if not Systems.waitForRodEquip(rodId, 3) then
+        State.RodLastStatus =
+            "Equip did not replicate: "
+            .. tostring(Systems.RodIdToName[rodId] or rodId)
 
+        Systems.finishRodTransaction(false, State.RodLastStatus)
+        return false
+    end
+
+    State.RodLastEquipped = rodId
     State.RodLastStatus =
         "Equipped: "
-        .. tostring(
-            Systems.RodIdToName[
-                rodId
-            ]
-            or rodId
-        )
+        .. tostring(Systems.RodIdToName[rodId] or rodId)
 
-    State.LastObservedRodId =
-        nil
-
-    State.LastSkillTransferRodId =
-        nil
-
-    State.LastRodWatchCheck =
-        0
-
-    State.LastBestSkillCheck =
-        0
-
-    Systems.resetFishingForRodChange(
-        "Rod equipped; OP fishing restarting"
+    Systems.finishRodTransaction(
+        true,
+        "Equipped/unlocked: "
+        .. tostring(Systems.RodIdToName[rodId] or rodId)
     )
 
-    log(
-        "Rod:",
-        State.RodLastStatus
-    )
-
+    log("Rod:", State.RodLastStatus)
     return true
 end
 
@@ -5711,14 +5943,17 @@ function Systems.purchaseNextRod()
     end
 
     local data = getPlayerData()
-    local nextRod = Systems.getNextPurchasableShopRod(data, false)
+    local nextRod =
+        Systems.getNextPurchasableShopRod(data, false)
 
     if not nextRod then
-        State.RodLastStatus = "No remaining unlocked shop rod"
+        State.RodLastStatus =
+            "No remaining unlocked shop rod"
         return false
     end
 
-    local coins = tonumber(data and data.Coin) or 0
+    local coins =
+        tonumber(data and data.Coin) or 0
 
     if coins < nextRod.price then
         State.RodLastStatus =
@@ -5732,95 +5967,103 @@ function Systems.purchaseNextRod()
 
     if not FishingRodShopController
         or not FishingRodShopController.PurchaseRod then
-        State.RodLastStatus = "Rod shop controller unavailable"
+
+        State.RodLastStatus =
+            "Rod shop controller unavailable"
         return false
     end
 
-    if not Systems.isRodChangeSafe() then
-        State.RodLastStatus = "Waiting for fishing to become idle"
+    if not Systems.beginRodTransaction(
+        "buy " .. tostring(nextRod.name)
+    ) then
+
+        State.RodLastStatus = State.RodTransactionStatus
         return false
     end
 
-    State.RodBusy = true
+    State.RodTransactionStatus =
+        "Purchasing " .. tostring(nextRod.name)
 
     local ok, accepted = pcall(function()
         return FishingRodShopController.PurchaseRod:Fire(nextRod.id)
     end)
 
-    State.RodBusy = false
-
     if not ok or accepted ~= true then
-        State.RodLastStatus = "Purchase rejected: " .. nextRod.name
+        State.RodLastStatus =
+            "Purchase rejected: " .. tostring(nextRod.name)
+
+        Systems.finishRodTransaction(false, State.RodLastStatus)
         return false
     end
 
     State.RodLastPurchased = nextRod.id
     State.RodLastStatus =
-        string.format("Purchased %s for %d Coins", nextRod.name, nextRod.price)
+        string.format(
+            "Purchased %s for %d Coins",
+            nextRod.name,
+            nextRod.price
+        )
 
     log("Rod:", State.RodLastStatus)
 
-    -- Wait until the purchased rod exists in replicated player data.
-    local ownershipDeadline =
-        os.clock() + 2.5
+    State.RodTransactionStatus =
+        "Waiting for purchased rod data"
+
+    local owned = false
+    local ownershipDeadline = os.clock() + 3.5
 
     while State.Alive
         and os.clock() < ownershipDeadline do
 
-        local refreshed =
-            getPlayerData()
+        local refreshed = getPlayerData()
 
         if refreshed
-            and type(refreshed.Rods)
-                == "table"
-            and refreshed.Rods[
-                nextRod.id
-            ] ~= nil then
+            and type(refreshed.Rods) == "table"
+            and refreshed.Rods[nextRod.id] ~= nil then
 
+            owned = true
             break
         end
 
         task.wait(0.05)
     end
 
-    if Config.AutoEquipBestRod then
-        Systems.equipBestOwnedRod()
-    else
-        -- Even if this purchase does not change the selected rod, re-arm the
-        -- OP session so shop UI/loadout replication cannot leave fishing stale.
-        Systems.resetFishingForRodChange(
-            "Rod purchase finished; OP fishing resumed"
-        )
+    if not owned then
+        State.RodLastStatus =
+            "Purchase accepted but rod data did not replicate"
+
+        Systems.finishRodTransaction(false, State.RodLastStatus)
+        return false
     end
 
-    State.LastObservedRodId = nil
-    State.LastHeldRodToolId = nil
+    if Config.AutoEquipBestRod then
+        local refreshed = getPlayerData()
+        local bestId =
+            Systems.getBestOwnedRod(refreshed)
+            or nextRod.id
+
+        State.RodTransactionStatus =
+            "Equipping new best rod"
+
+        if not Systems.rawEquipRod(bestId) then
+            State.RodLastStatus =
+                "Bought rod, but best-rod equip did not replicate"
+
+            Systems.finishRodTransaction(false, State.RodLastStatus)
+            return false
+        end
+
+        State.RodLastEquipped = bestId
+    end
+
+    Systems.finishRodTransaction(
+        true,
+        "Purchase/equip complete; configuring skills"
+    )
+
+    State.LastBestSkillCheck = 0
     State.LastSkillTransferRodId = nil
     State.LastRodWatchCheck = 0
-    State.LastBestSkillCheck = 0
-    State.AutoEquipRodLastAt = 0
-    State.AutoEquipRodPendingUntil = 0
-
-    task.delay(0.18, function()
-        if not State.Alive then
-            return
-        end
-
-        if Config.AutoEquipRod then
-            pcall(
-                Systems.stepAutoEquipRod
-            )
-        end
-
-        State.AutoLookForceCheck = true
-        State.AutoLookLastWatchAt = 0
-
-        if Config.Enabled then
-            Systems.resetFishingForRodChange(
-                "New rod ready; OP fishing resumed"
-            )
-        end
-    end)
 
     return true
 end
@@ -5854,10 +6097,6 @@ function Systems.stepRodAutomation()
     end
 
     State.LastRodAutomationCheck = now
-
-    if not Systems.isRodChangeSafe() then
-        return
-    end
 
     if Config.AutoBuyNextRod then
         local data = getPlayerData()
@@ -13542,6 +13781,11 @@ function Systems.buildStatusText()
                 State.AutoEquipRodStatus
                 or "Off"
             ),
+        "Rod Tx: "
+            .. tostring(
+                State.RodTransactionStatus
+                or "Idle"
+            ),
         "Auto Look: "
             .. tostring(
                 State.WaterLookStatus
@@ -14380,6 +14624,7 @@ State.Worker = task.spawn(function()
                 or State.TravelBusy
                 or State.ProgressionNavigationBusy
                 or State.BossBusy
+                or State.RodBusy
                 or State.OPShutdownBusy
                 or State.ExtraEquipmentBusy
                 or State.QuestBusy
@@ -15309,6 +15554,11 @@ function Systems.updateRayfieldDashboard()
             .. tostring(
                 State.AntiAFKStatus
                 or "Off"
+            )
+            .. "\nRod transaction: "
+            .. tostring(
+                State.RodTransactionStatus
+                or "Idle"
             )
             .. "\nAFK stability: "
             .. tostring(
@@ -16258,7 +16508,7 @@ if Window then
 
     SettingsTab:CreateText({
         name = "Build",
-        text = "v20.3 • OP Only • Rayfield Gen2"
+        text = "v20.4 • OP Only • Rayfield Gen2"
             .. "\nTween speed: fixed 35 studs/s"
             .. "\nAuto Sell: teleport-only",
     })
@@ -16440,7 +16690,7 @@ if Window then
                 pcall(function()
                     Window:Toast({
                         title = "Fishing Suite",
-                        subtitle = "UI ready • v20.3",
+                        subtitle = "UI ready • v20.4",
                         position = "Bottom",
                         duration = 3,
                     })
@@ -16690,16 +16940,16 @@ API.Unload = function()
         pcall(State.FallbackGui.Destroy, State.FallbackGui)
     end
 
-    ENV.__FULL_AUTO_FISHING_DUAL_V20_3 = nil
-    print("[FishingV20.3] Unloaded")
+    ENV.__FULL_AUTO_FISHING_DUAL_V20_4 = nil
+    print("[FishingV20.4] Unloaded")
 end
 
-print("[FishingV20.3] Loaded")
-print("[FishingV20.3] Engine: OP only")
-print("[FishingV20.3] Auto Sell uses a multi-select rarity dropdown and sells only when inventory is full.")
-print("[FishingV20.3] Rod automation: Auto Equip Best + Auto Buy Next Rod added.")
-print("[FishingV20.3] Islands: TweenService movement added (no Fast Travel pass).")
-print("[FishingV20.3] Quest automation: Islands/Rods/Souls/Skills quest manager added.")
-print("[FishingV20.3] Auto Progression: movement deadlock + fishing startup fixed.")
-print("[FishingV20.3] Full suite: Boss/Weather, Aura/Cosmetics, Bait, Rewards, Targets, ESP, Dashboard, and Gacha tracking added.")
-print("[FishingV20.3] UI polish + rod watchdog + automatic best-skill transfer added.")
+print("[FishingV20.4] Loaded")
+print("[FishingV20.4] Engine: OP only")
+print("[FishingV20.4] Auto Sell uses a multi-select rarity dropdown and sells only when inventory is full.")
+print("[FishingV20.4] Rod automation: Auto Equip Best + Auto Buy Next Rod added.")
+print("[FishingV20.4] Islands: TweenService movement added (no Fast Travel pass).")
+print("[FishingV20.4] Quest automation: Islands/Rods/Souls/Skills quest manager added.")
+print("[FishingV20.4] Auto Progression: movement deadlock + fishing startup fixed.")
+print("[FishingV20.4] Full suite: Boss/Weather, Aura/Cosmetics, Bait, Rewards, Targets, ESP, Dashboard, and Gacha tracking added.")
+print("[FishingV20.4] UI polish + rod watchdog + automatic best-skill transfer added.")
