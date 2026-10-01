@@ -1,5 +1,5 @@
 --[[
-    Full Auto Fishing v16.2 - EXACT BOAT PROMPT + BOAT TELEPORT TEST
+    Full Auto Fishing v16.3 - EXACT BOAT PROMPT + BOAT TWEEN TEST
     Target place: Place_99925503388128
 
     Modes:
@@ -36,6 +36,7 @@ local ENV = (getgenv and getgenv()) or _G
 --==============================================================
 
 for _, key in ipairs({
+    "__FULL_AUTO_FISHING_DUAL_V16_3",
     "__FULL_AUTO_FISHING_DUAL_V16_2",
     "__FULL_AUTO_FISHING_DUAL_V16_1",
     "__FULL_AUTO_FISHING_DUAL_V16",
@@ -343,7 +344,7 @@ local Config = {
     ProgressionUseFreeBoat = true,
     ProgressionBoatArrivalRadius = 135,
     ProgressionBoatTimeout = 120,
-    ProgressionBoatTeleportTest = true,
+    ProgressionBoatTweenTest = true,
 
     -- Skill Rotation
     SkillRotationMode = "Strongest Ready",
@@ -505,9 +506,9 @@ local State = {
     ProgressionNavigationStatus = "Idle",
     ProgressionBoatTargetIslandId = "",
     ProgressionBoatLastSpawnAt = 0,
-    BoatTeleportAttempts = 0,
-    BoatTeleportAccepted = 0,
-    BoatTeleportRejected = 0,
+    BoatTweenAttempts = 0,
+    BoatTweenAccepted = 0,
+    BoatTweenRejected = 0,
     LastPromptRepairAt = 0,
     FastPathReplans = 0,
     BoatKeyState = {
@@ -601,7 +602,7 @@ local API = {
     State = State,
 }
 
-ENV.__FULL_AUTO_FISHING_DUAL_V16_2 = API
+ENV.__FULL_AUTO_FISHING_DUAL_V16_3 = API
 
 --==============================================================
 -- HELPERS
@@ -609,12 +610,12 @@ ENV.__FULL_AUTO_FISHING_DUAL_V16_2 = API
 
 local function log(...)
     if Config.Debug then
-        print("[FishingV16.2]", ...)
+        print("[FishingV16.3]", ...)
     end
 end
 
 local function warnf(...)
-    warn("[FishingV16.2]", ...)
+    warn("[FishingV16.3]", ...)
 end
 
 local function track(connection)
@@ -5145,7 +5146,7 @@ function Systems.enterProgressionBoat(
     return false
 end
 
-function Systems.tryTeleportBoatToIsland(
+function Systems.tryTweenBoatToIsland(
     islandId,
     boat,
     seat,
@@ -5171,69 +5172,191 @@ function Systems.tryTeleportBoatToIsland(
         or seat.Occupant ~= humanoid then
 
         State.ProgressionNavigationStatus =
-            "Must be seated before boat teleport"
+            "Must be seated before boat tween"
         return false
     end
 
-    State.BoatTeleportAttempts += 1
+    State.BoatTweenAttempts += 1
 
     local target =
         destination
         * CFrame.new(0, 5, 0)
 
+    local startFrame =
+        boat:GetPivot()
+
+    local distance =
+        (
+            startFrame.Position
+            - target.Position
+        ).Magnitude
+
+    local speed =
+        math.clamp(
+            tonumber(
+                Config.TravelTweenSpeed
+            ) or 50,
+            10,
+            70
+        )
+
+    local duration =
+        math.max(
+            0.15,
+            distance / speed
+        )
+
     State.ProgressionNavigationStatus =
-        "Testing one boat teleport"
+        "Tweening boat to "
+        .. tostring(
+            Systems.IslandIdToName[islandId]
+            or islandId
+        )
+        .. " at "
+        .. tostring(speed)
+        .. " studs/s"
 
-    local moved = pcall(function()
-        boat:PivotTo(target)
+    Systems.releaseBoatControls()
 
-        main.AssemblyLinearVelocity =
-            Vector3.zero
-        main.AssemblyAngularVelocity =
-            Vector3.zero
-    end)
+    -- Tween a CFrameValue and apply each intermediate frame to the
+    -- entire boat model. This keeps the boat motion smooth instead of
+    -- instantly PivotTo-ing the destination.
+    local driver =
+        Instance.new("CFrameValue")
 
-    if not moved then
-        State.BoatTeleportRejected += 1
-        State.ProgressionNavigationStatus =
-            "Boat teleport failed locally"
+    driver.Value = startFrame
+
+    local connection =
+        driver:GetPropertyChangedSignal(
+            "Value"
+        ):Connect(function()
+            if boat.Parent
+                and main.Parent then
+
+                boat:PivotTo(
+                    driver.Value
+                )
+
+                main.AssemblyLinearVelocity =
+                    Vector3.zero
+                main.AssemblyAngularVelocity =
+                    Vector3.zero
+            end
+        end)
+
+    local tween =
+        TweenService:Create(
+            driver,
+            TweenInfo.new(
+                duration,
+                Enum.EasingStyle.Linear,
+                Enum.EasingDirection.Out
+            ),
+            {
+                Value = target,
+            }
+        )
+
+    local finished = false
+
+    local completedConnection =
+        tween.Completed:Connect(
+            function(playbackState)
+                finished =
+                    playbackState
+                    == Enum.PlaybackState.Completed
+            end
+        )
+
+    tween:Play()
+
+    local deadline =
+        os.clock()
+        + duration
+        + 1.50
+
+    while State.Alive
+        and os.clock() < deadline
+        and not finished do
+
+        if not boat.Parent
+            or not main.Parent
+            or seat.Occupant ~= humanoid then
+            break
+        end
+
+        task.wait(0.05)
+    end
+
+    if tween.PlaybackState
+        == Enum.PlaybackState.Playing then
+        tween:Cancel()
+    end
+
+    if connection then
+        connection:Disconnect()
+    end
+
+    if completedConnection then
+        completedConnection:Disconnect()
+    end
+
+    driver:Destroy()
+
+    if not finished then
+        State.BoatTweenRejected += 1
+
+        if not boat.Parent
+            or not main.Parent then
+
+            State.ProgressionNavigationStatus =
+                "Boat disappeared during tween"
+        elseif seat.Occupant ~= humanoid then
+            State.ProgressionNavigationStatus =
+                "Boat seat was lost during tween"
+        else
+            State.ProgressionNavigationStatus =
+                "Boat tween did not complete"
+        end
+
         return false
     end
 
+    -- Let replication settle before deciding whether the move stuck.
     task.wait(0.85)
 
     if not boat.Parent
         or not main.Parent then
 
-        State.BoatTeleportRejected += 1
+        State.BoatTweenRejected += 1
         State.ProgressionNavigationStatus =
-            "Boat disappeared after teleport"
+            "Boat disappeared after tween"
         return false
     end
 
-    local distance =
+    local finalDistance =
         (
             main.Position
             - target.Position
         ).Magnitude
 
-    if distance > 55 then
-        State.BoatTeleportRejected += 1
+    if finalDistance > 55 then
+        State.BoatTweenRejected += 1
         State.ProgressionNavigationStatus =
-            "Boat teleport was corrected"
+            "Boat tween was corrected"
         return false
     end
 
     if seat.Occupant ~= humanoid then
-        State.BoatTeleportRejected += 1
+        State.BoatTweenRejected += 1
         State.ProgressionNavigationStatus =
-            "Boat moved but seat was lost"
+            "Boat tween completed but seat was lost"
         return false
     end
 
-    State.BoatTeleportAccepted += 1
+    State.BoatTweenAccepted += 1
     State.ProgressionNavigationStatus =
-        "Boat teleport accepted"
+        "Boat tween accepted"
 
     return true
 end
@@ -5516,7 +5639,7 @@ function Systems.progressionNavigateToIsland(
 
     State.ProgressionNavigationBusy = true
     State.ProgressionNavigationStatus =
-        "Preparing boat teleport test"
+        "Preparing boat tween test"
     State.TravelBusy = true
 
     mouseUp()
@@ -5543,7 +5666,7 @@ function Systems.progressionNavigateToIsland(
             return
         end
 
-        if not Systems.tryTeleportBoatToIsland(
+        if not Systems.tryTweenBoatToIsland(
             islandId,
             boat,
             seat,
@@ -5575,7 +5698,7 @@ function Systems.progressionNavigateToIsland(
         Systems.restoreStandingPromptState()
     elseif not success
         and State.ProgressionNavigationStatus
-            ~= "Boat teleport was corrected" then
+            ~= "Boat tween was corrected" then
 
         Systems.forceStandAndRestorePrompts()
     end
@@ -5609,7 +5732,7 @@ function Systems.progressionNavigateToIsland(
 
     if success then
         State.ProgressionNavigationStatus =
-            "Arrived by boat teleport: "
+            "Arrived by boat tween: "
             .. tostring(
                 Systems.IslandIdToName[islandId]
                 or islandId
@@ -8484,7 +8607,7 @@ if Rayfield then
     local ok, result = pcall(function()
         return Rayfield:CreateWindow({
             name = "Fishing Automation",
-            subtitle = "Full Suite v16.2 • Exact Boat Prompt + Boat Teleport Test",
+            subtitle = "Full Suite v16.3 • Exact Boat Prompt + Boat Tween Test",
             sidebarLayout = true,
             theme = "amethyst",
             profile = "Fishing",
@@ -8492,7 +8615,7 @@ if Rayfield then
             configuration = {
                 autoSave = true,
                 autoLoad = true,
-                fileName = "FullAutoFishing_DualMode_v16_2",
+                fileName = "FullAutoFishing_DualMode_v16_3",
             },
         })
     end)
@@ -9343,17 +9466,17 @@ API.Unload = function()
         pcall(State.FallbackGui.Destroy, State.FallbackGui)
     end
 
-    ENV.__FULL_AUTO_FISHING_DUAL_V16_2 = nil
-    print("[FishingV16.2] Unloaded")
+    ENV.__FULL_AUTO_FISHING_DUAL_V16_3 = nil
+    print("[FishingV16.3] Unloaded")
 end
 
-print("[FishingV16.2] Loaded")
-print("[FishingV16.2] Default mode:", Config.Mode)
-print("[FishingV16.2] Select Legit or OP in the Rayfield Fishing Mode dropdown.")
-print("[FishingV16.2] Auto Sell uses a multi-select rarity dropdown and sells only when inventory is full.")
-print("[FishingV16.2] Rod automation: Auto Equip Best + Auto Buy Next Rod added.")
-print("[FishingV16.2] Islands: TweenService movement added (no Fast Travel pass).")
-print("[FishingV16.2] Quest automation: Islands/Rods/Souls/Skills quest manager added.")
-print("[FishingV16.2] Auto Progression: movement deadlock + fishing startup fixed.")
-print("[FishingV16.2] Full suite: Boss/Weather, Aura/Cosmetics, Bait, Rewards, Targets, ESP, Dashboard, and Gacha tracking added.")
-print("[FishingV16.2] UI polish + rod watchdog + automatic best-skill transfer added.")
+print("[FishingV16.3] Loaded")
+print("[FishingV16.3] Default mode:", Config.Mode)
+print("[FishingV16.3] Select Legit or OP in the Rayfield Fishing Mode dropdown.")
+print("[FishingV16.3] Auto Sell uses a multi-select rarity dropdown and sells only when inventory is full.")
+print("[FishingV16.3] Rod automation: Auto Equip Best + Auto Buy Next Rod added.")
+print("[FishingV16.3] Islands: TweenService movement added (no Fast Travel pass).")
+print("[FishingV16.3] Quest automation: Islands/Rods/Souls/Skills quest manager added.")
+print("[FishingV16.3] Auto Progression: movement deadlock + fishing startup fixed.")
+print("[FishingV16.3] Full suite: Boss/Weather, Aura/Cosmetics, Bait, Rewards, Targets, ESP, Dashboard, and Gacha tracking added.")
+print("[FishingV16.3] UI polish + rod watchdog + automatic best-skill transfer added.")
