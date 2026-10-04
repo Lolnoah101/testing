@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// LOBBY + FARM
+--// UPDATE-COMPATIBLE LOBBY + FARM
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -2009,51 +2009,68 @@ FarmTab:CreateDropdown({
 
     local TraitNameToId = {
 
-        ["Power"] = 7,
+        ["Power 1"] = 7,
+        ["Power 2"] = 15,
+        ["Power 3"] = 16,
 
-        ["Swift"] = 8,
+        ["Swift 1"] = 8,
+        ["Swift 2"] = 17,
+        ["Swift 3"] = 18,
 
-        ["Focus"] = 9,
+        ["Focus 1"] = 9,
+        ["Focus 2"] = 19,
+        ["Focus 3"] = 20,
 
         ["Fortune"] = 10,
-
         ["Vitality"] = 11,
-
         ["Hunter"] = 12,
-
-        ["Bloodlust"] = 13,
-
+        ["Ferocity"] = 13,
         ["Supernova"] = 14,
+
+        -- Saved-config compatibility aliases from the pre-update trait names.
+        ["Power"] = 7,
+        ["Swift"] = 8,
+        ["Focus"] = 9,
+        ["Bloodlust"] = 13,
     }
 
 
-    local TraitIdToName = {}
-
-    for Name, Id in pairs(
-        TraitNameToId
-    ) do
-
-        TraitIdToName[Id] =
-            Name
-    end
+    local TraitIdToName = {
+        [7] = "Power 1",
+        [15] = "Power 2",
+        [16] = "Power 3",
+        [8] = "Swift 1",
+        [17] = "Swift 2",
+        [18] = "Swift 3",
+        [9] = "Focus 1",
+        [19] = "Focus 2",
+        [20] = "Focus 3",
+        [10] = "Fortune",
+        [11] = "Vitality",
+        [12] = "Hunter",
+        [13] = "Ferocity",
+        [14] = "Supernova",
+    }
 
 
     local TraitOptions = {
 
-        "Power",
+        "Power 1",
+        "Power 2",
+        "Power 3",
 
-        "Swift",
+        "Swift 1",
+        "Swift 2",
+        "Swift 3",
 
-        "Focus",
+        "Focus 1",
+        "Focus 2",
+        "Focus 3",
 
         "Fortune",
-
         "Vitality",
-
         "Hunter",
-
-        "Bloodlust",
-
+        "Ferocity",
         "Supernova",
     }
 
@@ -2065,201 +2082,87 @@ FarmTab:CreateDropdown({
     local CraftRecipes = {
 
         ["Leaf Shinobi Headband"] = {
-
             CraftId = "1",
-
             AccessoryId = "101",
-
-            Materials = {
-                ["101"] = 30,
-                ["102"] = 8,
-            },
+            Materials = { ["101"] = 12, ["102"] = 5 },
         },
-
 
         ["Gentleman's Top Hat"] = {
-
             CraftId = "2",
-
             AccessoryId = "102",
-
-            Materials = {
-                ["101"] = 35,
-                ["110"] = 3,
-            },
+            Materials = { ["101"] = 8 },
         },
-
 
         ["Capsule Scarf"] = {
-
             CraftId = "3",
-
             AccessoryId = "103",
-
-            Materials = {
-                ["101"] = 30,
-                ["105"] = 10,
-            },
+            Materials = { ["101"] = 16, ["102"] = 6 },
         },
-
 
         ["8th Brigade Fire Hat"] = {
-
             CraftId = "4",
-
             AccessoryId = "104",
-
-            Materials = {
-                ["101"] = 25,
-                ["105"] = 8,
-                ["109"] = 4,
-            },
+            Materials = { ["101"] = 20, ["102"] = 8 },
         },
-
 
         ["SunGlasses"] = {
-
             CraftId = "5",
-
             AccessoryId = "105",
-
-            Materials = {
-                ["105"] = 20,
-                ["106"] = 12,
-                ["109"] = 6,
-            },
+            Materials = { ["101"] = 20, ["106"] = 8 },
         },
-
 
         ["Kitsune Mask"] = {
-
             CraftId = "6",
-
             AccessoryId = "106",
-
-            Materials = {
-                ["102"] = 18,
-                ["110"] = 10,
-                ["104"] = 4,
-            },
+            Materials = { ["102"] = 12, ["106"] = 18, ["104"] = 6 },
         },
-
 
         ["Diva Headphones"] = {
-
             CraftId = "7",
-
             AccessoryId = "107",
-
-            Materials = {
-                ["105"] = 25,
-                ["110"] = 12,
-                ["112"] = 3,
-            },
+            Materials = { ["101"] = 30, ["107"] = 20, ["105"] = 8 },
         },
-
 
         ["Panther Hollow Mask"] = {
-
             CraftId = "8",
-
             AccessoryId = "108",
-
-            Materials = {
-                ["106"] = 18,
-                ["104"] = 5,
-                ["108"] = 4,
-            },
+            Materials = { ["106"] = 24, ["104"] = 8, ["108"] = 8 },
         },
-
 
         ["Light Admiral Cloak"] = {
-
             CraftId = "9",
-
             AccessoryId = "109",
-
-            Materials = {
-                ["101"] = 75,
-                ["109"] = 18,
-                ["111"] = 5,
-                ["112"] = 8,
-            },
+            Materials = { ["101"] = 60, ["112"] = 12, ["109"] = 5, ["111"] = 5 },
         },
-
 
         ["Wind Spirit Wing"] = {
-
             CraftId = "10",
-
             AccessoryId = "110",
-
-            Materials = {
-                ["103"] = 40,
-                ["110"] = 20,
-                ["108"] = 8,
-                ["112"] = 6,
-            },
+            Materials = { ["103"] = 40, ["108"] = 12, ["112"] = 12, ["110"] = 6 },
         },
-
 
         ["Dark Captain Wings"] = {
-
             CraftId = "11",
-
             AccessoryId = "111",
-
-            Materials = {
-                ["103"] = 45,
-                ["107"] = 20,
-                ["104"] = 8,
-                ["108"] = 10,
-            },
+            Materials = { ["103"] = 16, ["107"] = 16, ["104"] = 6, ["108"] = 6 },
         },
-
 
         ["Flame Pirate Hat"] = {
-
             CraftId = "12",
-
             AccessoryId = "112",
-
-            Materials = {
-                ["101"] = 70,
-                ["109"] = 16,
-                ["111"] = 6,
-                ["112"] = 10,
-            },
+            Materials = { ["101"] = 70, ["105"] = 14, ["109"] = 6, ["111"] = 6 },
         },
-
 
         ["Blast Archer Crown"] = {
-
             CraftId = "13",
-
             AccessoryId = "113",
-
-            Materials = {
-                ["107"] = 35,
-                ["110"] = 30,
-                ["108"] = 18,
-                ["112"] = 12,
-            },
+            Materials = { ["107"] = 60, ["110"] = 8, ["109"] = 8, ["111"] = 8 },
         },
 
-
         ["Blast Archer Wings"] = {
-
             CraftId = "14",
-
             AccessoryId = "114",
-
-            Materials = {
-                ["103"] = 70,
-                ["110"] = 25,
-                ["108"] = 20,
-                ["112"] = 15,
-            },
+            Materials = { ["103"] = 80, ["110"] = 10, ["109"] = 10, ["111"] = 10 },
         },
     }
 
@@ -2413,9 +2316,9 @@ FarmTab:CreateDropdown({
     local SendWeaponSpinOnce
 
     -- Game-backed roll pacing.
-    -- Weapon UI waits 1.15s after CharacterRolled before it becomes ready again.
+    -- Updated game AutoRoll uses a 1.25s delay between weapon rolls.
     -- Both weapon and trait UIs use a 6s request timeout.
-    local WEAPON_ROLL_DELAY = 1.15
+    local WEAPON_ROLL_DELAY = 1.25
     local TRAIT_ROLL_DELAY = 4.20
     local ROLL_REQUEST_TIMEOUT = 6.00
 
@@ -3718,6 +3621,113 @@ end
         end)
 
 
+    -- Read the current crafting recipe config from the game instead of
+    -- relying on balance values baked into this script. The static table
+    -- above remains only as a fallback if the config cannot be required.
+    pcall(function()
+
+        local LiveCraftConfig =
+            require(
+                ExtraReplicatedStorage
+                    :WaitForChild("assets")
+                    :WaitForChild("config")
+                    :WaitForChild("accessoryCraftConfig")
+            )
+
+
+        if type(LiveCraftConfig) ~= "table" then
+            return
+        end
+
+
+        for CraftId, Definition in pairs(LiveCraftConfig) do
+
+            local NumericId =
+                tonumber(CraftId)
+
+            local ItemName =
+                NumericId
+                and CraftOptions[NumericId]
+
+
+            if ItemName
+                and type(Definition) == "table"
+            then
+
+                local Materials = {}
+
+                if type(Definition.Misc) == "string" then
+
+                    for Entry in string.gmatch(
+                        Definition.Misc,
+                        "[^|]+"
+                    ) do
+
+                        local MaterialId,
+                            AmountText =
+                            string.match(
+                                Entry,
+                                "^%s*([^,]+)%s*,%s*(%d+)%s*$"
+                            )
+
+                        local Amount =
+                            tonumber(AmountText)
+
+                        if MaterialId and Amount then
+                            Materials[tostring(MaterialId)] =
+                                Amount
+                        end
+                    end
+                end
+
+
+                CraftRecipes[ItemName] = {
+                    CraftId = tostring(CraftId),
+                    AccessoryId = tostring(
+                        Definition.CarftID
+                        or Definition.CraftID
+                        or ""
+                    ),
+                    Materials = Materials,
+                }
+            end
+        end
+
+        print(
+            "[Anime Zero][Crafting] Live accessoryCraftConfig loaded."
+        )
+    end)
+
+
+    -- Keep result names synced with the live trait config as well. The
+    -- dropdown list above contains the current update's selectable traits.
+    pcall(function()
+
+        local LiveTraitConfig =
+            require(
+                ExtraReplicatedStorage
+                    :WaitForChild("assets")
+                    :WaitForChild("config")
+                    :WaitForChild("Traits")
+                    :WaitForChild("traitConfig")
+            )
+
+        if type(LiveTraitConfig) == "table" then
+            for _, Definition in ipairs(LiveTraitConfig) do
+                if type(Definition) == "table"
+                    and tonumber(Definition.Id)
+                    and type(Definition.Name) == "string"
+                then
+                    TraitIdToName[tonumber(Definition.Id)] =
+                        Definition.Name
+                    TraitNameToId[Definition.Name] =
+                        tonumber(Definition.Id)
+                end
+            end
+        end
+    end)
+
+
     if not PacketsLoaded
         or not ExtraPackets
     then
@@ -3955,63 +3965,58 @@ end
     local EvolutionFallback = {
 
         luffy = {
-            ultimate = "101,15|102,1|110,1",
+            ultimate = "101,8|102,3|106,3",
+            currencies = { { currency = "gems", amount = 200 } },
         },
 
         goku = {
-            ultimate = "101,15|108,1|110,1",
+            ultimate = "101,8|102,3|106,3",
+            currencies = { { currency = "gems", amount = 200 } },
         },
 
         killua = {
-            ultimate = "101,20|112,1|110,1",
+            ultimate = "101,8|102,3|103,3",
+            currencies = { { currency = "gems", amount = 200 } },
         },
 
         juuzou = {
-            ultimate = "101,25|104,2|110,2",
+            ultimate = "101,20|106,10|104,5",
+            currencies = { { currency = "gems", amount = 750 } },
         },
 
         nagumo = {
-            ultimate = "101,20|107,2|110,2",
+            ultimate = "101,20|107,10|105,5",
+            currencies = { { currency = "gems", amount = 750 } },
         },
 
         saber = {
-            ultimate = "101,30|109,3|110,1",
+            ultimate = "101,30|107,12|105,6|109,3",
+            currencies = { { currency = "gems", amount = 1250 } },
         },
 
         guts = {
-            ultimate = "101,20|106,5|110,2",
-        },
-
-        shanks = {
-            ultimate = "101,30|111,3|110,1",
+            ultimate = "101,30|106,12|104,6|110,3",
+            currencies = { { currency = "gems", amount = 1250 } },
         },
 
         alucard = {
-            ultimate = "101,30|112,5|105,1|110,1",
+            ultimate = "101,30|106,12|108,6|110,3",
+            currencies = { { currency = "gems", amount = 1250 } },
+        },
+
+        shanks = {
+            ultimate = "101,45|103,20|112,10|111,4",
+            currencies = { { currency = "gems", amount = 1750 } },
         },
 
         sukuna = {
-            ultimate = "101,45|104,10|110,3",
-            currencies = {
-                {
-                    currency = "gems",
-                    amount = 1000,
-                },
-            },
+            ultimate = "101,45|106,20|104,10|110,4",
+            currencies = { { currency = "gems", amount = 1750 } },
         },
 
         miyabi = {
-            ultimate = "101,50|103,30|108,15|112,10|110,3",
-            currencies = {
-                {
-                    currency = "gems",
-                    amount = 2500,
-                },
-                {
-                    currency = "money",
-                    amount = 25000,
-                },
-            },
+            ultimate = "101,60|103,30|108,12|112,10|110,4",
+            currencies = { { currency = "gems", amount = 3000 } },
         },
     }
 
@@ -4921,8 +4926,8 @@ end
                     )
 
 
-                    -- The game's own summon UI waits 1.15 seconds after the
-                    -- CharacterRolled result before unlocking another spin.
+                    -- The updated game Auto Roll waits 1.25 seconds after the
+                    -- CharacterRolled result before starting another spin.
                     NextWeaponAutoSpinAt =
                         os.clock() + WEAPON_ROLL_DELAY
 
@@ -6141,7 +6146,7 @@ end
 
 
                 -- Match the game's 6 second timeout, then return to the
-                -- normal 1.15 second weapon presentation pacing.
+                -- updated 1.25 second weapon Auto Roll pacing.
                 NextWeaponAutoSpinAt =
                     math.max(
                         NextWeaponAutoSpinAt,
@@ -13794,6 +13799,18 @@ local function RequestBlock(State)
     end
 
 
+    -- Updated combat uses a guard meter. Never request a new block while
+    -- guard-broken or while the server's block cooldown is active.
+    if State == true
+        and (
+            LocalPlayer:GetAttribute("GuardBroken") == true
+            or not CooldownReady(Store, "block")
+        )
+    then
+        State = false
+    end
+
+
     if IsBlocking(Store) == State then
         return
     end
@@ -13862,6 +13879,21 @@ end
 
 
 local function ShouldHoldBlock()
+
+    if LocalPlayer:GetAttribute("GuardBroken") == true then
+        return false
+    end
+
+
+    local Guard =
+        tonumber(
+            LocalPlayer:GetAttribute("BlockGuard")
+        )
+
+    if Guard ~= nil and Guard <= 0 then
+        return false
+    end
+
 
     for _, EnemyState
         in pairs(
