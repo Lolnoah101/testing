@@ -58,46 +58,6 @@ GENV.__AZ_BOOT_PLACE = nil
 
     while os.clock() < Deadline do
 
-        -- Lobby place readiness.  Do not require anything here; Rayfield UI
-        -- still needs to be created before the game's lobby ModuleScripts.
-        local Lobby =
-            ReplicatedStorageService
-                :FindFirstChild(
-                    "lobby"
-                )
-
-
-        if Lobby then
-
-            local Global =
-                ReplicatedStorageService
-                    :FindFirstChild(
-                        "global"
-                    )
-
-
-            local Assets =
-                ReplicatedStorageService
-                    :FindFirstChild(
-                        "assets"
-                    )
-
-
-            if Lobby:FindFirstChild("packets")
-                and Lobby:FindFirstChild("enums")
-                and Lobby:FindFirstChild("stores")
-                and Global
-                and Assets
-            then
-
-                GENV.__AZ_BOOT_PLACE =
-                    "Lobby"
-
-                return
-            end
-        end
-
-
         -- Dungeon/endless/story place readiness.  Wait for the exact modules
         -- the farm engine later checks with FindFirstChild so it cannot return
         -- just because replication was a fraction of a second late.
@@ -143,6 +103,48 @@ GENV.__AZ_BOOT_PLACE = nil
 
                 GENV.__AZ_BOOT_PLACE =
                     "Dungeon"
+
+                return
+            end
+        end
+
+
+
+
+        -- Lobby place readiness.  Do not require anything here; Rayfield UI
+        -- still needs to be created before the game's lobby ModuleScripts.
+        local Lobby =
+            ReplicatedStorageService
+                :FindFirstChild(
+                    "lobby"
+                )
+
+
+        if Lobby then
+
+            local Global =
+                ReplicatedStorageService
+                    :FindFirstChild(
+                        "global"
+                    )
+
+
+            local Assets =
+                ReplicatedStorageService
+                    :FindFirstChild(
+                        "assets"
+                    )
+
+
+            if Lobby:FindFirstChild("packets")
+                and Lobby:FindFirstChild("enums")
+                and Lobby:FindFirstChild("stores")
+                and Global
+                and Assets
+            then
+
+                GENV.__AZ_BOOT_PLACE =
+                    "Lobby"
 
                 return
             end
@@ -249,6 +251,8 @@ local Settings = {
 
     AutoJoinEndless = false,
 
+    AutoJoinRaid = false,
+
     EndlessLeaveWave = 10,
 
     AutoLeaveEndlessAtWave = false,
@@ -283,6 +287,10 @@ local Settings = {
     AutoBlock = false,
 
     BlockMode = "Perfect Parry",
+
+    -- Raid-specific movement safety. Enabled by default so auto-farm can
+    -- react to No-Face ground AOEs without requiring another saved setting.
+    AutoDodgeRaidAOE = true,
 
 
     -- Interface
@@ -1469,11 +1477,98 @@ end
 --// UI FIRST
 --//============================================================
 
-local Rayfield = loadstring(
-    game:HttpGet(
-        "https://sirius.menu/gen2"
+local Rayfield = (function()
+
+    local Sources = {
+        "https://sirius.menu/gen2",
+        "https://sirius.menu/gen2-preview",
+    }
+
+    local LastError =
+        "unknown error"
+
+
+    for Attempt = 1, 3 do
+
+        for _, Url in ipairs(Sources) do
+
+            local HttpSuccess, SourceOrError =
+                pcall(function()
+                    return game:HttpGet(
+                        Url
+                    )
+                end)
+
+
+            if HttpSuccess
+                and type(SourceOrError) == "string"
+                and #SourceOrError > 0
+            then
+
+                local Chunk, CompileError =
+                    loadstring(SourceOrError)
+
+
+                if Chunk then
+
+                    local RunSuccess, LibraryOrError =
+                        pcall(Chunk)
+
+
+                    if RunSuccess
+                        and type(LibraryOrError) == "table"
+                        and type(LibraryOrError.CreateWindow) == "function"
+                    then
+
+                        print(
+                            "[Anime Zero] Rayfield Gen2 loaded:",
+                            Url,
+                            "attempt",
+                            Attempt
+                        )
+
+                        return LibraryOrError
+                    end
+
+
+                    if RunSuccess then
+                        LastError =
+                            "Rayfield source executed but returned "
+                            .. typeof(LibraryOrError)
+                            .. " instead of a library table"
+                    else
+                        LastError =
+                            "Rayfield runtime error: "
+                            .. tostring(LibraryOrError)
+                    end
+
+                else
+                    LastError =
+                        "Rayfield compile error: "
+                        .. tostring(CompileError)
+                end
+
+            else
+                LastError =
+                    "Rayfield HTTP error: "
+                    .. tostring(SourceOrError)
+            end
+
+
+            task.wait(0.35)
+        end
+
+
+        task.wait(0.75)
+    end
+
+
+    error(
+        "[Anime Zero] Unable to load Rayfield Gen2 after retries. "
+        .. LastError,
+        0
     )
-)()
+end)()
 
 
 local Window =
@@ -1481,7 +1576,7 @@ local Window =
 
         name = "Anime Zero",
 
-        subtitle = "Automation Suite",
+        subtitle = "Automation Suite - Raid Area Route",
 
         sidebarLayout = true,
 
@@ -1742,6 +1837,7 @@ end
                 SelectedEndlessDifficulty =
                     Single(Legacy.LobbyEndlessDifficulty),
                 AutoJoinEndless = Legacy.AutoJoinEndless,
+                AutoJoinRaid = Legacy.AutoJoinRaid,
                 EndlessLeaveWave = Legacy.EndlessWaveToLeave,
                 AutoLeaveEndlessAtWave =
                     Legacy.AutoLeaveEndlessAtWave,
@@ -1837,6 +1933,11 @@ end
             and Saved.AutoJoinEndless
             or Settings.AutoJoinEndless,
 
+        AutoJoinRaid =
+            type(Saved.AutoJoinRaid) == "boolean"
+            and Saved.AutoJoinRaid
+            or Settings.AutoJoinRaid,
+
         EndlessLeaveWave =
             math.clamp(
                 math.floor(
@@ -1896,6 +1997,9 @@ end
 
         Settings.AutoJoinEndless =
             User.AutoJoinEndless == true
+
+        Settings.AutoJoinRaid =
+            User.AutoJoinRaid == true
 
         Settings.EndlessLeaveWave =
             User.EndlessLeaveWave
@@ -2136,10 +2240,18 @@ LobbyTab:CreateToggle({
             Settings.AutoJoinEndless =
                 false
 
+            Settings.AutoJoinRaid =
+                false
+
 
             if type(Settings.SetLobbyUserPreference) == "function" then
                 Settings.SetLobbyUserPreference(
                     "AutoJoinEndless",
+                    false
+                )
+
+                Settings.SetLobbyUserPreference(
+                    "AutoJoinRaid",
                     false
                 )
             end
@@ -2567,10 +2679,18 @@ LobbyTab:CreateToggle({
             Settings.AutoJoinMap =
                 false
 
+            Settings.AutoJoinRaid =
+                false
+
 
             if type(Settings.SetLobbyUserPreference) == "function" then
                 Settings.SetLobbyUserPreference(
                     "AutoJoinMap",
+                    false
+                )
+
+                Settings.SetLobbyUserPreference(
+                    "AutoJoinRaid",
                     false
                 )
             end
@@ -2677,6 +2797,76 @@ LobbyTab:CreateToggle({
 
 
 --//============================================================
+--// RAID
+--//============================================================
+
+LobbyTab:CreateDivider({
+    spacing = 16,
+})
+
+LobbyTab:CreateSection({
+    name = "Raid",
+})
+
+
+LobbyTab:CreateToggle({
+
+    name = "Auto Join Raid",
+    flag = "AutoJoinRaid",
+
+    value = Settings.AutoJoinRaid,
+
+    callback = function(Value)
+
+        Settings.AutoJoinRaid =
+            Value == true
+
+
+        if Value then
+
+            Settings.AutoJoinMap =
+                false
+
+            Settings.AutoJoinEndless =
+                false
+        end
+
+
+        if type(Settings.SetLobbyUserPreference) == "function" then
+
+            Settings.SetLobbyUserPreference(
+                "AutoJoinRaid",
+                Value == true
+            )
+
+
+            if Value then
+
+                Settings.SetLobbyUserPreference(
+                    "AutoJoinMap",
+                    false
+                )
+
+                Settings.SetLobbyUserPreference(
+                    "AutoJoinEndless",
+                    false
+                )
+            end
+        end
+
+
+        ResetLobbyState()
+
+
+        print(
+            "[Anime Zero] Auto Join Raid:",
+            Value
+        )
+    end,
+})
+
+
+--//============================================================
 --// FARM UI
 --//============================================================
 
@@ -2712,7 +2902,8 @@ FarmTab:CreateToggle({
         else
 
             print(
-                "[Anime Zero] Auto Farm ON"
+                "[Anime Zero] Auto Farm ON | EngineActive:",
+                GENV.__AZ_FARM_ENGINE_ACTIVE == true
             )
         end
     end,
@@ -2749,6 +2940,12 @@ FarmTab:CreateToggle({
             Settings
                 .PersistDungeonAutomation()
         end
+
+
+        print(
+            "[Anime Zero] Auto Pickup Loot:",
+            Value == true
+        )
     end,
 })
 
@@ -2809,6 +3006,12 @@ FarmTab:CreateToggle({
         if Value then
             NextM1RequestAt = 0
         end
+
+
+        print(
+            "[Anime Zero] Auto M1:",
+            Value == true
+        )
     end,
 })
 
@@ -2956,6 +3159,12 @@ FarmTab:CreateToggle({
         if Value then
             SkillRetryAfter = 0
         end
+
+
+        print(
+            "[Anime Zero] Auto Skills:",
+            Value == true
+        )
     end,
 })
 
@@ -3009,6 +3218,12 @@ FarmTab:CreateToggle({
                 Value == true
             )
         end
+
+
+        print(
+            "[Anime Zero] Auto Ultimate:",
+            Value == true
+        )
     end,
 })
 
@@ -3032,6 +3247,12 @@ FarmTab:CreateToggle({
                 Value == true
             )
         end
+
+
+        print(
+            "[Anime Zero] Auto Block:",
+            Value == true
+        )
     end,
 })
 
@@ -3070,6 +3291,1894 @@ FarmTab:CreateDropdown({
     end,
 })
 
+
+FarmTab:CreateToggle({
+
+    name = "Auto Dodge Raid AOE",
+    flag = "AutoDodgeRaidAOE",
+
+    value = Settings.AutoDodgeRaidAOE ~= false,
+
+    callback = function(Value)
+        Settings.AutoDodgeRaidAOE =
+            Value == true
+
+        print(
+            "[Anime Zero] Auto Dodge Raid AOE:",
+            Settings.AutoDodgeRaidAOE
+        )
+    end,
+})
+
+
+
+
+--//============================================================
+--// IMMEDIATE FARM RUNTIME RESCUE
+--//
+--// The updated run place can finish building the UI before the large legacy
+--// dungeon engine reaches its heartbeat bind.  Every Farm control changes the
+--// shared Settings table immediately, so keep a small independent runtime
+--// alive from this point onward.  If the full engine later becomes active it
+--// takes priority and this rescue runtime idles automatically.
+--//
+--// Everything is kept in this nested scope so it does not consume the main
+--// chunk's already-tight Luau local-register budget.
+--//============================================================
+
+;(function()
+
+    if type(GENV.__AZ_FARM_RESCUE_RUNTIME) == "table" then
+        GENV.__AZ_FARM_RESCUE_RUNTIME.Active = false
+
+        local OldConnection =
+            GENV.__AZ_FARM_RESCUE_RUNTIME.Connection
+
+        if typeof(OldConnection) == "RBXScriptConnection" then
+            pcall(function()
+                OldConnection:Disconnect()
+            end)
+        end
+
+        local OldSpikeCleanup =
+            GENV.__AZ_FARM_RESCUE_RUNTIME.SpikeListenerCleanup
+
+        if type(OldSpikeCleanup) == "function" then
+            pcall(OldSpikeCleanup)
+        end
+    end
+
+
+    local Rescue = {
+        Active = true,
+        Ready = false,
+        Connection = nil,
+        Sequence = 0,
+        SkillCursor = 1,
+        NextM1 = 0,
+        NextSkill = 0,
+        NextUltimate = 0,
+        NextBlock = 0,
+        NextLoot = 0,
+        NextEndAction = 0,
+        BlockSent = false,
+        LastDebug = 0,
+        LootState = "Idle",
+        EndActionState = "Idle",
+        RunPackets = nil,
+
+        -- Spirited Away raid route state. Keep this on the runtime table so
+        -- the main Luau chunk stays safely below the 200-local limit.
+        RaidLastAreaAt = 0,
+        RaidLastPromptAt = 0,
+        RaidLastWorld = nil,
+        RaidAreaPart = nil,
+        RaidState = "Idle",
+
+        -- Area-3 spawn settling. Mainhall can begin by replicating only one
+        -- enemy; leaving the middle immediately delays the rest of the wave.
+        RaidLastWave = nil,
+        RaidLastVisibleCount = 0,
+        RaidSpawnStableSince = 0,
+        RaidHoldUntil = 0,
+
+        -- No-Face immunity / hazard state.
+        RaidGuardedBoss = false,
+        RaidDodgeState = "Idle",
+        SpikeHazards = {},
+        SpikeListenerCleanup = nil,
+        LastDodgeAt = 0,
+    }
+
+    GENV.__AZ_FARM_RESCUE_RUNTIME = Rescue
+    GENV.__AZ_FARM_RESCUE_ACTIVE = false
+    GENV.__AZ_FARM_FULL_ENGINE_ACTIVE = false
+
+
+    task.spawn(function()
+
+        local PlayersService =
+            game:GetService("Players")
+
+        local ReplicatedStorageService =
+            game:GetService("ReplicatedStorage")
+
+        local RunServiceService =
+            game:GetService("RunService")
+
+        local LocalPlayerObject =
+            PlayersService.LocalPlayer
+
+
+        -- This runtime is only useful in the run place.  Do not stall lobby UI.
+        local GameFolderObject =
+            ReplicatedStorageService:FindFirstChild("game")
+
+        if not GameFolderObject then
+            local Deadline = os.clock() + 60
+
+            while Rescue.Active
+                and os.clock() < Deadline
+                and not GameFolderObject
+            do
+                GameFolderObject =
+                    ReplicatedStorageService:FindFirstChild("game")
+
+                if GameFolderObject then
+                    break
+                end
+
+                task.wait(0.10)
+            end
+        end
+
+
+        if not Rescue.Active or not GameFolderObject then
+            return
+        end
+
+
+        local PacketsFolderObject =
+            GameFolderObject:FindFirstChild("packets")
+            or GameFolderObject:WaitForChild("packets", 20)
+
+        local StoresFolderObject =
+            GameFolderObject:FindFirstChild("stores")
+            or GameFolderObject:WaitForChild("stores", 20)
+
+        if not PacketsFolderObject
+            or not StoresFolderObject
+        then
+            warn("[Anime Zero][Farm Rescue] game packets/stores unavailable")
+            return
+        end
+
+
+        local CharacterPacketsObject =
+            PacketsFolderObject:FindFirstChild("characterPackets")
+            or PacketsFolderObject:WaitForChild("characterPackets", 20)
+
+        local PlayerNamespaceObject2 =
+            StoresFolderObject:FindFirstChild("playerNamespace")
+            or StoresFolderObject:WaitForChild("playerNamespace", 20)
+
+        if not CharacterPacketsObject
+            or not PlayerNamespaceObject2
+        then
+            warn("[Anime Zero][Farm Rescue] combat modules unavailable")
+            return
+        end
+
+
+        local CharacterPackets2
+        local PlayerNamespace2
+        local DropStore2
+        local RewardPackets2
+        local EnemyStore2
+        local RunStore2
+        local EnemyPackets2
+        local EnemyConstants2
+
+        local OkPackets, PacketResult =
+            pcall(require, CharacterPacketsObject)
+
+        local OkPlayers, PlayerResult =
+            pcall(require, PlayerNamespaceObject2)
+
+        if not OkPackets or type(PacketResult) ~= "table"
+            or not OkPlayers or type(PlayerResult) ~= "table"
+        then
+            warn(
+                "[Anime Zero][Farm Rescue] require failed:",
+                tostring(PacketResult),
+                tostring(PlayerResult)
+            )
+            return
+        end
+
+        CharacterPackets2 = PacketResult
+        PlayerNamespace2 = PlayerResult
+
+
+        pcall(function()
+            local DropObject =
+                StoresFolderObject:FindFirstChild("dropStore")
+
+            if DropObject then
+                DropStore2 = require(DropObject)
+            end
+        end)
+
+        pcall(function()
+            local RewardObject =
+                PacketsFolderObject:FindFirstChild("rewardPackets")
+
+            if RewardObject then
+                RewardPackets2 = require(RewardObject)
+            end
+        end)
+
+
+        pcall(function()
+            local RunPacketsObject2 =
+                PacketsFolderObject:FindFirstChild("runPackets")
+
+            if RunPacketsObject2 then
+                Rescue.RunPackets = require(RunPacketsObject2)
+            end
+        end)
+
+
+        pcall(function()
+            local EnemyStoreObject2 =
+                StoresFolderObject:FindFirstChild("enemyStore")
+
+            if EnemyStoreObject2 then
+                EnemyStore2 = require(EnemyStoreObject2)
+            end
+        end)
+
+
+        pcall(function()
+            local RunStoreObject2 =
+                StoresFolderObject:FindFirstChild("runStore")
+
+            if RunStoreObject2 then
+                RunStore2 = require(RunStoreObject2)
+            end
+        end)
+
+
+        pcall(function()
+            local EnemyPacketsObject2 =
+                PacketsFolderObject:FindFirstChild("enemyPackets")
+
+            if EnemyPacketsObject2 then
+                EnemyPackets2 = require(EnemyPacketsObject2)
+            end
+        end)
+
+
+        pcall(function()
+            local GlobalFolder2 =
+                ReplicatedStorageService:FindFirstChild("global")
+
+            local ConstantsFolder2 =
+                GlobalFolder2
+                and GlobalFolder2:FindFirstChild("constants")
+
+            local EnemiesObject2 =
+                ConstantsFolder2
+                and ConstantsFolder2:FindFirstChild("enemies")
+
+            if EnemiesObject2 then
+                EnemyConstants2 = require(EnemiesObject2)
+            end
+        end)
+
+
+        local function GetRoot2()
+            local Character = LocalPlayerObject.Character
+
+            return Character
+                and Character:FindFirstChild("HumanoidRootPart")
+        end
+
+
+        local function Alive2()
+            local Character = LocalPlayerObject.Character
+            local Humanoid = Character
+                and Character:FindFirstChildOfClass("Humanoid")
+
+            return Character ~= nil
+                and Humanoid ~= nil
+                and Humanoid.Health > 0
+                and GetRoot2() ~= nil
+        end
+
+
+        local function GetPlayerStore2()
+            local Success, Store = pcall(function()
+                return PlayerNamespace2.getLocalPlayerStore()
+            end)
+
+            if Success then
+                return Store
+            end
+
+            return nil
+        end
+
+
+        local function ReadLeaf(Leaf)
+            if Leaf == nil then
+                return nil
+            end
+
+            if type(Leaf) == "table"
+                and type(Leaf.get) == "function"
+            then
+                local Success, Value = pcall(function()
+                    return Leaf:get()
+                end)
+
+                if Success then
+                    return Value
+                end
+            end
+
+            return Leaf
+        end
+
+
+        local function GetEnemyState2(Model)
+            if not Model
+                or not EnemyStore2
+                or not EnemyStore2.store
+                or not EnemyStore2.store.state
+            then
+                return nil
+            end
+
+            local Id =
+                tonumber(Model.Name)
+                or Model.Name
+
+            local Success, State =
+                pcall(function()
+                    return EnemyStore2.store.state:get(Id)
+                end)
+
+            if Success then
+                return State
+            end
+
+            return nil
+        end
+
+
+        local function GetEnemyName2(Model, State)
+            local Name = nil
+
+            if State and State.name then
+                Name = ReadLeaf(State.name)
+            end
+
+            if type(Name) == "string" then
+                return Name
+            end
+
+            local AttributeName =
+                Model
+                and Model:GetAttribute("EnemyName")
+
+            if type(AttributeName) == "string" then
+                return AttributeName
+            end
+
+            return Model and Model.Name or "unknown"
+        end
+
+
+        local function IsGuardedEnemy2(State)
+            if not State or not State.guardedAt then
+                return false
+            end
+
+            return ReadLeaf(State.guardedAt) ~= nil
+        end
+
+
+        local function ReadRunValue2(Name)
+            if not RunStore2
+                or not RunStore2.store
+                or not RunStore2.store.state
+            then
+                return nil
+            end
+
+            local Leaf =
+                RunStore2.store.state[Name]
+
+            return ReadLeaf(Leaf)
+        end
+
+
+        local function GetEnemySnapshot2()
+            local Root = GetRoot2()
+            local Folder = workspace:FindFirstChild("enemies")
+            local Snapshot = {}
+            local VisibleCount = 0
+            local AttackableCount = 0
+            local GuardedBoss = false
+
+            if not Folder then
+                return Snapshot, 0, 0, false
+            end
+
+            for _, Model in ipairs(Folder:GetChildren()) do
+                local EnemyRoot =
+                    Model:FindFirstChild("HumanoidRootPart")
+                    or Model.PrimaryPart
+
+                if EnemyRoot and EnemyRoot:IsA("BasePart") then
+                    local State = GetEnemyState2(Model)
+                    local Name = GetEnemyName2(Model, State)
+                    local Guarded = IsGuardedEnemy2(State)
+                    local Distance =
+                        Root
+                        and (Root.Position - EnemyRoot.Position).Magnitude
+                        or math.huge
+
+                    VisibleCount = VisibleCount + 1
+
+                    local IsNoFace =
+                        Name == "spiritedkaonashi"
+                        or Name == "spiritedkaonashi2"
+
+                    if Guarded and IsNoFace then
+                        GuardedBoss = true
+                    end
+
+                    if not Guarded then
+                        AttackableCount = AttackableCount + 1
+                    end
+
+                    table.insert(Snapshot, {
+                        Model = Model,
+                        Root = EnemyRoot,
+                        State = State,
+                        Name = Name,
+                        Guarded = Guarded,
+                        Distance = Distance,
+                    })
+                end
+            end
+
+            Rescue.RaidGuardedBoss = GuardedBoss
+
+            return Snapshot,
+                VisibleCount,
+                AttackableCount,
+                GuardedBoss
+        end
+
+
+        local function NearestEnemy2()
+            local Snapshot = GetEnemySnapshot2()
+            local Best = nil
+            local BestScore = math.huge
+
+            for _, Info in ipairs(Snapshot) do
+                -- guardedAt is exactly what the game's boss bar uses to show
+                -- [IMMUNE]. Never tunnel into an immune No-Face while summons
+                -- or the Shadow clone are the real objective.
+                if not Info.Guarded then
+                    local Score = Info.Distance
+
+                    -- During the final boss phase the clone is a valid damage
+                    -- target and should never lose priority to the immune boss.
+                    if Rescue.RaidGuardedBoss
+                        and Info.Name == "spiritedkaonashiclone"
+                    then
+                        Score = Score - 250
+                    end
+
+                    if Score < BestScore then
+                        BestScore = Score
+                        Best = Info
+                    end
+                end
+            end
+
+            if Best then
+                return Best.Model,
+                    Best.Root,
+                    Best.Distance,
+                    Best.State,
+                    Best.Name
+            end
+
+            return nil, nil, math.huge, nil, nil
+        end
+
+
+        local function DesiredEnemyCFrame2(EnemyRoot)
+            if not EnemyRoot then
+                return nil
+            end
+
+            local Distance =
+                math.clamp(
+                    tonumber(Settings.FarmDistance) or 7,
+                    1,
+                    30
+                )
+
+            if Settings.FarmPosition == "Above" then
+                return EnemyRoot.CFrame * CFrame.new(0, Distance, 0)
+
+            elseif Settings.FarmPosition == "Below" then
+                return EnemyRoot.CFrame * CFrame.new(0, -Distance, 0)
+            end
+
+            return EnemyRoot.CFrame * CFrame.new(0, 0, Distance)
+        end
+
+
+        --//========================================================
+        --// SPIRITED AWAY RAID ROUTE - AREA BASED
+        --//
+        --// The raid does NOT need individual EnemySpawns to be visited.
+        --// Each live segment exposes a large activation volume at:
+        --//     workspace.World.Areas["1"]
+        --//
+        --// The server advances the raid through bathhouse -> shaft -> mainhall.
+        --// Between waves, stay/return inside the current segment's Areas volume
+        --// so the normal game progression can spawn the next wave. When the
+        --// server opens RaidExitOpen, use the elevator ExitPrompt and let the
+        --// next World segment load before resuming area entry.
+        --//========================================================
+
+        Rescue.ResetRaidRoute = function()
+            Rescue.RaidLastAreaAt = 0
+            Rescue.RaidLastWorld = nil
+            Rescue.RaidAreaPart = nil
+            Rescue.RaidState = "Idle"
+            Rescue.RaidLastWave = nil
+            Rescue.RaidLastVisibleCount = 0
+            Rescue.RaidSpawnStableSince = 0
+            Rescue.RaidHoldUntil = 0
+            Rescue.RaidGuardedBoss = false
+            Rescue.RaidDodgeState = "Idle"
+            table.clear(Rescue.SpikeHazards)
+        end
+
+
+        Rescue.GetRaidRouteObjects = function()
+            local World =
+                workspace:FindFirstChild("World")
+
+            if not World then
+                return nil, nil, nil, nil
+            end
+
+            local Areas =
+                World:FindFirstChild("Areas")
+
+            local Area =
+                Areas
+                and Areas:FindFirstChild("1")
+
+            -- Future-proofing: if a later raid segment renames zone 1, use the
+            -- first actual area BasePart instead of falling back to spawn points.
+            if not Area and Areas then
+                for _, Object in ipairs(Areas:GetChildren()) do
+                    if Object:IsA("BasePart") then
+                        Area = Object
+                        break
+                    end
+                end
+            end
+
+            local Markers =
+                World:FindFirstChild("Markers")
+
+            local Exit =
+                Markers
+                and Markers:FindFirstChild("Exit")
+
+            local ExitPrompt =
+                Exit
+                and Exit:FindFirstChild("ExitPrompt")
+
+            return World, Area, Exit, ExitPrompt
+        end
+
+
+        Rescue.FireRaidExitPrompt = function(Prompt)
+            if not Prompt then
+                return false
+            end
+
+            if os.clock() - Rescue.RaidLastPromptAt < 0.80 then
+                return false
+            end
+
+            Rescue.RaidLastPromptAt =
+                os.clock()
+
+            if type(fireproximityprompt) == "function" then
+                local Success =
+                    pcall(
+                        fireproximityprompt,
+                        Prompt
+                    )
+
+                if Success then
+                    return true
+                end
+            end
+
+            task.spawn(function()
+                pcall(function()
+                    Prompt:InputHoldBegin()
+
+                    task.wait(
+                        math.max(
+                            tonumber(Prompt.HoldDuration) or 0,
+                            0
+                        ) + 0.05
+                    )
+
+                    Prompt:InputHoldEnd()
+                end)
+            end)
+
+            return true
+        end
+
+
+        Rescue.IsInsideRaidArea = function(Root, Area)
+            if not Root
+                or not Area
+                or not Area:IsA("BasePart")
+            then
+                return false
+            end
+
+            local LocalPosition =
+                Area.CFrame:PointToObjectSpace(
+                    Root.Position
+                )
+
+            local Half =
+                Area.Size * 0.5
+
+            return math.abs(LocalPosition.X) <= Half.X
+                and math.abs(LocalPosition.Y) <= Half.Y
+                and math.abs(LocalPosition.Z) <= Half.Z
+        end
+
+
+        Rescue.GetRaidAreaGoal = function(Root, Area)
+            if not Root or not Area then
+                return nil
+            end
+
+            -- Keep the player's current Y whenever it already falls within the
+            -- area's vertical bounds. This avoids teleporting to the geometric
+            -- center of a tall trigger volume high above the actual floor.
+            local LocalRoot =
+                Area.CFrame:PointToObjectSpace(
+                    Root.Position
+                )
+
+            local HalfY =
+                math.max(
+                    Area.Size.Y * 0.5 - 2,
+                    0
+                )
+
+            local SafeLocalY =
+                math.clamp(
+                    LocalRoot.Y,
+                    -HalfY,
+                    HalfY
+                )
+
+            return Area.CFrame
+                * CFrame.new(
+                    0,
+                    SafeLocalY,
+                    0
+                )
+        end
+
+
+        Rescue.PointInsideRaidArea = function(Position, Area)
+            if typeof(Position) ~= "Vector3"
+                or not Area
+                or not Area:IsA("BasePart")
+            then
+                return false
+            end
+
+            local LocalPosition =
+                Area.CFrame:PointToObjectSpace(Position)
+
+            local Half = Area.Size * 0.5
+
+            return math.abs(LocalPosition.X) <= math.max(Half.X - 2, 0)
+                and math.abs(LocalPosition.Y) <= Half.Y
+                and math.abs(LocalPosition.Z) <= math.max(Half.Z - 2, 0)
+        end
+
+
+        Rescue.ShouldHoldRaidCenter = function(Root, Area)
+            if workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+                or not Root
+                or not Area
+            then
+                return false
+            end
+
+            local ServerArea =
+                tonumber(ReadRunValue2("area")) or 0
+
+            if ServerArea ~= 3 then
+                Rescue.RaidLastWave = nil
+                Rescue.RaidLastVisibleCount = 0
+                Rescue.RaidSpawnStableSince = 0
+                Rescue.RaidHoldUntil = 0
+                return false
+            end
+
+            local Wave =
+                tonumber(ReadRunValue2("wave")) or 0
+
+            local Remaining =
+                tonumber(ReadRunValue2("remaining")) or 0
+
+            local _,
+                VisibleCount,
+                AttackableCount,
+                GuardedBoss =
+                GetEnemySnapshot2()
+
+            local Now = os.clock()
+
+            if Wave ~= Rescue.RaidLastWave then
+                Rescue.RaidLastWave = Wave
+                Rescue.RaidLastVisibleCount = VisibleCount
+                Rescue.RaidSpawnStableSince = Now
+                Rescue.RaidHoldUntil = Now + 1.15
+
+            elseif VisibleCount > Rescue.RaidLastVisibleCount then
+                -- Only an INCREASE extends the settle timer. Enemy deaths should
+                -- not pull the player back to center after the wave is populated.
+                Rescue.RaidSpawnStableSince = Now
+                Rescue.RaidHoldUntil =
+                    math.max(
+                        Rescue.RaidHoldUntil or 0,
+                        Now + 0.80
+                    )
+            end
+
+            Rescue.RaidLastVisibleCount = VisibleCount
+
+            if Wave <= 0 then
+                return false
+            end
+
+            if Now < (Rescue.RaidHoldUntil or 0) then
+                Rescue.RaidState =
+                    "Area3 Spawn Hold"
+                return true
+            end
+
+            -- Normal mainhall waves are count=10. `remaining` includes enemies
+            -- that still have to be brought in, so do not chase the first one
+            -- away from center while the rest are pending.
+            if Wave <= 3
+                and Remaining > 0
+                and VisibleCount < Remaining
+            then
+                Rescue.RaidHoldUntil = Now + 0.30
+                Rescue.RaidState =
+                    "Area3 Waiting Spawns "
+                    .. tostring(VisibleCount)
+                    .. "/"
+                    .. tostring(Remaining)
+                return true
+            end
+
+            -- Final No-Face becomes [IMMUNE] through guardedAt while summons /
+            -- clone phases are active. Give those adds a short center settle so
+            -- the full group can appear before we choose one and leave center.
+            if GuardedBoss then
+                if AttackableCount <= 0 then
+                    Rescue.RaidState =
+                        "Boss Immune - Waiting Adds"
+                    return true
+                end
+
+                if Now - (Rescue.RaidSpawnStableSince or 0) < 0.80 then
+                    Rescue.RaidState =
+                        "Boss Immune - Settling Adds"
+                    return true
+                end
+            end
+
+            return false
+        end
+
+
+        Rescue.PruneSpikeHazards = function()
+            local ServerNow = workspace:GetServerTimeNow()
+
+            for Index = #Rescue.SpikeHazards, 1, -1 do
+                local Hazard = Rescue.SpikeHazards[Index]
+
+                if not Hazard
+                    or ServerNow > (Hazard.ExpiresAt or 0)
+                then
+                    table.remove(Rescue.SpikeHazards, Index)
+                end
+            end
+        end
+
+
+        Rescue.CollectRaidThreats = function(Position)
+            local Threats = {}
+            local ServerNow = workspace:GetServerTimeNow()
+
+            Rescue.PruneSpikeHazards()
+
+            for _, Hazard in ipairs(Rescue.SpikeHazards) do
+                local TimeToImpact =
+                    (Hazard.EruptAt or ServerNow)
+                    - ServerNow
+
+                if TimeToImpact <= 0.85
+                    and TimeToImpact >= -0.22
+                then
+                    table.insert(Threats, {
+                        Position = Hazard.Position,
+                        Radius = (Hazard.Radius or 4.5) + 4,
+                        Kind = "Spike",
+                    })
+                end
+            end
+
+            -- The game's enemy controller creates aoeIndicator parts for
+            -- telegraphed boss attacks (including No-Face's slam). Reading the
+            -- real indicator makes the dodge generic instead of hardcoding one
+            -- boss animation.
+            local Effects = workspace:FindFirstChild("effects")
+
+            if Effects then
+                for _, Object in ipairs(Effects:GetChildren()) do
+                    if Object:IsA("BasePart")
+                        and string.find(
+                            string.lower(Object.Name),
+                            "aoe",
+                            1,
+                            true
+                        )
+                    then
+                        table.insert(Threats, {
+                            Position = Object.Position,
+                            Radius =
+                                math.max(Object.Size.X, Object.Size.Z)
+                                * 0.5
+                                + 4,
+                            Kind = "Indicator",
+                        })
+                    end
+                end
+            end
+
+            local CurrentDanger = false
+
+            if typeof(Position) == "Vector3" then
+                for _, Threat in ipairs(Threats) do
+                    local Delta =
+                        Vector3.new(
+                            Position.X - Threat.Position.X,
+                            0,
+                            Position.Z - Threat.Position.Z
+                        )
+
+                    if Delta.Magnitude <= Threat.Radius then
+                        CurrentDanger = true
+                        break
+                    end
+                end
+            end
+
+            return Threats, CurrentDanger
+        end
+
+
+        Rescue.PositionSafeFromThreats = function(Position, Threats)
+            for _, Threat in ipairs(Threats or {}) do
+                local Delta =
+                    Vector3.new(
+                        Position.X - Threat.Position.X,
+                        0,
+                        Position.Z - Threat.Position.Z
+                    )
+
+                if Delta.Magnitude <= Threat.Radius then
+                    return false
+                end
+            end
+
+            return true
+        end
+
+
+        Rescue.GetRaidDodgeGoal = function(Root, Area)
+            if Settings.AutoDodgeRaidAOE == false
+                or workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+                or not Root
+                or not Area
+            then
+                Rescue.RaidDodgeState = "Idle"
+                return nil
+            end
+
+            local Threats, InDanger =
+                Rescue.CollectRaidThreats(Root.Position)
+
+            if not InDanger or #Threats == 0 then
+                Rescue.RaidDodgeState = "Safe"
+                return nil
+            end
+
+            local Closest = nil
+            local ClosestDistance = math.huge
+
+            for _, Threat in ipairs(Threats) do
+                local Distance =
+                    Vector3.new(
+                        Root.Position.X - Threat.Position.X,
+                        0,
+                        Root.Position.Z - Threat.Position.Z
+                    ).Magnitude
+
+                if Distance < ClosestDistance then
+                    ClosestDistance = Distance
+                    Closest = Threat
+                end
+            end
+
+            local Away = Vector3.new(1, 0, 0)
+
+            if Closest then
+                local Delta =
+                    Vector3.new(
+                        Root.Position.X - Closest.Position.X,
+                        0,
+                        Root.Position.Z - Closest.Position.Z
+                    )
+
+                if Delta.Magnitude > 0.05 then
+                    Away = Delta.Unit
+                end
+            end
+
+            local Angles = {
+                0,
+                math.rad(45),
+                math.rad(-45),
+                math.rad(90),
+                math.rad(-90),
+                math.rad(135),
+                math.rad(-135),
+                math.rad(180),
+            }
+
+            local Distances = { 12, 18, 26, 34 }
+
+            for _, Distance in ipairs(Distances) do
+                for _, Angle in ipairs(Angles) do
+                    local Direction =
+                        CFrame.Angles(0, Angle, 0)
+                            :VectorToWorldSpace(Away)
+
+                    local Candidate =
+                        Root.Position
+                        + Direction * Distance
+
+                    if Rescue.PointInsideRaidArea(Candidate, Area)
+                        and Rescue.PositionSafeFromThreats(
+                            Candidate,
+                            Threats
+                        )
+                    then
+                        Rescue.RaidDodgeState =
+                            Closest and Closest.Kind or "AOE"
+
+                        Rescue.LastDodgeAt = os.clock()
+
+                        return CFrame.lookAt(
+                            Candidate,
+                            Candidate + Root.CFrame.LookVector
+                        )
+                    end
+                end
+            end
+
+            -- Last-resort fallback: the center of the active raid area is often
+            -- safer than remaining inside an imminent ground marker.
+            local CenterGoal =
+                Rescue.GetRaidAreaGoal(Root, Area)
+
+            if CenterGoal
+                and Rescue.PositionSafeFromThreats(
+                    CenterGoal.Position,
+                    Threats
+                )
+            then
+                Rescue.RaidDodgeState = "CenterFallback"
+                Rescue.LastDodgeAt = os.clock()
+                return CenterGoal
+            end
+
+            Rescue.RaidDodgeState = "NoSafePoint"
+            return nil
+        end
+
+
+        if EnemyPackets2
+            and EnemyPackets2.spikes
+            and type(EnemyPackets2.spikes.on) == "function"
+        then
+            pcall(function()
+                Rescue.SpikeListenerCleanup =
+                    EnemyPackets2.spikes:on(function(Data)
+
+                        if not Rescue.Active
+                            or type(Data) ~= "table"
+                            or type(Data.spots) ~= "table"
+                        then
+                            return
+                        end
+
+                        local ServerNow = workspace:GetServerTimeNow()
+
+                        for Index, Position in pairs(Data.spots) do
+                            if typeof(Position) == "Vector3" then
+                                local Delay =
+                                    type(Data.delays) == "table"
+                                    and tonumber(Data.delays[Index])
+                                    or 0
+
+                                local Radius =
+                                    type(Data.radii) == "table"
+                                    and tonumber(Data.radii[Index])
+                                    or tonumber(Data.radius)
+                                    or 4.5
+
+                                local EruptAt =
+                                    (tonumber(Data.eruptAt) or ServerNow)
+                                    + (Delay or 0)
+
+                                table.insert(
+                                    Rescue.SpikeHazards,
+                                    {
+                                        Position = Position,
+                                        Radius = Radius,
+                                        EruptAt = EruptAt,
+                                        ExpiresAt = EruptAt + 0.45,
+                                    }
+                                )
+                            end
+                        end
+                    end)
+            end)
+        end
+
+
+        Rescue.HandleRaidRoute = function(Root, EnemyRoot)
+            if workspace:GetAttribute("Mode")
+                ~= "spiritedawayraid"
+            then
+                Rescue.RaidState = "NotRaid"
+                return false
+            end
+
+            local World,
+                Area,
+                Exit,
+                ExitPrompt =
+                Rescue.GetRaidRouteObjects()
+
+            -- Every elevator transition swaps/rebuilds the active World segment.
+            -- Treat that as a new area route immediately.
+            if World ~= Rescue.RaidLastWorld then
+                Rescue.RaidLastWorld = World
+                Rescue.RaidAreaPart = Area
+                Rescue.RaidLastAreaAt = 0
+                Rescue.RaidState = "NewArea"
+            elseif Area ~= Rescue.RaidAreaPart then
+                Rescue.RaidAreaPart = Area
+                Rescue.RaidLastAreaAt = 0
+            end
+
+            local ExitOpen =
+                workspace:GetAttribute("RaidExitOpen")
+                    == true
+                or (
+                    ExitPrompt
+                    and ExitPrompt.Enabled == true
+                )
+
+            -- Exit state is authoritative. A dead/stale enemy model should never
+            -- hold the farm in the finished segment.
+            if ExitOpen and Exit then
+                Rescue.RaidState = "Elevator"
+
+                local GoalPosition =
+                    Exit.Position
+                    + Vector3.new(0, 0, 5)
+
+                if (
+                    Root.Position
+                    - GoalPosition
+                ).Magnitude > 2.5
+                then
+                    Root.CFrame =
+                        CFrame.lookAt(
+                            GoalPosition,
+                            Exit.Position
+                        )
+                end
+
+                if ExitPrompt
+                    and (
+                        Root.Position
+                        - Exit.Position
+                    ).Magnitude
+                        <= math.max(
+                            tonumber(
+                                ExitPrompt.MaxActivationDistance
+                            ) or 14,
+                            14
+                        )
+                then
+                    if Rescue.FireRaidExitPrompt(
+                        ExitPrompt
+                    ) then
+                        Rescue.RaidState = "ElevatorPrompt"
+                        Rescue.RaidLastAreaAt = 0
+                    end
+                end
+
+                return true
+            end
+
+            -- Area 3 must stay in the middle long enough for the full wave /
+            -- summon group to materialize. Do this BEFORE following the first
+            -- replicated enemy away from the activation volume.
+            if Area
+                and Rescue.ShouldHoldRaidCenter(
+                    Root,
+                    Area
+                )
+            then
+                local CenterGoal =
+                    Rescue.GetRaidAreaGoal(
+                        Root,
+                        Area
+                    )
+
+                if CenterGoal
+                    and (
+                        Root.Position
+                        - CenterGoal.Position
+                    ).Magnitude > 2
+                then
+                    Root.CFrame = CenterGoal
+                end
+
+                return true
+            end
+
+            -- Once an ATTACKABLE enemy exists, normal rescue movement/combat
+            -- follows it. Guarded/immune No-Face is filtered by NearestEnemy2.
+            if EnemyRoot then
+                Rescue.RaidState =
+                    Rescue.RaidGuardedBoss
+                    and "Adds / Shadow"
+                    or "Enemy"
+                return false
+            end
+
+            if not World then
+                Rescue.RaidState = "WaitingForWorld"
+                return true
+            end
+
+            if not Area then
+                Rescue.RaidState = "WaitingForArea"
+                return true
+            end
+
+            if Rescue.IsInsideRaidArea(Root, Area) then
+                Rescue.RaidState = "AreaReady"
+                return true
+            end
+
+            local Now = os.clock()
+
+            if Now - Rescue.RaidLastAreaAt < 0.35 then
+                Rescue.RaidState = "EnteringArea"
+                return true
+            end
+
+            Rescue.RaidLastAreaAt = Now
+
+            local Goal =
+                Rescue.GetRaidAreaGoal(
+                    Root,
+                    Area
+                )
+
+            if Goal then
+                Rescue.RaidState =
+                    "EnterArea "
+                    .. tostring(Area.Name)
+
+                -- Area activation should be reliable and immediate. This mirrors
+                -- the Story/Join-map behavior of moving inside the real area
+                -- volume rather than chasing individual enemy spawn positions.
+                Root.CFrame = Goal
+            else
+                Rescue.RaidState = "AreaGoalMissing"
+            end
+
+            return true
+        end
+
+
+        local function MoveFarm2(DeltaTime)
+            if not Settings.AutoFarm or not Alive2() then
+                return
+            end
+
+            local _, EnemyRoot =
+                NearestEnemy2()
+
+            local Root =
+                GetRoot2()
+
+            if not Root then
+                return
+            end
+
+            -- AOE safety has first movement priority while the raid is active.
+            -- It consumes the exact enemySpikes telegraph packet plus the
+            -- game's own aoeIndicator parts for other telegraphed boss slams.
+            if workspace:GetAttribute("Mode") == "spiritedawayraid"
+                and workspace:GetAttribute("RaidExitOpen") ~= true
+            then
+                local _, RaidArea =
+                    Rescue.GetRaidRouteObjects()
+
+                local DodgeGoal =
+                    Rescue.GetRaidDodgeGoal(
+                        Root,
+                        RaidArea
+                    )
+
+                if DodgeGoal then
+                    Root.CFrame = DodgeGoal
+                    Rescue.RaidState =
+                        "Dodge "
+                        .. tostring(
+                            Rescue.RaidDodgeState
+                        )
+                    return
+                end
+            end
+
+            -- Raid routing handles no-enemy periods by staying inside the live
+            -- World.Areas volume, then uses the elevator when RaidExitOpen opens.
+            if Rescue.HandleRaidRoute(
+                Root,
+                EnemyRoot
+            ) then
+                return
+            end
+
+            if not EnemyRoot then
+                return
+            end
+
+            local Goal =
+                DesiredEnemyCFrame2(
+                    EnemyRoot
+                )
+
+            if not Goal then
+                return
+            end
+
+            if Settings.FarmMethod == "Tween" then
+                local Distance =
+                    (
+                        Root.Position
+                        - Goal.Position
+                    ).Magnitude
+
+                if Distance > 0.05 then
+                    local Alpha =
+                        math.clamp(
+                            (
+                                135
+                                * DeltaTime
+                            )
+                            / math.max(
+                                Distance,
+                                0.001
+                            ),
+                            0,
+                            1
+                        )
+
+                    Root.CFrame =
+                        Root.CFrame:Lerp(
+                            Goal,
+                            Alpha
+                        )
+                end
+            else
+                Root.CFrame =
+                    Goal
+            end
+        end
+
+
+        local function CooldownReady2(Store, Slot)
+            if not Store
+                or not Store.state
+                or not Store.state.cooldowns
+            then
+                return true
+            end
+
+            local CharacterName = nil
+
+            pcall(function()
+                CharacterName = Store.state.character:get()
+            end)
+
+            if not CharacterName then
+                return true
+            end
+
+            local Key =
+                type(PlayerNamespace2.skillCooldownKey) == "function"
+                and PlayerNamespace2.skillCooldownKey(CharacterName, Slot)
+                or (tostring(CharacterName) .. ".skill" .. tostring(Slot))
+
+            local Success, CooldownLeaf = pcall(function()
+                return Store.state.cooldowns:get(Key)
+            end)
+
+            if not Success or not CooldownLeaf then
+                return true
+            end
+
+            local Till = tonumber(ReadLeaf(CooldownLeaf))
+
+            return not Till
+                or workspace:GetServerTimeNow() >= Till
+        end
+
+
+        local function FireSkill2(Slot)
+            if not Alive2()
+                or not CharacterPackets2.performSkill
+            then
+                return false
+            end
+
+            local Store = GetPlayerStore2()
+
+            if not Store or not CooldownReady2(Store, Slot) then
+                return false
+            end
+
+            if Slot == 4 then
+                local Progress = nil
+
+                pcall(function()
+                    Progress = Store.state.ultProgress:get()
+                end)
+
+                if (tonumber(Progress) or 0) < 100
+                    or LocalPlayerObject:GetAttribute("UltimateLocked")
+                then
+                    return false
+                end
+            end
+
+            local CharacterName = nil
+
+            pcall(function()
+                CharacterName = Store.state.character:get()
+            end)
+
+            if not CharacterName then
+                return false
+            end
+
+            Rescue.Sequence =
+                (Rescue.Sequence % 4294967295) + 1
+
+            local Request = {
+                id = Rescue.Sequence,
+                char = CharacterName,
+                character = LocalPlayerObject.Character,
+                skill = Slot,
+                expiresAt = workspace:GetServerTimeNow() + 5,
+            }
+
+            local Success = pcall(function()
+                CharacterPackets2.performSkill:fire(Request)
+            end)
+
+            return Success
+        end
+
+
+        local function RunCombat2()
+            if not Alive2() then
+                return
+            end
+
+            local _, EnemyRoot, EnemyDistance = NearestEnemy2()
+
+            if not EnemyRoot then
+                return
+            end
+
+            local Now = os.clock()
+
+            if Settings.AutoM1
+                and Now >= Rescue.NextM1
+                and CharacterPackets2.performM1
+            then
+                Rescue.NextM1 = Now + 0.42
+
+                pcall(function()
+                    CharacterPackets2.performM1:fire()
+                end)
+            end
+
+
+            if Settings.AutoSkills
+                and Now >= Rescue.NextSkill
+            then
+                Rescue.NextSkill = Now + 0.16
+
+                local Slots = {}
+
+                for Slot = 1, 3 do
+                    local Name = "Skill " .. tostring(Slot)
+
+                    if type(Settings.SelectedSkills) ~= "table"
+                        or Settings.SelectedSkills[Name] ~= false
+                    then
+                        table.insert(Slots, Slot)
+                    end
+                end
+
+                if #Slots > 0 then
+                    Rescue.SkillCursor =
+                        ((Rescue.SkillCursor - 1) % #Slots) + 1
+
+                    FireSkill2(Slots[Rescue.SkillCursor])
+
+                    Rescue.SkillCursor =
+                        (Rescue.SkillCursor % #Slots) + 1
+                end
+            end
+
+
+            if Settings.AutoUltimate
+                and Now >= Rescue.NextUltimate
+            then
+                Rescue.NextUltimate = Now + 0.35
+                FireSkill2(4)
+            end
+
+
+            if Settings.AutoBlock
+                and CharacterPackets2.performBlock
+            then
+                if Settings.BlockMode == "Hold Block" then
+                    if Now >= Rescue.NextBlock then
+                        Rescue.NextBlock = Now + 0.30
+                        Rescue.BlockSent = true
+
+                        pcall(function()
+                            CharacterPackets2.performBlock:fire(true)
+                        end)
+                    end
+                elseif EnemyDistance <= 14
+                    and Now >= Rescue.NextBlock
+                then
+                    Rescue.NextBlock = Now + 0.45
+                    Rescue.BlockSent = true
+
+                    pcall(function()
+                        CharacterPackets2.performBlock:fire(true)
+                    end)
+
+                    task.delay(0.10, function()
+                        if Rescue.Active
+                            and CharacterPackets2.performBlock
+                        then
+                            pcall(function()
+                                CharacterPackets2.performBlock:fire(false)
+                            end)
+                        end
+                    end)
+                end
+            elseif Rescue.BlockSent
+                and CharacterPackets2.performBlock
+            then
+                Rescue.BlockSent = false
+
+                pcall(function()
+                    CharacterPackets2.performBlock:fire(false)
+                end)
+            end
+        end
+
+
+        local function RunLoot2()
+            Rescue.LootState = "Idle"
+
+            if not Settings.AutoPickupLoot
+                or not DropStore2
+                or not DropStore2.store
+                or not RewardPackets2
+                or not RewardPackets2.recoverDrop
+            then
+                return
+            end
+
+            if os.clock() < Rescue.NextLoot then
+                return
+            end
+
+            Rescue.NextLoot = os.clock() + 0.16
+
+            local Root = GetRoot2()
+
+            if not Root then
+                return
+            end
+
+            local Success, Drops = pcall(function()
+                return DropStore2.store.state:getAll()
+            end)
+
+            if not Success or type(Drops) ~= "table" then
+                Rescue.LootState = "StoreUnavailable"
+                return
+            end
+
+            local BestId = nil
+            local BestPosition = nil
+            local BestDistance = math.huge
+            local DropCount = 0
+
+            for Id, DropState in pairs(Drops) do
+                local Position = nil
+
+                pcall(function()
+                    Position = ReadLeaf(DropState.position)
+                end)
+
+                if typeof(Position) == "Vector3" then
+                    DropCount = DropCount + 1
+
+                    local Distance =
+                        (Root.Position - Position).Magnitude
+
+                    if Distance < BestDistance then
+                        BestDistance = Distance
+                        BestId = Id
+                        BestPosition = Position
+                    end
+                end
+            end
+
+            if BestId == nil or not BestPosition then
+                Rescue.LootState = "NoDrops"
+                return
+            end
+
+            Rescue.LootState =
+                "Drop "
+                .. tostring(BestId)
+                .. " ("
+                .. tostring(DropCount)
+                .. ")"
+
+            -- The game's own drop controller only finishes recoverDrop after
+            -- the player is close enough for the magnet pickup (about 12 studs).
+            -- The old rescue code refused to move to loot whenever Auto Farm was
+            -- enabled, so raid drops outside that radius could never be recovered.
+            -- Snap briefly into pickup range even while farming; normal farm/raid
+            -- movement resumes on the next heartbeat.
+            if BestDistance > 10 then
+                local PickupCF =
+                    CFrame.new(
+                        BestPosition
+                        + Vector3.new(0, 2.5, 0)
+                    )
+
+                Root.CFrame = PickupCF
+                Rescue.LootState =
+                    "Collecting "
+                    .. tostring(BestId)
+
+                -- Fire once immediately and once after a short replication beat.
+                -- The second attempt covers executors/servers where the CFrame
+                -- reaches the server one network step after the remote.
+                pcall(function()
+                    RewardPackets2.recoverDrop:fire(BestId)
+                end)
+
+                task.delay(0.07, function()
+                    if Rescue.Active
+                        and Settings.AutoPickupLoot
+                        and RewardPackets2
+                        and RewardPackets2.recoverDrop
+                    then
+                        pcall(function()
+                            RewardPackets2.recoverDrop:fire(BestId)
+                        end)
+                    end
+                end)
+
+                return
+            end
+
+            if BestDistance <= 15 then
+                Rescue.LootState =
+                    "Recover "
+                    .. tostring(BestId)
+
+                pcall(function()
+                    RewardPackets2.recoverDrop:fire(BestId)
+                end)
+            end
+        end
+
+
+        -- Reliable end-action fallback for the updated run place. This runs
+        -- independently of the legacy Story automation engine, so Raid retry
+        -- still works when the rescue runtime is the active farm controller.
+        Rescue.RunEndAction = function()
+            if not Settings.AutoRetry
+                or workspace:GetAttribute("Mode") == "infinite"
+                or not Rescue.RunPackets
+                or not Rescue.RunPackets.endAction
+                or not RunStore2
+                or not RunStore2.store
+                or not RunStore2.store.state
+            then
+                Rescue.EndActionState = "Idle"
+                return
+            end
+
+            local Now = os.clock()
+
+            if Now < Rescue.NextEndAction then
+                return
+            end
+
+            local State = RunStore2.store.state
+            local UserId = tostring(LocalPlayerObject.UserId)
+            local Participant = nil
+
+            pcall(function()
+                Participant = State.participants:get(UserId)
+            end)
+
+            if not Participant then
+                Rescue.EndActionState = "NoParticipant"
+                return
+            end
+
+            local Status = ReadLeaf(Participant.status)
+
+            if Status == "active" then
+                Rescue.EndActionState = "RunActive"
+                return
+            end
+
+            local ParticipantFinishedAt =
+                ReadLeaf(Participant.finishedAt)
+
+            local RunFinishedAt =
+                ReadRunValue2("finishedAt")
+
+            local ResultEndsAt =
+                ReadRunValue2("resultEndsAt")
+
+            -- Do not vote during a pre-run/waiting state that merely happens to
+            -- use a non-active participant status. At least one result marker
+            -- must exist before we send the Retry vote.
+            if ParticipantFinishedAt == nil
+                and RunFinishedAt == nil
+                and ResultEndsAt == nil
+            then
+                Rescue.EndActionState =
+                    "WaitingResult"
+                return
+            end
+
+            local TravelStatus =
+                ReadLeaf(Participant.travelStatus)
+
+            if TravelStatus ~= "idle" then
+                Rescue.EndActionState =
+                    "Travel "
+                    .. tostring(TravelStatus)
+                return
+            end
+
+            local OwnVote = nil
+
+            pcall(function()
+                local VoteLeaf =
+                    State.resultVotes:get(UserId)
+
+                OwnVote = ReadLeaf(VoteLeaf)
+            end)
+
+            if tonumber(OwnVote) == 1 then
+                Rescue.EndActionState = "RetryAccepted"
+                Rescue.NextEndAction = Now + 0.75
+                return
+            end
+
+            Rescue.NextEndAction = Now + 1.00
+            Rescue.EndActionState = "RetrySent"
+
+            local Fired, FireError =
+                pcall(function()
+                    Rescue.RunPackets.endAction:fire(1)
+                end)
+
+            if Fired then
+                print(
+                    "[Anime Zero] Auto Retry | rescue vote sent | mode:",
+                    tostring(workspace:GetAttribute("Mode")),
+                    "| status:",
+                    tostring(Status)
+                )
+            else
+                Rescue.EndActionState = "RetryError"
+                warn(
+                    "[Anime Zero][Auto Retry]",
+                    tostring(FireError)
+                )
+            end
+        end
+
+
+        Rescue.Ready = true
+        GENV.__AZ_FARM_RESCUE_ACTIVE = true
+        GENV.__AZ_FARM_ENGINE_ACTIVE = true
+
+        print(
+            "[Anime Zero] Immediate Farm Rescue ACTIVE | PlaceId:",
+            game.PlaceId
+        )
+
+
+        Rescue.Connection =
+            RunServiceService.Heartbeat:Connect(function(DeltaTime)
+
+                if not Rescue.Active then
+                    return
+                end
+
+                -- End-action voting is kept independent of movement/combat so
+                -- Retry works in Raid even when the legacy farm engine is idle.
+                local SuccessEndAction, EndActionError =
+                    pcall(Rescue.RunEndAction)
+
+                -- Outside Raid, the full legacy engine wins if it initializes.
+                -- Inside Spirited Away Raid, keep this dedicated runtime in
+                -- charge because it owns spawn-settle, immunity and AOE dodge.
+                if GENV.__AZ_FARM_FULL_ENGINE_ACTIVE == true
+                    and workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+                then
+                    GENV.__AZ_FARM_ENGINE_ACTIVE = true
+                    return
+                end
+
+                GENV.__AZ_FARM_ENGINE_ACTIVE = true
+
+                local SuccessMove, MoveError =
+                    pcall(MoveFarm2, DeltaTime)
+
+                local SuccessCombat, CombatError =
+                    pcall(RunCombat2)
+
+                local SuccessLoot, LootError =
+                    pcall(RunLoot2)
+
+                if os.clock() - Rescue.LastDebug >= 2 then
+                    Rescue.LastDebug = os.clock()
+
+                    local _, _, EnemyDistance = NearestEnemy2()
+                    local Folder = workspace:FindFirstChild("enemies")
+
+                    print(
+                        "[Anime Zero][Rescue] enemies=",
+                        Folder and #Folder:GetChildren() or 0,
+                        "distance=",
+                        EnemyDistance < math.huge
+                            and math.floor(EnemyDistance * 10) / 10
+                            or "none",
+                        "wave=",
+                        ReadRunValue2("wave") or "?",
+                        "remaining=",
+                        ReadRunValue2("remaining") or "?",
+                        "farm=",
+                        Settings.AutoFarm == true,
+                        "m1=",
+                        Settings.AutoM1 == true,
+                        "skills=",
+                        Settings.AutoSkills == true,
+                        "raid=",
+                        Rescue.RaidState,
+                        "immuneBoss=",
+                        Rescue.RaidGuardedBoss == true,
+                        "dodge=",
+                        Rescue.RaidDodgeState,
+                        "exit=",
+                        workspace:GetAttribute("RaidExitOpen") == true,
+                        "loot=",
+                        Rescue.LootState,
+                        "retry=",
+                        Rescue.EndActionState,
+                        "ok=",
+                        SuccessMove and SuccessCombat and SuccessLoot and SuccessEndAction
+                    )
+
+                    if not SuccessMove then
+                        warn("[Anime Zero][Rescue] movement:", MoveError)
+                    end
+
+                    if not SuccessCombat then
+                        warn("[Anime Zero][Rescue] combat:", CombatError)
+                    end
+
+                    if not SuccessLoot then
+                        warn("[Anime Zero][Rescue] loot:", LootError)
+                    end
+
+                    if not SuccessEndAction then
+                        warn("[Anime Zero][Rescue] retry:", EndActionError)
+                    end
+                end
+            end)
+    end)
+end)()
 
 
 
@@ -3498,6 +5607,10 @@ FarmTab:CreateDropdown({
         ["111"] = "Forbidden Fruit",
 
         ["112"] = "Waves core",
+
+        ["113"] = "Ghost",
+
+        ["114"] = "Staff of Homa",
     }
 
 
@@ -3589,14 +5702,53 @@ FarmTab:CreateDropdown({
 
     local SendWeaponSpinOnce
 
-    -- Game-backed roll pacing.
-    -- Updated game AutoRoll uses a 1.25s delay between weapon rolls.
-    -- Both weapon and trait UIs use a 6s request timeout.
-    local WEAPON_ROLL_DELAY = 1.25
+    -- Game-backed roll pacing from the updated RollWindowHandler.
+    -- The game enforces 1.80s between normal requests, or 1.05s when
+    -- InstantSpins is actually owned. We use the same ownership check and
+    -- absolute request timestamp instead of waiting an extra delay after
+    -- the result animation. This is faster where the game allows it and
+    -- avoids rate-limit/desync spam where it does not.
+    local WEAPON_ROLL_NORMAL_COOLDOWN = 1.80
+    local WEAPON_ROLL_INSTANT_COOLDOWN = 1.05
+    local WEAPON_ROLL_RETRY_GUARD = 0.05
     local TRAIT_ROLL_DELAY = 4.20
     local ROLL_REQUEST_TIMEOUT = 6.00
 
     local NextWeaponAutoSpinAt = 0
+    local LastWeaponRequestAt = 0
+    local ExtraInstantSpins = nil
+
+
+    local function GetWeaponRollCooldown()
+
+        if ExtraInstantSpins
+            and type(ExtraInstantSpins.IsOwned) == "function"
+        then
+
+            local Success, Owned =
+                pcall(ExtraInstantSpins.IsOwned)
+
+
+            if Success and Owned == true then
+                return WEAPON_ROLL_INSTANT_COOLDOWN
+            end
+        end
+
+
+        return WEAPON_ROLL_NORMAL_COOLDOWN
+    end
+
+
+    local function ScheduleNextWeaponRoll()
+
+        NextWeaponAutoSpinAt =
+            math.max(
+                NextWeaponAutoSpinAt,
+                LastWeaponRequestAt
+                    + GetWeaponRollCooldown()
+                    + WEAPON_ROLL_RETRY_GUARD
+            )
+    end
 
     local SendTraitRerollOnce
     local NextTraitAutoSpinAt = 0
@@ -6012,6 +8164,7 @@ FarmTab:CreateDropdown({
                 "Hoarder",
                 "Beyond Limits",
                 "Millionaire",
+                "Paramita Pyre",
             },
             value = TitleAutomationSettings.SelectedTitle,
             callback = function(Value)
@@ -6356,6 +8509,7 @@ FarmTab:CreateDropdown({
             "Cursed King",
             "Divine Emperor",
             "Cataclysm",
+            "Paramita Pyre",
         }
 
 
@@ -6500,6 +8654,7 @@ FarmTab:CreateDropdown({
             "Hoarder",
             "Beyond Limits",
             "Millionaire",
+            "Paramita Pyre",
         }
 
 
@@ -6584,6 +8739,7 @@ FarmTab:CreateDropdown({
             "Survivor",
             "Untouchable",
 
+            "Awakened",
             "Evolution Expert",
             "Evolution Master",
 
@@ -8289,6 +10445,7 @@ end
                 LobbyEndlessMap = true,
                 LobbyEndlessDifficulty = true,
                 AutoJoinEndless = true,
+                AutoJoinRaid = true,
                 EndlessWaveToLeave = true,
                 AutoLeaveEndlessAtWave = true,
 
@@ -8698,6 +10855,17 @@ end
                         )
                 )
         end)
+
+
+    pcall(function()
+
+        ExtraInstantSpins =
+            require(
+                ExtraLobby
+                    :WaitForChild("modules")
+                    :WaitForChild("InstantSpins")
+            )
+    end)
 
 
     local AccountLoaded =
@@ -9774,6 +11942,30 @@ end
         end
 
 
+        local Now =
+            os.clock()
+
+
+        local Earliest =
+            LastWeaponRequestAt
+            + GetWeaponRollCooldown()
+
+
+        if LastWeaponRequestAt > 0
+            and Now < Earliest
+        then
+
+            NextWeaponAutoSpinAt =
+                math.max(
+                    NextWeaponAutoSpinAt,
+                    Earliest
+                    + WEAPON_ROLL_RETRY_GUARD
+                )
+
+            return
+        end
+
+
         local SpinType =
             ExtraSettings.WeaponSpinType
 
@@ -9925,16 +12117,21 @@ end
             end)
 
 
-        if not Success then
+        if Success then
+
+            LastWeaponRequestAt =
+                PendingWeapon.sentAt
+
+            ScheduleNextWeaponRoll()
+
+        else
 
             PendingWeapon = nil
 
-            -- Temporary send/cooldown issue: keep Auto Spin enabled and
-            -- retry using the game's normal weapon presentation interval.
             NextWeaponAutoSpinAt =
                 math.max(
                     NextWeaponAutoSpinAt,
-                    os.clock() + WEAPON_ROLL_DELAY
+                    os.clock() + 0.15
                 )
 
             warn(
@@ -10064,11 +12261,7 @@ end
                                 -- Cooldowns / busy / rate limits are temporary.
                                 -- Leave the toggle ON and retry at the same pace
                                 -- as the game's normal weapon roll presentation.
-                                NextWeaponAutoSpinAt =
-                                    math.max(
-                                        NextWeaponAutoSpinAt,
-                                        os.clock() + WEAPON_ROLL_DELAY
-                                    )
+                                ScheduleNextWeaponRoll()
 
                                 print(
                                     "[Anime Zero][Weapons] Temporary roll state:",
@@ -10115,10 +12308,10 @@ end
                     )
 
 
-                    -- The updated game Auto Roll waits 1.25 seconds after the
-                    -- CharacterRolled result before starting another spin.
-                    NextWeaponAutoSpinAt =
-                        os.clock() + WEAPON_ROLL_DELAY
+                    -- Result animations no longer add an unnecessary extra wait.
+                    -- The next request is scheduled from the actual send time,
+                    -- matching the updated game's 1.80s / 1.05s cooldown gate.
+                    ScheduleNextWeaponRoll()
 
 
                     if ExtraSettings
@@ -11541,12 +13734,10 @@ end
                     nil
 
 
-                -- Match the game's 6 second timeout, then return to the
-                -- updated 1.25 second weapon Auto Roll pacing.
                 NextWeaponAutoSpinAt =
                     math.max(
                         NextWeaponAutoSpinAt,
-                        Now + WEAPON_ROLL_DELAY
+                        Now + 0.25
                     )
 
 
@@ -12073,12 +14264,10 @@ end)()
             return
         end
 
-        if not Packets.redeemCode
-            or type(CodesConfig) ~= "table"
-        then
+        if not Packets.redeemCode then
             Notify(
                 "Codes",
-                "Code configuration is unavailable.",
+                "Code redemption is unavailable.",
                 5
             )
             return
@@ -12103,29 +14292,67 @@ end)()
         local Locked = 0
         local AlreadyRedeemed = 0
 
-        for _, Definition in pairs(CodesConfig) do
-            if type(Definition) == "table"
-                and type(Definition.Code) == "string"
-            then
-                local Code = Definition.Code
-                local MinimumLevel =
-                    tonumber(Definition.MinimumLevel) or 0
+        local SeenCodes = {}
 
-                if Redeemed[string.upper(Code)] then
-                    AlreadyRedeemed += 1
-                elseif Level < MinimumLevel then
-                    Locked += 1
-                else
-                    table.insert(
-                        Available,
-                        {
-                            code = Code,
-                            minimumLevel = MinimumLevel,
-                        }
+
+        local function AddCode(Code, MinimumLevel)
+
+            if type(Code) ~= "string"
+                or Code == ""
+            then
+                return
+            end
+
+
+            local Upper =
+                string.upper(Code)
+
+
+            if SeenCodes[Upper] then
+                return
+            end
+
+
+            SeenCodes[Upper] = true
+            MinimumLevel = tonumber(MinimumLevel) or 0
+
+
+            if Redeemed[Upper] then
+                AlreadyRedeemed += 1
+            elseif Level < MinimumLevel then
+                Locked += 1
+            else
+                table.insert(
+                    Available,
+                    {
+                        code = Code,
+                        minimumLevel = MinimumLevel,
+                    }
+                )
+            end
+        end
+
+
+        if type(CodesConfig) == "table" then
+
+            for _, Definition in pairs(CodesConfig) do
+
+                if type(Definition) == "table" then
+
+                    AddCode(
+                        Definition.Code,
+                        Definition.MinimumLevel
                     )
                 end
             end
         end
+
+
+        -- These two are published in the current Update Log but are not
+        -- present in codesConfig in this build. Keep them as an additional
+        -- source and de-duplicate automatically if the config gains them.
+        AddCode("SORRYFORDELAY", 25)
+        AddCode("NEWRAID", 50)
 
         table.sort(
             Available,
@@ -12531,15 +14758,24 @@ end)()
                     end
 
                     if Result.requestId
-                            ~= PendingQuest.requestId
-                        or tostring(Result.questId)
+                        ~= PendingQuest.requestId
+                    then
+                        return
+                    end
+
+
+                    if PendingQuest.claimAll ~= true
+                        and tostring(Result.questId)
                             ~= PendingQuest.questId
                     then
                         return
                     end
 
+
                     local FinishedQuest =
-                        PendingQuest.questId
+                        PendingQuest.claimAll == true
+                        and "Claim All"
+                        or PendingQuest.questId
 
                     PendingQuest = nil
                     NextQuestAt =
@@ -12586,17 +14822,33 @@ end)()
                         "Quest"
                     )
 
+                    local UseClaimAll =
+                        Packets.claimQuestRewards ~= nil
+
+
                     PendingQuest = {
                         requestId = Id,
                         questId = QuestId,
+                        claimAll = UseClaimAll,
                         sentAt = os.clock(),
                     }
 
+
                     local Fired, ErrorMessage = pcall(function()
-                        Packets.claimQuestReward:fire({
-                            questId = QuestId,
-                            requestId = Id,
-                        })
+
+                        if UseClaimAll then
+
+                            Packets.claimQuestRewards:fire({
+                                requestId = Id,
+                            })
+
+                        else
+
+                            Packets.claimQuestReward:fire({
+                                questId = QuestId,
+                                requestId = Id,
+                            })
+                        end
                     end)
 
                     if not Fired then
@@ -13047,6 +15299,8 @@ end)()
 
     GENV.__AZ_TITLE_AUTOMATION_RUNTIME = Runtime
 
+    GENV.__AZ_SUPPRESS_ULTIMATE = false
+
     local function Alive()
         return GENV.__AZ_TITLE_AUTOMATION_RUNTIME == Runtime
             and Runtime.Active == true
@@ -13288,6 +15542,17 @@ end)()
             progressLabel = "Coins Earned",
             achievementTitle = true,
         },
+        ["Paramita Pyre"] = {
+            id = "141",
+            character = "hutao",
+            raidCharacter = true,
+            difficulty = "Nightmare",
+            mode = "Raid",
+            progressKey = "title.141",
+            progressGoal = 1,
+            progressLabel = "Raid Clears",
+            suppressUltimate = true,
+        },
     }
 
     local AccountNamespace
@@ -13423,6 +15688,40 @@ end)()
                     .. " / Wave "
                     .. tostring(Profile.leaveWave or "?")
             )
+
+        elseif Profile.mode == "Raid" then
+
+            table.insert(
+                Lines,
+                "Run: Raid Spirit's Bathtub - Nightmare"
+            )
+
+
+            if Profile.raidCharacter then
+
+                table.insert(
+                    Lines,
+                    "Storage: "
+                        .. tostring(
+                            ReadProgress(
+                                Data,
+                                "storage." .. tostring(Profile.character)
+                            )
+                        )
+                        .. " | Pity: "
+                        .. tostring(
+                            math.min(
+                                ReadProgress(
+                                    Data,
+                                    "raidPity." .. tostring(Profile.character)
+                                ),
+                                35
+                            )
+                        )
+                        .. "/35"
+                )
+            end
+
         else
             table.insert(
                 Lines,
@@ -13539,6 +15838,7 @@ end)()
             SelectedMapDifficulty = Settings.SelectedMapDifficulty,
             AutoJoinMap = Settings.AutoJoinMap,
             AutoJoinEndless = Settings.AutoJoinEndless,
+            AutoJoinRaid = Settings.AutoJoinRaid,
             SelectedEndlessMap = Settings.SelectedEndlessMap,
             SelectedEndlessDifficulty = Settings.SelectedEndlessDifficulty,
             EndlessLeaveWave = Settings.EndlessLeaveWave,
@@ -13565,6 +15865,8 @@ end)()
 
         Runtime.Snapshot = nil
         Runtime.LastQueueProfile = nil
+
+        GENV.__AZ_SUPPRESS_ULTIMATE = false
 
         local Misc =
             GENV.__AZ_PLAYER_MISC_SETTINGS
@@ -13681,10 +15983,12 @@ end)()
         local Changed =
             Settings.AutoJoinMap == true
             or Settings.AutoJoinEndless == true
+            or Settings.AutoJoinRaid == true
             or Runtime.LastQueueProfile ~= nil
 
         Settings.AutoJoinMap = false
         Settings.AutoJoinEndless = false
+        Settings.AutoJoinRaid = false
         Settings.AutoRetry = false
         Settings.AutoNext = false
         Settings.AutoLeave = false
@@ -13725,6 +16029,18 @@ end)()
 
             Settings.AutoJoinMap = false
             Settings.AutoJoinEndless = true
+            Settings.AutoJoinRaid = false
+
+        elseif Mode == "Raid" then
+
+            ProfileKey =
+                "Raid|BathTub|Nightmare"
+
+            Settings.AutoJoinMap = false
+            Settings.AutoJoinEndless = false
+            Settings.AutoJoinRaid = true
+            Settings.AutoLeaveEndlessAtWave = false
+
         else
             ProfileKey =
                 tostring(Profile.map)
@@ -13738,6 +16054,7 @@ end)()
             Settings.SelectedMapDifficulty = Profile.difficulty
             Settings.AutoJoinMap = true
             Settings.AutoJoinEndless = false
+            Settings.AutoJoinRaid = false
             Settings.AutoLeaveEndlessAtWave = false
         end
 
@@ -13762,6 +16079,7 @@ end)()
 
     local function FinishInLobby(Profile)
         StopExtraWeaponSpin()
+        GENV.__AZ_SUPPRESS_ULTIMATE = false
 
         if Automation.AutoEquipTitle
             and LobbyPackets
@@ -13788,6 +16106,9 @@ end)()
     task.spawn(function()
         while Alive() do
             if not Automation.AutoGrindTitle then
+
+                GENV.__AZ_SUPPRESS_ULTIMATE = false
+
                 if Runtime.Snapshot then
                     StopExtraWeaponSpin()
                     RestoreSnapshot()
@@ -13803,6 +16124,7 @@ end)()
             local Profile = GetProfile()
 
             if not Profile then
+                GENV.__AZ_SUPPRESS_ULTIMATE = false
                 SetState("Unsupported title")
                 task.wait(1)
                 continue
@@ -13897,11 +16219,75 @@ end)()
                         tostring(Slot.Character or "")
 
                     if CurrentCharacter ~= Profile.character then
-                        -- Critical title fix: never allow a queue to remain
-                        -- armed while the required character is still being
-                        -- rolled. The old version enabled Auto Join before
-                        -- this check, so one spin could race the teleport.
+
                         HoldLobbyQueue()
+                        GENV.__AZ_SUPPRESS_ULTIMATE = false
+
+
+                        if Profile.raidCharacter then
+
+                            StopExtraWeaponSpin()
+
+
+                            local Stored =
+                                ReadProgress(
+                                    Data,
+                                    "storage." .. tostring(Profile.character)
+                                )
+
+
+                            if Stored > 0
+                                and LobbyPackets.placeStoredUnit
+                            then
+
+                                local Now = os.clock()
+
+
+                                if Now - (Runtime.LastStorageAt or 0) >= 1.5 then
+
+                                    Runtime.LastStorageAt = Now
+
+
+                                    pcall(function()
+
+                                        LobbyPackets.placeStoredUnit:fire({
+                                            character = Profile.character,
+                                            slot = SlotNumber,
+                                            requestId = NextRequestId(),
+                                        })
+                                    end)
+                                end
+
+
+                                SetState(
+                                    "Placing stored Paramita Pyre into Slot "
+                                        .. tostring(SlotNumber)
+                                )
+
+                            else
+
+                                ApplyRunProfile(Profile)
+
+                                SetState(
+                                    "Paramita Pyre not owned - farming Raid | Pity "
+                                        .. tostring(
+                                            math.min(
+                                                ReadProgress(
+                                                    Data,
+                                                    "raidPity." .. tostring(Profile.character)
+                                                ),
+                                                35
+                                            )
+                                        )
+                                        .. "/35"
+                                )
+                            end
+
+
+                            task.wait(0.4)
+                            continue
+                        end
+
 
                         local LastRoll =
                             GENV.__AZ_LAST_WEAPON_ROLL
@@ -13953,20 +16339,32 @@ end)()
                     end
 
                     -- Only after BOTH conditions are confirmed from account
-                    -- state do we arm Auto Join:
-                    -- 1) selected inventory slot contains required character
-                    -- 2) EquippedCharacterSlots.Slot1 == selected slot number
+                    -- state do we arm Auto Join. Paramita Pyre additionally
+                    -- suppresses Ultimate only for this title objective; the
+                    -- user's saved Farm setting is never changed.
+                    GENV.__AZ_SUPPRESS_ULTIMATE =
+                        Profile.suppressUltimate == true
+
                     ApplyRunProfile(Profile)
 
-                    SetState(
-                        "Weapon + Combat Slot confirmed - joining "
-                            .. tostring(Profile.map)
-                            .. " "
-                            .. tostring(Profile.act)
-                            .. " ["
-                            .. tostring(Profile.difficulty)
-                            .. "]"
-                    )
+                    if Profile.mode == "Raid" then
+
+                        SetState(
+                            "Paramita Pyre + Combat Slot confirmed - joining Raid [Nightmare]"
+                        )
+
+                    else
+
+                        SetState(
+                            "Weapon + Combat Slot confirmed - joining "
+                                .. tostring(Profile.map)
+                                .. " "
+                                .. tostring(Profile.act)
+                                .. " ["
+                                .. tostring(Profile.difficulty)
+                                .. "]"
+                        )
+                    end
                 else
                     StopExtraWeaponSpin()
                     ApplyRunProfile(Profile)
@@ -13980,6 +16378,13 @@ end)()
                                 .. "] to wave "
                                 .. tostring(Profile.leaveWave or 100)
                         )
+
+                    elseif Profile.mode == "Raid" then
+
+                        SetState(
+                            "Joining Raid [Nightmare]"
+                        )
+
                     else
                         SetState(
                             "Joining "
@@ -13993,6 +16398,56 @@ end)()
                     end
                 end
             else
+
+                if Profile.raidCharacter then
+
+                    local SlotNumber =
+                        math.clamp(
+                            tonumber(Automation.WeaponSlot) or 1,
+                            1,
+                            4
+                        )
+
+                    local Slot =
+                        GetSlot(Data, SlotNumber)
+
+                    local HasRaidCharacter =
+                        Slot
+                        and tostring(Slot.Character or "") == Profile.character
+
+
+                    if not HasRaidCharacter
+                        and ReadProgress(
+                            Data,
+                            "storage." .. tostring(Profile.character)
+                        ) > 0
+                    then
+
+                        GENV.__AZ_SUPPRESS_ULTIMATE = false
+                        Settings.AutoRetry = false
+                        Settings.AutoNext = false
+                        Settings.AutoLeave = true
+
+                        SetState(
+                            "Paramita Pyre stored - returning to lobby to place unit"
+                        )
+
+                        task.wait(0.35)
+                        continue
+                    end
+
+
+                    GENV.__AZ_SUPPRESS_ULTIMATE =
+                        HasRaidCharacter
+                        and Profile.suppressUltimate == true
+
+                else
+
+                    GENV.__AZ_SUPPRESS_ULTIMATE =
+                        Profile.suppressUltimate == true
+                end
+
+
                 ApplyRunProfile(Profile)
 
                 SetState(
@@ -14221,6 +16676,8 @@ end)()
                 local Price = tonumber(Live.Shop.GetPrice(tostring(Id))) or math.huge
 
                 if Missing > 0
+                    and tostring(Id) ~= "113"
+                    and tostring(Id) ~= "114"
                     and Live.Shop.IsInStock(tostring(Id), Day)
                     and Money >= Price
                 then
@@ -14252,7 +16709,10 @@ end)()
             for Target, Missing in pairs(Needs) do
                 Missing = math.floor(tonumber(Missing) or 0)
 
-                if Missing > 0 then
+                if Missing > 0
+                    and tostring(Target) ~= "113"
+                    and tostring(Target) ~= "114"
+                then
                     for _, SourceInfo in ipairs(
                         Live.Shop.GetSources(tostring(Target)) or {}
                     ) do
@@ -14271,7 +16731,10 @@ end)()
                             65535
                         )
 
-                        if Amount > 0 then
+                        if Amount > 0
+                            and Source ~= "113"
+                            and Source ~= "114"
+                        then
                             local Ok = pcall(function()
                                 Live.Packets.convertMaterial:fire({
                                     source = Source,
@@ -14524,6 +16987,10 @@ end)()
         ["110"] = "Magic Pendant",
         ["111"] = "Forbidden Fruit",
         ["112"] = "Waves core",
+
+        ["113"] = "Ghost",
+
+        ["114"] = "Staff of Homa",
     }
 
     local Recipes = {}
@@ -14905,6 +17372,7 @@ end)()
             SelectedMapDifficulty = Settings.SelectedMapDifficulty,
             AutoJoinMap = Settings.AutoJoinMap,
             AutoJoinEndless = Settings.AutoJoinEndless,
+            AutoJoinRaid = Settings.AutoJoinRaid,
             SelectedEndlessMap = Settings.SelectedEndlessMap,
             SelectedEndlessDifficulty = Settings.SelectedEndlessDifficulty,
             EndlessLeaveWave = Settings.EndlessLeaveWave,
@@ -15005,12 +17473,14 @@ end)()
             Settings.AutoLeaveEndlessAtWave = true
             Settings.AutoJoinMap = false
             Settings.AutoJoinEndless = true
+            Settings.AutoJoinRaid = false
         else
             Settings.SelectedMap = Route.Map
             Settings.SelectedAct = Route.Act
             Settings.SelectedMapDifficulty = Route.Difficulty
             Settings.AutoJoinMap = true
             Settings.AutoJoinEndless = false
+            Settings.AutoJoinRaid = false
             Settings.AutoLeaveEndlessAtWave = false
         end
 
@@ -15035,6 +17505,7 @@ end)()
     local function PrepareLobbyCraft(Name)
         Settings.AutoJoinMap = false
         Settings.AutoJoinEndless = false
+        Settings.AutoJoinRaid = false
         Settings.AutoRetry = false
         Settings.AutoLeave = false
         Settings.AutoNext = false
@@ -15725,6 +18196,7 @@ end)()
         "SelectedAct",
         "SelectedMapDifficulty",
         "AutoJoinMap",
+        "AutoJoinRaid",
 
         "SelectedEndlessMap",
         "SelectedEndlessDifficulty",
@@ -15846,6 +18318,9 @@ end)()
         Settings.AutoJoinEndless =
             false
 
+        Settings.AutoJoinRaid =
+            false
+
         Settings.AutoLeaveEndlessAtWave =
             false
 
@@ -15931,8 +18406,68 @@ end)()
         Settings.AutoJoinMap =
             false
 
+        Settings.AutoJoinRaid =
+            false
+
         Settings.AutoRetry =
             false
+
+        Settings.AutoLeave =
+            false
+
+        Settings.AutoNext =
+            false
+
+        Settings.AutoLeaveAfterMatches =
+            false
+
+
+        if Changed then
+
+            Runtime.LastRunProfile =
+                Key
+
+
+            pcall(
+                ResetLobbyState
+            )
+
+
+            PersistRunSettings()
+        end
+    end
+
+
+    local function ApplyRaid(
+        Reason
+    )
+
+        local Key =
+            "Raid|BathTub|Nightmare|"
+            .. tostring(
+                Reason or ""
+            )
+
+
+        local Changed =
+            Runtime.LastRunProfile
+                ~= Key
+
+
+        Settings.AutoJoinMap =
+            false
+
+        Settings.AutoJoinEndless =
+            false
+
+        Settings.AutoJoinRaid =
+            true
+
+        Settings.AutoLeaveEndlessAtWave =
+            false
+
+        Settings.AutoRetry =
+            true
 
         Settings.AutoLeave =
             false
@@ -15966,6 +18501,9 @@ end)()
             false
 
         Settings.AutoJoinEndless =
+            false
+
+        Settings.AutoJoinRaid =
             false
 
         Settings.AutoRetry =
@@ -16018,6 +18556,7 @@ end)()
         "sukuna",
         "shanks",
         "miyabi",
+        "hutao",
     }
 
 
@@ -16033,6 +18572,7 @@ end)()
         sukuna = "Cursed King",
         shanks = "Divine Emperor",
         miyabi = "Cataclysm",
+        hutao = "Paramita Pyre",
     }
 
 
@@ -16066,6 +18606,7 @@ end)()
         "Hoarder",
         "Beyond Limits",
         "Millionaire",
+        "Paramita Pyre",
     }
 
 
@@ -16085,6 +18626,7 @@ end)()
         ["Hoarder"] = "137",
         ["Beyond Limits"] = "139",
         ["Millionaire"] = "140",
+        ["Paramita Pyre"] = "141",
     }
 
 
@@ -16466,6 +19008,11 @@ end)()
         Character
     )
 
+        if Character == "hutao" then
+            return false
+        end
+
+
         local Extra =
             GENV.__AZ_EXTRA_SETTINGS
 
@@ -16543,6 +19090,80 @@ end)()
 
             return true
         end
+
+
+    local function RaidUnitStorage(
+        Data,
+        Character
+    )
+
+        return tonumber(
+            Data
+            and Data.achievements
+            and Data.achievements.progress
+            and Data.achievements.progress[
+                "storage." .. tostring(Character)
+            ]
+        ) or 0
+    end
+
+
+    local function RaidUnitPity(
+        Data,
+        Character
+    )
+
+        return tonumber(
+            Data
+            and Data.achievements
+            and Data.achievements.progress
+            and Data.achievements.progress[
+                "raidPity." .. tostring(Character)
+            ]
+        ) or 0
+    end
+
+
+    local function PlaceStoredRaidUnit(
+        Character,
+        Slot
+    )
+
+        if not IsLobby()
+            or not LobbyPackets
+            or not LobbyPackets.placeStoredUnit
+        then
+            return false
+        end
+
+
+        if os.clock()
+            - (Runtime.LastStorageRequest or 0)
+            < 1.5
+        then
+            return true
+        end
+
+
+        Runtime.LastStorageRequest =
+            os.clock()
+
+
+        local Success =
+            pcall(function()
+
+                LobbyPackets
+                    .placeStoredUnit
+                    :fire({
+                        character = Character,
+                        slot = Slot,
+                        requestId = NextRequestId(),
+                    })
+            end)
+
+
+        return Success
+    end
 
 
     local function SelectedEvolutionTarget(
@@ -16675,6 +19296,103 @@ end)()
             end
 
 
+            local RollSlot =
+                math.clamp(
+                    tonumber(
+                        Advanced
+                            .EvolutionRollSlot
+                    ) or 1,
+                    1,
+                    4
+                )
+
+
+            if Character == "hutao" then
+
+                local Stored =
+                    RaidUnitStorage(
+                        Data,
+                        Character
+                    )
+
+
+                if Stored > 0 then
+
+                    if not IsLobby() then
+
+                        ReturnToLobby()
+
+                        SetState(
+                            "Full Evolve: Paramita Pyre stored - returning to lobby"
+                        )
+
+                        return
+                    end
+
+
+                    HoldLobby()
+
+
+                    local SlotData =
+                        Data.UnlockedCharacters
+                        and Data.UnlockedCharacters[
+                            "Slot" .. tostring(RollSlot)
+                        ]
+
+
+                    if not SlotData
+                        or SlotData.Unlocked ~= true
+                    then
+
+                        SetState(
+                            "Full Evolve: Slot "
+                            .. tostring(RollSlot)
+                            .. " is locked"
+                        )
+
+                        return
+                    end
+
+
+                    PlaceStoredRaidUnit(
+                        Character,
+                        RollSlot
+                    )
+
+
+                    SetState(
+                        "Full Evolve: placing stored Paramita Pyre into Slot "
+                            .. tostring(RollSlot)
+                    )
+
+                    return
+                end
+
+
+                ApplyRaid(
+                    "AcquireParamitaPyre"
+                )
+
+
+                SetState(
+                    "Full Evolve: farming Raid for Paramita Pyre | Pity "
+                        .. tostring(
+                            math.min(
+                                RaidUnitPity(
+                                    Data,
+                                    Character
+                                ),
+                                35
+                            )
+                        )
+                        .. "/35"
+                )
+
+
+                return
+            end
+
+
             if not IsLobby() then
 
                 ReturnToLobby()
@@ -16689,17 +19407,6 @@ end)()
 
 
             HoldLobby()
-
-
-            local RollSlot =
-                math.clamp(
-                    tonumber(
-                        Advanced
-                            .EvolutionRollSlot
-                    ) or 1,
-                    1,
-                    4
-                )
 
 
             local SlotData =
@@ -16792,6 +19499,30 @@ end)()
 
         if MaterialId then
 
+            if MaterialId == "113"
+                or MaterialId == "114"
+            then
+
+                ApplyRaid(
+                    "EvolutionRaidMaterial"
+                )
+
+
+                SetState(
+                    "Full Evolve: farming Raid for "
+                        .. (
+                            MaterialId == "113"
+                            and "Ghost"
+                            or "Staff of Homa"
+                        )
+                        .. " for "
+                        .. Display
+                )
+
+                return
+            end
+
+
             local Act =
                 ChooseHxhAct(
                     MaterialId
@@ -16824,6 +19555,36 @@ end)()
                 .. " using "
                 .. Act
                 .. " [Nightmare]"
+            )
+
+
+            return
+        end
+
+
+        local MissingMoney =
+            tonumber(
+                Missing.currencies
+                    .money
+            ) or 0
+
+
+        if MissingMoney > 0 then
+
+            ApplyStory(
+                "Act 1",
+                "Nightmare",
+                "EvolutionMoney"
+            )
+
+
+            SetState(
+                "Full Evolve: farming Coins for "
+                .. Display
+                .. " | missing "
+                .. tostring(
+                    MissingMoney
+                )
             )
 
 
@@ -16868,6 +19629,7 @@ end)()
         do
 
             if Currency ~= "gems"
+                and Currency ~= "money"
                 and tonumber(Amount)
                 and Amount > 0
             then
@@ -17062,6 +19824,32 @@ end)()
                     Lines,
                     "Character: not owned"
                 )
+
+
+                if Character == "hutao" then
+
+                    table.insert(
+                        Lines,
+                        "Raid storage: "
+                            .. tostring(
+                                RaidUnitStorage(
+                                    Data,
+                                    Character
+                                )
+                            )
+                            .. " | Pity: "
+                            .. tostring(
+                                math.min(
+                                    RaidUnitPity(
+                                        Data,
+                                        Character
+                                    ),
+                                    35
+                                )
+                            )
+                            .. "/35"
+                    )
+                end
             end
 
 
@@ -17075,10 +19863,18 @@ end)()
 
                         table.insert(
                             Lines,
-                            "Material "
-                                .. tostring(
-                                    Id
+                            (
+                                tostring(Id) == "113"
+                                and "Ghost"
+                                or (
+                                    tostring(Id) == "114"
+                                    and "Staff of Homa"
+                                    or (
+                                        "Material "
+                                        .. tostring(Id)
+                                    )
                                 )
+                            )
                                 .. ": missing "
                                 .. tostring(
                                     Amount
@@ -19854,12 +22650,38 @@ local function CreateLobbyQueue(
                 RoomNumber
             )
 
-    else
+    elseif Mode == "Infinite" then
 
         Payload =
             BuildEndlessPayload(
                 RoomNumber
             )
+
+    elseif Mode == "Raid" then
+
+        local RaidMap =
+            FindLobbyMap(
+                "Raid",
+                "BathTub"
+            )
+            or FindLobbyMap(
+                "Raid",
+                "Spirit's Bathtub"
+            )
+
+
+        if RaidMap then
+
+            Payload = {
+                gamemode = "Raid",
+                map = RaidMap.Id,
+                chapter = 0,
+                difficulty = 4,
+                maxPlayers = 1,
+                friendsOnly = false,
+                roomNumber = RoomNumber,
+            }
+        end
     end
 
 
@@ -20076,6 +22898,12 @@ if LobbyReady then
 
                 RequestedMode =
                     "Infinite"
+
+
+            elseif Settings.AutoJoinRaid then
+
+                RequestedMode =
+                    "Raid"
             end
 
 
@@ -20176,15 +23004,43 @@ end
 --//
 --//          FARM PLACE DETECTION
 --//
---// DO NOT WAIT FOR DUNGEON MODULES WHILE IN LOBBY.
+--// UPDATE-SAFE:
+--// - Dungeon modules can replicate after the UI after a teleport.
+--// - Never permanently skip the farm engine just because `game` was late.
+--// - The bootstrap now prefers Dungeon, but this is a second safety net.
 --//
 --//============================================================
+
+GENV.__AZ_FARM_ENGINE_ACTIVE =
+    GENV.__AZ_FARM_RESCUE_ACTIVE == true
 
 local GameFolder =
     ReplicatedStorage
         :FindFirstChild(
             "game"
         )
+
+
+if not GameFolder then
+
+    if GENV.__AZ_BOOT_PLACE == "Dungeon"
+        or workspace:GetAttribute("Mode") ~= nil
+        or game.PlaceId == 109151342576374
+    then
+
+        print(
+            "[Anime Zero] Waiting for updated dungeon modules..."
+        )
+
+
+        GameFolder =
+            ReplicatedStorage
+                :WaitForChild(
+                    "game",
+                    60
+                )
+    end
+end
 
 
 if not GameFolder then
@@ -20203,11 +23059,17 @@ if not GameFolder then
 end
 
 
+
 local StoresFolder =
     GameFolder
         :FindFirstChild(
             "stores"
         )
+        or GameFolder
+            :WaitForChild(
+                "stores",
+                60
+            )
 
 
 local PacketsFolder =
@@ -20215,38 +23077,71 @@ local PacketsFolder =
         :FindFirstChild(
             "packets"
         )
+        or GameFolder
+            :WaitForChild(
+                "packets",
+                60
+            )
 
 
 local CharacterPacketsModule =
     PacketsFolder
-    and PacketsFolder
-        :FindFirstChild(
-            "characterPackets"
-        )
+    and (
+        PacketsFolder
+            :FindFirstChild(
+                "characterPackets"
+            )
+        or PacketsFolder
+            :WaitForChild(
+                "characterPackets",
+                60
+            )
+    )
 
 
 local EnemyStoreObject =
     StoresFolder
-    and StoresFolder
-        :FindFirstChild(
-            "enemyStore"
-        )
+    and (
+        StoresFolder
+            :FindFirstChild(
+                "enemyStore"
+            )
+        or StoresFolder
+            :WaitForChild(
+                "enemyStore",
+                60
+            )
+    )
 
 
 local PlayerNamespaceObject =
     StoresFolder
-    and StoresFolder
-        :FindFirstChild(
-            "playerNamespace"
-        )
+    and (
+        StoresFolder
+            :FindFirstChild(
+                "playerNamespace"
+            )
+        or StoresFolder
+            :WaitForChild(
+                "playerNamespace",
+                60
+            )
+    )
 
 
 local RunStoreObject =
     StoresFolder
-    and StoresFolder
-        :FindFirstChild(
-            "runStore"
-        )
+    and (
+        StoresFolder
+            :FindFirstChild(
+                "runStore"
+            )
+        or StoresFolder
+            :WaitForChild(
+                "runStore",
+                60
+            )
+    )
 
 
 if not CharacterPacketsModule
@@ -20255,18 +23150,14 @@ if not CharacterPacketsModule
     or not RunStoreObject
 then
 
-    print(
-        "[Anime Zero] Combat modules not present."
-    )
-
-
-    print(
-        "[Anime Zero] Lobby engine remains active."
+    warn(
+        "[Anime Zero] Dungeon detected but required farm modules did not replicate."
     )
 
 
     return
 end
+
 
 
 --//============================================================
@@ -20295,6 +23186,29 @@ local RunStoreModule =
     require(
         RunStoreObject
     )
+
+
+-- Updated combat controller keeps dash / local skill-busy state in
+-- ReplicatedStorage.global.stores.localPlayerStore. Load it when present
+-- so farm combat follows the same readiness rules as the game client.
+GENV.__AZ_FARM_EXT.LocalClientStore = nil
+
+pcall(function()
+    local GlobalFolder =
+        ReplicatedStorage:FindFirstChild("global")
+
+    local GlobalStores =
+        GlobalFolder
+        and GlobalFolder:FindFirstChild("stores")
+
+    local LocalStoreObject =
+        GlobalStores
+        and GlobalStores:FindFirstChild("localPlayerStore")
+
+    if LocalStoreObject then
+        GENV.__AZ_FARM_EXT.LocalClientStore = require(LocalStoreObject)
+    end
+end)
 
 
 local Constants =
@@ -21326,7 +24240,10 @@ end
 --// STUNS
 --//============================================================
 
-local function HasActiveStun(Store)
+local function HasActiveStun(
+    Store,
+    IgnoreM1
+)
 
     if not Store then
         return false
@@ -21356,28 +24273,33 @@ local function HasActiveStun(Store)
     end
 
 
-    for _, Stun
+    for StunName, Stun
         in pairs(
             Stuns
         )
     do
 
-        local SuccessTill,
-            Till =
-            pcall(function()
+        -- Updated skill input ignores the short M1 stun, while M1 itself
+        -- still treats every active stun as blocking.
+        if not (IgnoreM1 and StunName == "m1") then
 
-                return Stun
-                    .till
-                    :get()
-            end)
+            local SuccessTill,
+                Till =
+                pcall(function()
+
+                    return Stun
+                        .till
+                        :get()
+                end)
 
 
-        if SuccessTill
-            and Till
-            and Now < Till
-        then
+            if SuccessTill
+                and Till
+                and Now < Till
+            then
 
-            return true
+                return true
+            end
         end
     end
 
@@ -21385,6 +24307,57 @@ local function HasActiveStun(Store)
     return false
 end
 
+
+-- Mirrors the updated client-only dash / skill-busy state.
+GENV.__AZ_FARM_EXT.IsLocalClientBusy = function()
+
+    if not GENV.__AZ_FARM_EXT.LocalClientStore
+        or not GENV.__AZ_FARM_EXT.LocalClientStore.state
+    then
+        return false
+    end
+
+
+    local Success,
+        Busy =
+        pcall(function()
+
+            if GENV.__AZ_FARM_EXT.LocalClientStore.state.dashing
+                and GENV.__AZ_FARM_EXT.LocalClientStore.state.dashing:get()
+            then
+                return true
+            end
+
+
+            local SkillState =
+                GENV.__AZ_FARM_EXT.LocalClientStore.state.skill
+
+
+            if SkillState then
+
+                if SkillState.pending
+                    and SkillState.pending:get()
+                then
+                    return true
+                end
+
+
+                if SkillState.till
+                    and workspace:GetServerTimeNow()
+                        < (SkillState.till:get() or 0)
+                then
+                    return true
+                end
+            end
+
+
+            return false
+        end)
+
+
+    return Success
+        and Busy == true
+end
 
 --//============================================================
 --// COOLDOWNS
@@ -21482,6 +24455,77 @@ local function M1CooldownReady(Store)
 end
 
 
+GENV.__AZ_FARM_EXT.GetCurrentCharacterName = function(Store)
+
+    if not Store then
+        return nil
+    end
+
+
+    local Success,
+        Name =
+        pcall(function()
+            return Store.state.character:get()
+        end)
+
+
+    if Success then
+        return Name
+    end
+
+
+    return nil
+end
+
+
+GENV.__AZ_FARM_EXT.ResolveEffectiveSkill = function(
+    Store,
+    RequestedSkill
+)
+
+    local CharacterName =
+        GENV.__AZ_FARM_EXT.GetCurrentCharacterName(Store)
+
+
+    if not CharacterName then
+        return nil, nil
+    end
+
+
+    local EffectiveSkill =
+        RequestedSkill
+
+
+    local Config =
+        CharacterConstants
+            .charactersByName[
+                CharacterName
+            ]
+
+
+    local SkillConfig =
+        Config
+        and Config.skills
+        and Config.skills[
+            RequestedSkill
+        ]
+
+
+    if SkillConfig
+        and SkillConfig.bonus
+        and workspace:GetServerTimeNow()
+            < (LocalPlayer:GetAttribute("BonusUntil") or 0)
+    then
+        EffectiveSkill =
+            SkillConfig.bonus
+    end
+
+
+    return CharacterName,
+        EffectiveSkill
+end
+
+
 local function SkillCooldownReady(
     Store,
     SkillNumber
@@ -21492,54 +24536,58 @@ local function SkillCooldownReady(
     end
 
 
-    local Success,
-        Cooldown =
-        pcall(function()
-
-            return Store
-                .state
-                .cooldowns
-                :get(
-                    "skill"
-                    .. tostring(
-                        SkillNumber
-                    )
-                )
-        end)
+    local CharacterName,
+        EffectiveSkill =
+        GENV.__AZ_FARM_EXT.ResolveEffectiveSkill(
+            Store,
+            SkillNumber
+        )
 
 
-    if not Success then
+    if not CharacterName
+        or not EffectiveSkill
+    then
         return false
     end
 
 
-    if Cooldown == nil then
-        return true
+    local Key =
+        CharacterName
+        .. ".skill"
+        .. tostring(
+            EffectiveSkill
+        )
+
+
+    if type(
+        PlayerNamespace.skillCooldownKey
+    ) == "function"
+    then
+
+        local Success,
+            Result =
+            pcall(
+                PlayerNamespace.skillCooldownKey,
+                CharacterName,
+                EffectiveSkill
+            )
+
+
+        if Success
+            and type(Result) == "string"
+        then
+            Key = Result
+        end
     end
 
 
-    local SuccessTill,
-        Till =
-        pcall(function()
-
-            return Cooldown:get()
-        end)
-
-
-    if not SuccessTill then
-        return false
-    end
-
-
-    if Till == nil then
-        return true
-    end
-
-
-    return workspace:GetServerTimeNow()
-        >= Till
+    return CooldownReady(
+        Store,
+        Key
+    ),
+        EffectiveSkill,
+        CharacterName
 end
-
 
 --//============================================================
 --// RUN STORE
@@ -21650,25 +24698,94 @@ end
 
 local function GetAllEnemies()
 
-    local Success,
-        Enemies =
-        pcall(function()
+    -- The updated enemy controller still renders every live enemy directly
+    -- under workspace.enemies.  Treat those visible models as authoritative
+    -- for target acquisition, while preserving the replicated Dime state when
+    -- it is available for health/name/cooldown information.
+    local Enemies = {}
 
-            return EnemyStore
+
+    pcall(function()
+
+        local Stored =
+            EnemyStore
                 .state
                 :getAll()
-        end)
 
 
-    if Success
-        and Enemies
-    then
+        if type(Stored) == "table" then
 
-        return Enemies
+            for EnemyId, EnemyState in pairs(Stored) do
+                Enemies[EnemyId] = EnemyState
+            end
+        end
+    end)
+
+
+    local Folder =
+        workspace:FindFirstChild(
+            "enemies"
+        )
+
+
+    if Folder then
+
+        for _, Model in ipairs(
+            Folder:GetChildren()
+        ) do
+
+            if Model:IsA("Model") then
+
+                local RootPart =
+                    Model:FindFirstChild(
+                        "HumanoidRootPart"
+                    )
+
+
+                if RootPart
+                    and RootPart:IsA("BasePart")
+                then
+
+                    local EnemyId =
+                        tonumber(Model.Name)
+                        or Model.Name
+
+
+                    local StoredState =
+                        Enemies[EnemyId]
+                        or Enemies[Model.Name]
+
+
+                    local Humanoid =
+                        Model:FindFirstChildOfClass(
+                            "Humanoid"
+                        )
+
+
+                    -- Always wrap the visible model, even when the store already
+                    -- has this id.  This avoids an updated/partially reconciled
+                    -- Dime entry preventing the farm from seeing a model that is
+                    -- plainly alive on the client.
+                    Enemies[EnemyId] = {
+                        __AZVisualFallback = true,
+                        __AZModel = Model,
+                        __AZStoreState = StoredState,
+                        health =
+                            Humanoid
+                            and math.max(Humanoid.Health, 1)
+                            or 1,
+                        position = RootPart.Position,
+                        name =
+                            Model:GetAttribute("EnemyName")
+                            or Model.Name,
+                    }
+                end
+            end
+        end
     end
 
 
-    return {}
+    return Enemies
 end
 
 
@@ -21688,11 +24805,22 @@ local function EnemyGet(
         ]
 
 
+    -- Visual wrappers keep the original replicated store state here. Prefer
+    -- that value when present, otherwise use the direct model snapshot.
+    if type(EnemyState) == "table"
+        and EnemyState.__AZStoreState
+        and EnemyState.__AZStoreState[Key] ~= nil
+    then
+        Entry = EnemyState.__AZStoreState[Key]
+    end
+
+
     if Entry == nil then
         return nil
     end
 
 
+    -- Dime values use :get(); visual-fallback states use plain values.
     local Success,
         Value =
         pcall(function()
@@ -21706,34 +24834,119 @@ local function EnemyGet(
     end
 
 
-    return nil
+    if typeof(Entry) == "Instance"
+        and Entry:IsA("ValueBase")
+    then
+        return Entry.Value
+    end
+
+
+    return Entry
 end
 
 
 local function GetEnemyHealth(EnemyState)
 
-    return EnemyGet(
-        EnemyState,
-        "health"
-    ) or 0
+    local Health =
+        EnemyGet(
+            EnemyState,
+            "health"
+        )
+
+
+    if tonumber(Health) then
+        return tonumber(Health)
+    end
+
+
+    local Model =
+        type(EnemyState) == "table"
+        and EnemyState.__AZModel
+        or nil
+
+
+    if Model
+        and Model.Parent
+    then
+
+        local Humanoid =
+            Model:FindFirstChildOfClass(
+                "Humanoid"
+            )
+
+
+        if Humanoid then
+            return math.max(Humanoid.Health, 1)
+        end
+
+
+        return 1
+    end
+
+
+    return 0
 end
 
 
 local function GetEnemyPosition(EnemyState)
 
-    return EnemyGet(
-        EnemyState,
-        "position"
-    )
+    local Position =
+        EnemyGet(
+            EnemyState,
+            "position"
+        )
+
+
+    if typeof(Position) == "Vector3" then
+        return Position
+    end
+
+
+    local Model =
+        type(EnemyState) == "table"
+        and EnemyState.__AZModel
+        or nil
+
+
+    local RootPart =
+        Model
+        and Model:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+
+    return RootPart
+        and RootPart.Position
+        or nil
 end
 
 
 local function GetEnemyName(EnemyState)
 
-    return EnemyGet(
-        EnemyState,
-        "name"
-    )
+    local Name =
+        EnemyGet(
+            EnemyState,
+            "name"
+        )
+
+
+    if Name ~= nil then
+        return Name
+    end
+
+
+    local Model =
+        type(EnemyState) == "table"
+        and EnemyState.__AZModel
+        or nil
+
+
+    return Model
+        and (
+            Model:GetAttribute("EnemyName")
+            or Model.Name
+        )
+        or nil
 end
 
 
@@ -24664,6 +27877,108 @@ local function ApplyFarmMovement(
     end
 
 
+    -- If the updated character controller continuously corrects the root while
+    -- Tween mode is active, do not sit still forever.  Detect a target that is
+    -- not getting closer and pivot the whole character once as a recovery.
+    if CurrentFarmMode == "Enemy" then
+
+        local Ext =
+            GENV.__AZ_FARM_EXT
+
+
+        local EnemyDistance =
+            (
+                Root.Position
+                - DesiredFarmCFrame.Position
+            ).Magnitude
+
+
+        local Now =
+            os.clock()
+
+
+        if not Ext.EnemyMoveTarget
+            or (
+                Ext.EnemyMoveTarget
+                - DesiredFarmCFrame.Position
+            ).Magnitude > 2
+        then
+
+            Ext.EnemyMoveTarget =
+                DesiredFarmCFrame.Position
+
+            Ext.EnemyMoveBestDistance =
+                EnemyDistance
+
+            Ext.EnemyMoveLastProgressAt =
+                Now
+
+        elseif EnemyDistance
+            < (
+                (Ext.EnemyMoveBestDistance or EnemyDistance)
+                - 0.75
+            )
+        then
+
+            Ext.EnemyMoveBestDistance =
+                EnemyDistance
+
+            Ext.EnemyMoveLastProgressAt =
+                Now
+
+        elseif EnemyDistance > 3
+            and (
+                Now
+                - (Ext.EnemyMoveLastProgressAt or Now)
+            ) >= 0.80
+            and (
+                Now
+                - (Ext.LastEnemyMoveSnapAt or 0)
+            ) >= 0.80
+        then
+
+            local Character =
+                GetCharacter()
+
+
+            if Character then
+                Character:PivotTo(
+                    DesiredFarmCFrame
+                )
+            else
+                Root.CFrame =
+                    DesiredFarmCFrame
+            end
+
+
+            Root.AssemblyLinearVelocity =
+                Vector3.zero
+
+            Root.AssemblyAngularVelocity =
+                Vector3.zero
+
+
+            Ext.LastEnemyMoveSnapAt =
+                Now
+
+            Ext.EnemyMoveLastProgressAt =
+                Now
+
+            Ext.EnemyMoveBestDistance =
+                0
+
+
+            return
+        end
+
+    else
+
+        GENV.__AZ_FARM_EXT.EnemyMoveTarget = nil
+        GENV.__AZ_FARM_EXT.EnemyMoveBestDistance = nil
+        GENV.__AZ_FARM_EXT.EnemyMoveLastProgressAt = 0
+    end
+
+
     if Settings.FarmMethod == "Teleport" then
 
         if CurrentFarmMode == "Enemy"
@@ -24783,6 +28098,51 @@ end
 
 
 --//============================================================
+--// ACTIVE RUN / UPDATED CLIENT STATE
+--//============================================================
+
+GENV.__AZ_FARM_EXT.IsRunActive = function()
+
+    if type(RunStoreModule.isActive) == "function" then
+
+        local Success,
+            Active =
+            pcall(
+                RunStoreModule.isActive,
+                LocalPlayer
+            )
+
+
+        if Success then
+            return Active == true
+        end
+    end
+
+
+    local Participant =
+        GetLocalParticipant()
+
+
+    if not Participant
+        or not Participant.status
+    then
+        return true
+    end
+
+
+    local Success,
+        Status =
+        pcall(function()
+            return Participant.status:get()
+        end)
+
+
+    return not Success
+        or Status == "active"
+end
+
+
+--//============================================================
 --// M1
 --//============================================================
 
@@ -24790,6 +28150,7 @@ local function TryM1()
 
     if not Settings.AutoM1
         or not IsAlive()
+        or not GENV.__AZ_FARM_EXT.IsRunActive()
     then
 
         return false
@@ -24815,7 +28176,8 @@ local function TryM1()
 
 
     if IsBlocking(Store)
-        or HasActiveStun(Store)
+        or HasActiveStun(Store, false)
+        or GENV.__AZ_FARM_EXT.IsLocalClientBusy()
     then
 
         return false
@@ -24912,6 +28274,7 @@ local function TrySkill(
 )
 
     if not IsAlive()
+        or not GENV.__AZ_FARM_EXT.IsRunActive()
         or not GetNearbyEnemy()
     then
 
@@ -24925,7 +28288,8 @@ local function TrySkill(
 
     if not Store
         or IsBlocking(Store)
-        or HasActiveStun(Store)
+        or HasActiveStun(Store, true)
+        or GENV.__AZ_FARM_EXT.IsLocalClientBusy()
     then
 
         return false
@@ -24958,17 +28322,25 @@ local function TrySkill(
     end
 
 
-    if not SkillCooldownReady(
-        Store,
-        SkillNumber
-    )
+    local CooldownReadyNow,
+        EffectiveSkill,
+        CharacterName =
+        SkillCooldownReady(
+            Store,
+            SkillNumber
+        )
+
+
+    if not CooldownReadyNow
+        or not EffectiveSkill
+        or not CharacterName
     then
 
         return false
     end
 
 
-    if SkillNumber == 4 then
+    if EffectiveSkill == 4 then
 
         local Success,
             Progress =
@@ -24984,29 +28356,11 @@ local function TrySkill(
         if not Success
             or not Progress
             or Progress < 100
+            or LocalPlayer:GetAttribute("UltimateLocked") == true
         then
 
             return false
         end
-    end
-
-
-    local SuccessCharacter,
-        CharacterName =
-        pcall(function()
-
-            return Store
-                .state
-                .character
-                :get()
-        end)
-
-
-    if not SuccessCharacter
-        or not CharacterName
-    then
-
-        return false
     end
 
 
@@ -25020,7 +28374,7 @@ local function TrySkill(
 
 
     SkillSequence =
-        SkillSequence + 1
+        (SkillSequence % 4294967295) + 1
 
 
     local RequestId =
@@ -25043,13 +28397,10 @@ local function TrySkill(
             Character,
 
         skill =
-            SkillNumber,
+            EffectiveSkill,
 
         expiresAt =
             Expires,
-
-        predicted =
-            SkillNumber < 4,
     }
 
 
@@ -25061,12 +28412,12 @@ local function TrySkill(
         Expires
 
 
-    if SkillNumber < 4 then
+    if EffectiveSkill < 4 then
 
         local Processing =
             GetSkillProcessingTime(
                 CharacterName,
-                SkillNumber
+                EffectiveSkill
             )
 
 
@@ -25079,7 +28430,8 @@ local function TrySkill(
     end
 
 
-    local Success =
+    local Success,
+        ErrorMessage =
         pcall(function()
 
             CharacterPackets
@@ -25096,9 +28448,19 @@ local function TrySkill(
             nil
 
 
+        SkillBusyUntil =
+            0
+
+
         SkillRetryAfter =
             Now
             + SKILL_REJECT_BACKOFF
+
+
+        GENV.__AZ_FARM_EXT.LastSkillError =
+            tostring(
+                ErrorMessage
+            )
 
 
         return false
@@ -25107,7 +28469,6 @@ local function TrySkill(
 
     return true
 end
-
 
 pcall(function()
 
@@ -25176,7 +28537,9 @@ RunAutoSkills =
         end
 
 
-        if Settings.AutoUltimate then
+        if Settings.AutoUltimate
+            and GENV.__AZ_SUPPRESS_ULTIMATE ~= true
+        then
 
             if TrySkill(4) then
                 return
@@ -25251,7 +28614,9 @@ local function RequestBlock(State)
     -- guard-broken or while the server's block cooldown is active.
     if State == true
         and (
-            LocalPlayer:GetAttribute("GuardBroken") == true
+            not GENV.__AZ_FARM_EXT.IsRunActive()
+            or GENV.__AZ_FARM_EXT.IsLocalClientBusy()
+            or LocalPlayer:GetAttribute("GuardBroken") == true
             or not CooldownReady(Store, "block")
         )
     then
@@ -25649,6 +29014,26 @@ local function GetRequestedEntryArea()
     end
 
 
+    -- Do not let transition recovery take priority while the updated client
+    -- already has live/visible enemies spawned for this area.
+    if GetLivingEnemyCount() > 0 then
+        return nil
+    end
+
+
+    local EnemyFolder =
+        workspace:FindFirstChild(
+            "enemies"
+        )
+
+
+    if EnemyFolder
+        and #EnemyFolder:GetChildren() > 0
+    then
+        return nil
+    end
+
+
     return Area
 end
 
@@ -25834,6 +29219,135 @@ local function HandleAreaEntry(
 
     DesiredFarmCFrame =
         EntryCF
+end
+
+
+--//============================================================
+--// RAID EXIT
+--//
+--// Raid segments expose RaidExitOpen instead of normal rubble. Move toward
+--// the next area volume when possible; if the active map uses a runtime
+--// elevator part instead, fall back to the nearest named elevator/exit.
+--//============================================================
+
+GENV.__AZ_FARM_EXT.HandleRaidExit = function()
+
+    if workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+        or workspace:GetAttribute("RaidExitOpen") ~= true
+    then
+        return false
+    end
+
+
+    local EnemyId =
+        GetFreshFarmTarget()
+
+
+    if EnemyId then
+        return false
+    end
+
+
+    local Root =
+        GetRoot()
+
+
+    if not Root then
+        return false
+    end
+
+
+    local Area =
+        tonumber(
+            GetRunValue("area")
+        ) or 1
+
+
+    local NextArea =
+        Area + 1
+
+
+    local Target =
+        ComputeAreaEntryCFrame(
+            NextArea,
+            Settings.FarmMethod == "Tween"
+                and TWEEN_AREA_ENTRY_DEPTH
+                or TELEPORT_AREA_ENTRY_DEPTH
+        )
+
+
+    if not Target then
+
+        local World =
+            workspace:FindFirstChild("World")
+
+        local BestPart = nil
+        local BestDistance = math.huge
+
+
+        if World then
+
+            for _, Object in ipairs(
+                World:GetDescendants()
+            ) do
+
+                if Object:IsA("BasePart") then
+
+                    local Name =
+                        string.lower(Object.Name)
+
+
+                    if string.find(Name, "elevator", 1, true)
+                        or string.find(Name, "exit", 1, true)
+                    then
+
+                        local Distance =
+                            (
+                                Root.Position
+                                - Object.Position
+                            ).Magnitude
+
+
+                        if Distance < BestDistance then
+
+                            BestDistance = Distance
+                            BestPart = Object
+                        end
+                    end
+                end
+            end
+        end
+
+
+        if BestPart then
+
+            Target =
+                BestPart.CFrame
+                + Vector3.new(0, 2.5, 0)
+        end
+    end
+
+
+    if not Target then
+        return false
+    end
+
+
+    CurrentTargetId = nil
+    CurrentTargetState = nil
+    CurrentRubbleInfo = nil
+    CurrentRubbleCFrame = nil
+    TargetAreaNumber = NextArea
+    DesiredFarmCFrame = Target
+
+
+    SetFarmMode(
+        "Raid Exit -> Area "
+        .. tostring(NextArea)
+    )
+
+
+    return true
 end
 
 
@@ -26064,6 +29578,18 @@ local function UpdateAutoFarm()
 
             return
         end
+
+
+        if type(
+            GENV.__AZ_FARM_EXT
+                .HandleRaidExit
+        ) == "function"
+            and GENV.__AZ_FARM_EXT
+                .HandleRaidExit()
+        then
+
+            return
+        end
     end
 
 
@@ -26212,67 +29738,342 @@ end
 --// HEARTBEAT
 --//============================================================
 
-local HeartbeatConnection
+GENV.__AZ_FARM_EXT.HeartbeatConnection = nil
 
 
-HeartbeatConnection =
-    RunService.Heartbeat
-        :Connect(
-            function(
-                DeltaTime
-            )
-
-                if not SessionAlive() then
-
-                    GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(
-                        false
-                    )
+GENV.__AZ_FARM_EXT.FarmStageLastError = {}
 
 
-                    HeartbeatConnection
-                        :Disconnect()
+GENV.__AZ_FARM_EXT.RunFarmStage = function(
+    Name,
+    Callback
+)
 
+    local Success,
+        ErrorMessage =
+        xpcall(
+            Callback,
+            function(ErrorValue)
 
-                    return
-                end
-
-
-                UpdateAutoFarm()
-
-
-                if type(
-                    GENV.__AZ_FARM_EXT.RunStillnessRecovery
-                ) == "function"
+                if debug
+                    and type(debug.traceback) == "function"
                 then
-                    GENV.__AZ_FARM_EXT.RunStillnessRecovery()
+                    return debug.traceback(
+                        tostring(ErrorValue),
+                        2
+                    )
                 end
 
 
-                ApplyFarmMovement(
-                    DeltaTime
-                )
-
-
-                RunCombatHeartbeat()
+                return tostring(ErrorValue)
             end
         )
 
 
-shared.__AZ_FARM_HEARTBEAT =
-    HeartbeatConnection
+    if Success then
+        return true
+    end
 
 
-table.insert(
-    Runtime.Connections,
-    HeartbeatConnection
-)
+    local Now =
+        os.clock()
+
+
+    if not GENV.__AZ_FARM_EXT.FarmStageLastError[Name]
+        or (
+            Now
+            - GENV.__AZ_FARM_EXT.FarmStageLastError[Name]
+        ) >= 2
+    then
+
+        GENV.__AZ_FARM_EXT.FarmStageLastError[Name] =
+            Now
+
+
+        warn(
+            "[Anime Zero][Farm] "
+            .. Name
+            .. " error:",
+            ErrorMessage
+        )
+    end
+
+
+    return false
+end
+
+
+GENV.__AZ_FARM_EXT.NextFarmDebugAt = 0
+
+
+GENV.__AZ_FARM_EXT.DebugFarmState = function()
+
+    if not Settings.AutoFarm then
+        return
+    end
+
+
+    local Now =
+        os.clock()
+
+
+    if Now < (GENV.__AZ_FARM_EXT.NextFarmDebugAt or 0) then
+        return
+    end
+
+
+    GENV.__AZ_FARM_EXT.NextFarmDebugAt =
+        Now + 1
+
+
+    local VisualCount = 0
+    local StoreCount = 0
+
+
+    local Folder =
+        workspace:FindFirstChild("enemies")
+
+
+    if Folder then
+        VisualCount =
+            #Folder:GetChildren()
+    end
+
+
+    pcall(function()
+
+        local Stored =
+            EnemyStore.state:getAll()
+
+
+        if type(Stored) == "table" then
+            for _ in pairs(Stored) do
+                StoreCount = StoreCount + 1
+            end
+        end
+    end)
+
+
+    local Root =
+        GetRoot()
+
+
+    local Distance =
+        nil
+
+
+    if Root and DesiredFarmCFrame then
+        Distance =
+            math.floor(
+                (
+                    Root.Position
+                    - DesiredFarmCFrame.Position
+                ).Magnitude
+                * 10
+            ) / 10
+    end
+
+
+    print(
+        "[Anime Zero][FarmDebug] mode=",
+        tostring(CurrentFarmMode),
+        "visual=",
+        VisualCount,
+        "store=",
+        StoreCount,
+        "target=",
+        tostring(CurrentTargetId),
+        "desired=",
+        DesiredFarmCFrame ~= nil,
+        "distance=",
+        tostring(Distance),
+        "alive=",
+        IsAlive(),
+        "session=",
+        SessionAlive()
+    )
+end
+
+
+GENV.__AZ_FARM_EXT.BindFarmHeartbeat = function()
+
+    local Existing =
+        GENV.__AZ_FARM_EXT.HeartbeatConnection
+
+
+    if typeof(Existing) == "RBXScriptConnection"
+        and Existing.Connected
+    then
+        GENV.__AZ_FARM_ENGINE_ACTIVE = true
+        return true
+    end
+
+
+    local Connection =
+        RunService.Heartbeat
+            :Connect(
+                function(
+                    DeltaTime
+                )
+
+                    if not SessionAlive() then
+
+                        GENV.__AZ_FARM_FULL_ENGINE_ACTIVE = false
+                        GENV.__AZ_FARM_ENGINE_ACTIVE =
+                            GENV.__AZ_FARM_RESCUE_ACTIVE == true
+
+
+                        pcall(function()
+                            GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(
+                                false
+                            )
+                        end)
+
+
+                        local Current =
+                            GENV.__AZ_FARM_EXT.HeartbeatConnection
+
+
+                        if typeof(Current) == "RBXScriptConnection"
+                            and Current.Connected
+                        then
+                            Current:Disconnect()
+                        end
+
+
+                        return
+                    end
+
+
+                    GENV.__AZ_FARM_ENGINE_ACTIVE = true
+
+
+                    -- The dedicated rescue runtime owns Spirited Away Raid.
+                    -- Do not let the legacy movement/target logic fight it.
+                    if workspace:GetAttribute("Mode") == "spiritedawayraid"
+                        and GENV.__AZ_FARM_RESCUE_ACTIVE == true
+                    then
+                        pcall(function()
+                            GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false)
+                        end)
+
+                        return
+                    end
+
+
+                    GENV.__AZ_FARM_EXT.RunFarmStage(
+                        "UpdateAutoFarm",
+                        UpdateAutoFarm
+                    )
+
+
+                    GENV.__AZ_FARM_EXT.RunFarmStage(
+                        "FarmDebug",
+                        GENV.__AZ_FARM_EXT.DebugFarmState
+                    )
+
+
+                    if type(
+                        GENV.__AZ_FARM_EXT.RunStillnessRecovery
+                    ) == "function"
+                    then
+
+                        GENV.__AZ_FARM_EXT.RunFarmStage(
+                            "StillnessRecovery",
+                            GENV.__AZ_FARM_EXT.RunStillnessRecovery
+                        )
+                    end
+
+
+                    GENV.__AZ_FARM_EXT.RunFarmStage(
+                        "Movement",
+                        function()
+                            ApplyFarmMovement(
+                                DeltaTime
+                            )
+                        end
+                    )
+
+
+                    GENV.__AZ_FARM_EXT.RunFarmStage(
+                        "Combat",
+                        RunCombatHeartbeat
+                    )
+                end
+            )
+
+
+    GENV.__AZ_FARM_EXT.HeartbeatConnection =
+        Connection
+
+
+    shared.__AZ_FARM_HEARTBEAT =
+        Connection
+
+
+    table.insert(
+        Runtime.Connections,
+        Connection
+    )
+
+
+    GENV.__AZ_FARM_FULL_ENGINE_ACTIVE = true
+    GENV.__AZ_FARM_ENGINE_ACTIVE = true
+
+
+    print(
+        "[Anime Zero] Farm heartbeat ACTIVE."
+    )
+
+
+    return true
+end
+
+
+GENV.__AZ_FARM_EXT.BindFarmHeartbeat()
+
+
+-- Heartbeat watchdog: if an executor/teleport transition disconnects the
+-- connection while this is still the current session, recreate it.
+task.spawn(function()
+
+    while SessionAlive() do
+
+        local Connection =
+            GENV.__AZ_FARM_EXT.HeartbeatConnection
+
+
+        if typeof(Connection) ~= "RBXScriptConnection"
+            or not Connection.Connected
+        then
+
+            GENV.__AZ_FARM_ENGINE_ACTIVE = false
+
+
+            warn(
+                "[Anime Zero] Farm heartbeat missing; rebinding..."
+            )
+
+
+            GENV.__AZ_FARM_EXT.BindFarmHeartbeat()
+        end
+
+
+        task.wait(1)
+    end
+
+
+    GENV.__AZ_FARM_FULL_ENGINE_ACTIVE = false
+    GENV.__AZ_FARM_ENGINE_ACTIVE =
+        GENV.__AZ_FARM_RESCUE_ACTIVE == true
+end)()
 
 
 --//============================================================
 --// RESPAWN
 --//============================================================
 
-local RespawnConnection =
+GENV.__AZ_FARM_EXT.RespawnConnection =
     LocalPlayer.CharacterAdded
         :Connect(
             function()
@@ -26290,8 +30091,54 @@ local RespawnConnection =
 
 table.insert(
     Runtime.Connections,
-    RespawnConnection
+    GENV.__AZ_FARM_EXT.RespawnConnection
 )
+
+
+--//============================================================
+--// ENEMY SOURCE DIAGNOSTIC
+--//============================================================
+
+;(function()
+
+    local StoreCount = 0
+    local VisualCount = 0
+
+
+    pcall(function()
+
+        local Stored =
+            EnemyStore
+                .state
+                :getAll()
+
+
+        if type(Stored) == "table" then
+            for _ in pairs(Stored) do
+                StoreCount = StoreCount + 1
+            end
+        end
+    end)
+
+
+    local Folder =
+        workspace:FindFirstChild(
+            "enemies"
+        )
+
+
+    if Folder then
+        VisualCount = #Folder:GetChildren()
+    end
+
+
+    print(
+        "[Anime Zero] Enemy sources v2 | Store:",
+        StoreCount,
+        "| workspace.enemies:",
+        VisualCount
+    )
+end)()
 
 
 --//============================================================
@@ -26299,7 +30146,17 @@ table.insert(
 --//============================================================
 
 print(
-    "[Anime Zero] Dungeon farm engine ready."
+    "[Anime Zero] Dungeon farm engine ready.",
+    "EngineActive:",
+    GENV.__AZ_FARM_ENGINE_ACTIVE == true,
+    "Mode:",
+    tostring(workspace:GetAttribute("Mode")),
+    "Map:",
+    tostring(MapConstants.currentMap),
+    "PlayerStore:",
+    GetPlayerStore() ~= nil,
+    "LocalClientStore:",
+    GENV.__AZ_FARM_EXT.LocalClientStore ~= nil
 )
 ]======]
 
