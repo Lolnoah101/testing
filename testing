@@ -262,6 +262,9 @@ local Settings = {
 
     AutoFarm = false,
 
+    -- Story / Endless movement + rubble progression.
+    AutoRaidFarm = false,
+
     AutoPickupLoot = false,
 
     FarmDistance = 7,
@@ -945,6 +948,7 @@ end)()
 
             Saved = {
                 AutoFarm = Legacy.AutoFarm,
+                AutoRaidFarm = Legacy.AutoRaidFarm,
                 AutoPickupLoot = Legacy.AutoPickupLoot,
                 FarmDistance = Legacy.FarmDistance,
                 AutoM1 = Legacy.AutoM1,
@@ -972,6 +976,11 @@ end)()
             type(Saved.AutoFarm) == "boolean"
             and Saved.AutoFarm
             or Settings.AutoFarm,
+
+        AutoRaidFarm =
+            type(Saved.AutoRaidFarm) == "boolean"
+            and Saved.AutoRaidFarm
+            or Settings.AutoRaidFarm,
 
         AutoPickupLoot =
             type(Saved.AutoPickupLoot) == "boolean"
@@ -1088,6 +1097,9 @@ end)()
 
         Settings.AutoFarm =
             User.AutoFarm == true
+
+        Settings.AutoRaidFarm =
+            User.AutoRaidFarm == true
 
         Settings.AutoPickupLoot =
             User.AutoPickupLoot == true
@@ -1484,15 +1496,324 @@ local Rayfield = (function()
         "https://sirius.menu/gen2-preview",
     }
 
+    local CacheFolder =
+        "AnimeZero"
+
+    local CachePath =
+        CacheFolder .. "/RayfieldGen2_Cache.lua"
+
     local LastError =
         "unknown error"
+
+
+    if type(GENV.__AZ_RAYFIELD_GEN2) == "table"
+        and type(GENV.__AZ_RAYFIELD_GEN2.CreateWindow) == "function"
+    then
+
+        print(
+            "[Anime Zero] Rayfield Gen2 loaded: existing runtime cache"
+        )
+
+        return GENV.__AZ_RAYFIELD_GEN2
+    end
+
+
+    local function EnsureCacheFolder()
+
+        if makefolder then
+            pcall(function()
+                makefolder(CacheFolder)
+            end)
+        end
+    end
+
+
+    local function ValidateAndRun(
+        Source,
+        Label,
+        SaveCache
+    )
+
+        if type(Source) ~= "string"
+            or #Source <= 0
+        then
+            return nil,
+                "empty source"
+        end
+
+
+        local Chunk,
+            CompileError =
+            loadstring(Source)
+
+
+        if not Chunk then
+            return nil,
+                "compile error: "
+                .. tostring(CompileError)
+        end
+
+
+        local RunSuccess,
+            LibraryOrError =
+            pcall(Chunk)
+
+
+        if not RunSuccess then
+            return nil,
+                "runtime error: "
+                .. tostring(LibraryOrError)
+        end
+
+
+        if type(LibraryOrError) ~= "table"
+            or type(LibraryOrError.CreateWindow) ~= "function"
+        then
+            return nil,
+                "invalid return: "
+                .. typeof(LibraryOrError)
+        end
+
+
+        if SaveCache
+            and writefile
+        then
+
+            EnsureCacheFolder()
+
+            pcall(function()
+                writefile(
+                    CachePath,
+                    Source
+                )
+            end)
+        end
+
+
+        GENV.__AZ_RAYFIELD_GEN2 =
+            LibraryOrError
+
+
+        print(
+            "[Anime Zero] Rayfield Gen2 loaded:",
+            Label
+        )
+
+
+        return LibraryOrError,
+            nil
+    end
+
+
+    local function TryCache()
+
+        if not readfile then
+            return nil,
+                "readfile unavailable"
+        end
+
+
+        if isfile then
+
+            local ExistsSuccess,
+                Exists =
+                pcall(function()
+                    return isfile(
+                        CachePath
+                    )
+                end)
+
+
+            if ExistsSuccess
+                and not Exists
+            then
+                return nil,
+                    "cache missing"
+            end
+        end
+
+
+        local ReadSuccess,
+            CachedSource =
+            pcall(function()
+                return readfile(
+                    CachePath
+                )
+            end)
+
+
+        if not ReadSuccess then
+            return nil,
+                "cache read failed: "
+                .. tostring(CachedSource)
+        end
+
+
+        local Library,
+            CacheError =
+            ValidateAndRun(
+                CachedSource,
+                "local cache",
+                false
+            )
+
+
+        if Library then
+            return Library,
+                nil
+        end
+
+
+        return nil,
+            "cache invalid: "
+            .. tostring(CacheError)
+    end
+
+
+    local function TryExecutorRequest(
+        Url
+    )
+
+        local RequestFunction =
+            rawget(
+                GENV,
+                "request"
+            )
+            or rawget(
+                GENV,
+                "http_request"
+            )
+
+
+        local SynTable =
+            rawget(
+                GENV,
+                "syn"
+            )
+
+
+        if not RequestFunction
+            and type(SynTable) == "table"
+        then
+            RequestFunction =
+                SynTable.request
+        end
+
+
+        local HttpTable =
+            rawget(
+                GENV,
+                "http"
+            )
+
+
+        if not RequestFunction
+            and type(HttpTable) == "table"
+        then
+            RequestFunction =
+                HttpTable.request
+        end
+
+
+        if type(RequestFunction) ~= "function" then
+            return nil,
+                "executor request unavailable"
+        end
+
+
+        local RequestSuccess,
+            Response =
+            pcall(
+                RequestFunction,
+                {
+                    Url = Url,
+                    Method = "GET",
+                    Headers = {
+                        ["Cache-Control"] = "no-cache",
+                    },
+                }
+            )
+
+
+        if not RequestSuccess then
+            return nil,
+                "executor request error: "
+                .. tostring(Response)
+        end
+
+
+        if type(Response) == "string"
+            and #Response > 0
+        then
+            return Response,
+                nil
+        end
+
+
+        if type(Response) == "table" then
+
+            local Body =
+                Response.Body
+                or Response.body
+
+            local Status =
+                Response.StatusCode
+                or Response.Status
+                or Response.status_code
+
+
+            if type(Body) == "string"
+                and #Body > 0
+                and (
+                    Status == nil
+                    or tonumber(Status) == nil
+                    or (
+                        tonumber(Status) >= 200
+                        and tonumber(Status) < 400
+                    )
+                )
+            then
+                return Body,
+                    nil
+            end
+
+
+            return nil,
+                "executor HTTP status/body invalid: "
+                .. tostring(Status)
+        end
+
+
+        return nil,
+            "executor request returned "
+            .. typeof(Response)
+    end
+
+
+    local CachedLibrary,
+        CacheError =
+        TryCache()
+
+
+    if CachedLibrary then
+        return CachedLibrary
+    end
+
+
+    LastError =
+        tostring(CacheError)
 
 
     for Attempt = 1, 3 do
 
         for _, Url in ipairs(Sources) do
 
-            local HttpSuccess, SourceOrError =
+            local SourceOrError = nil
+            local FetchLabel = nil
+
+
+            local HttpSuccess,
+                HttpResult =
                 pcall(function()
                     return game:HttpGet(
                         Url
@@ -1501,71 +1822,101 @@ local Rayfield = (function()
 
 
             if HttpSuccess
-                and type(SourceOrError) == "string"
-                and #SourceOrError > 0
+                and type(HttpResult) == "string"
+                and #HttpResult > 0
             then
 
-                local Chunk, CompileError =
-                    loadstring(SourceOrError)
+                SourceOrError =
+                    HttpResult
 
-
-                if Chunk then
-
-                    local RunSuccess, LibraryOrError =
-                        pcall(Chunk)
-
-
-                    if RunSuccess
-                        and type(LibraryOrError) == "table"
-                        and type(LibraryOrError.CreateWindow) == "function"
-                    then
-
-                        print(
-                            "[Anime Zero] Rayfield Gen2 loaded:",
-                            Url,
-                            "attempt",
-                            Attempt
-                        )
-
-                        return LibraryOrError
-                    end
-
-
-                    if RunSuccess then
-                        LastError =
-                            "Rayfield source executed but returned "
-                            .. typeof(LibraryOrError)
-                            .. " instead of a library table"
-                    else
-                        LastError =
-                            "Rayfield runtime error: "
-                            .. tostring(LibraryOrError)
-                    end
-
-                else
-                    LastError =
-                        "Rayfield compile error: "
-                        .. tostring(CompileError)
-                end
+                FetchLabel =
+                    "game:HttpGet"
 
             else
-                LastError =
-                    "Rayfield HTTP error: "
-                    .. tostring(SourceOrError)
+
+                local RequestSource,
+                    RequestError =
+                    TryExecutorRequest(
+                        Url
+                    )
+
+
+                if RequestSource then
+
+                    SourceOrError =
+                        RequestSource
+
+                    FetchLabel =
+                        "executor request"
+
+                else
+
+                    LastError =
+                        "game:HttpGet="
+                        .. tostring(HttpResult)
+                        .. " | request="
+                        .. tostring(RequestError)
+                end
             end
 
 
-            task.wait(0.35)
+            if SourceOrError then
+
+                local Library,
+                    RunError =
+                    ValidateAndRun(
+                        SourceOrError,
+                        Url
+                        .. " via "
+                        .. tostring(FetchLabel)
+                        .. " attempt "
+                        .. tostring(Attempt),
+                        true
+                    )
+
+
+                if Library then
+                    return Library
+                end
+
+
+                LastError =
+                    tostring(RunError)
+            end
+
+
+            task.wait(0.25)
         end
 
 
-        task.wait(0.75)
+        -- Another script/previous place may have finished writing the cache
+        -- while this run was retrying.  Re-check it before the next network pass.
+        local RetryCachedLibrary,
+            RetryCacheError =
+            TryCache()
+
+
+        if RetryCachedLibrary then
+            return RetryCachedLibrary
+        end
+
+
+        if RetryCacheError then
+            LastError =
+                LastError
+                .. " | cache="
+                .. tostring(RetryCacheError)
+        end
+
+
+        task.wait(0.50)
     end
 
 
     error(
-        "[Anime Zero] Unable to load Rayfield Gen2 after retries. "
-        .. LastError,
+        "[Anime Zero] Unable to load Rayfield Gen2. "
+        .. "No valid local cache and all HTTP methods failed. "
+        .. tostring(LastError),
         0
     )
 end)()
@@ -2875,12 +3226,14 @@ FarmTab:CreateToggle({
     name = "Auto Farm",
     flag = "AutoFarm",
 
+    description = "Story / Endless farm. Handles enemies, rubble, and area progression.",
+
     value = Settings.AutoFarm,
 
     callback = function(Value)
 
         Settings.AutoFarm =
-            Value
+            Value == true
 
 
         if type(Settings.SetFarmUserPreference) == "function" then
@@ -2893,19 +3246,62 @@ FarmTab:CreateToggle({
 
         if not Value then
 
-            ReleaseFarmMovement()
+            if workspace:GetAttribute("Mode") ~= "spiritedawayraid" then
+                ReleaseFarmMovement()
+            end
 
             print(
-                "[Anime Zero] Auto Farm OFF"
+                "[Anime Zero] Auto Farm OFF (Story / Endless)"
             )
 
         else
 
             print(
-                "[Anime Zero] Auto Farm ON | EngineActive:",
+                "[Anime Zero] Auto Farm ON (Story / Endless) | EngineActive:",
                 GENV.__AZ_FARM_ENGINE_ACTIVE == true
             )
         end
+    end,
+})
+
+
+FarmTab:CreateToggle({
+
+    name = "Auto Raid Farm",
+    flag = "AutoRaidFarm",
+
+    description = "Spirited Away Raid only. Uses center holds, immunity logic, AOE dodge, and elevator routing.",
+
+    value = Settings.AutoRaidFarm,
+
+    callback = function(Value)
+
+        Settings.AutoRaidFarm =
+            Value == true
+
+
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference(
+                "AutoRaidFarm",
+                Value == true
+            )
+        end
+
+
+        if not Value
+            and type(GENV.__AZ_FARM_RESCUE_RUNTIME) == "table"
+        then
+            GENV.__AZ_FARM_RESCUE_RUNTIME.RaidState = "Idle"
+            GENV.__AZ_FARM_RESCUE_RUNTIME.RaidDodgeState = "Idle"
+        end
+
+
+        print(
+            "[Anime Zero] Auto Raid Farm:",
+            Value == true,
+            "| EngineActive:",
+            GENV.__AZ_FARM_ENGINE_ACTIVE == true
+        )
     end,
 })
 
@@ -3388,6 +3784,14 @@ FarmTab:CreateToggle({
         SpikeHazards = {},
         SpikeListenerCleanup = nil,
         LastDodgeAt = 0,
+
+        -- Story / Endless rescue progression state. This is only used when the
+        -- large legacy engine is late/broken, or as a rubble/area assist while
+        -- that engine is active. It never chases enemies when the full engine
+        -- already owns normal-map movement.
+        NormalState = "Idle",
+        NormalRubbleGoal = nil,
+        NormalRubbleDistance = math.huge,
     }
 
     GENV.__AZ_FARM_RESCUE_RUNTIME = Rescue
@@ -3701,6 +4105,329 @@ FarmTab:CreateToggle({
                 RunStore2.store.state[Name]
 
             return ReadLeaf(Leaf)
+        end
+
+
+        local function GetInstancePosition2(Object)
+            if not Object or not Object.Parent then
+                return nil
+            end
+
+            if Object:IsA("Attachment") then
+                return Object.WorldPosition
+            end
+
+            if Object:IsA("BasePart") then
+                return Object.Position
+            end
+
+            if Object:IsA("Model") then
+                return Object:GetPivot().Position
+            end
+
+            local Part = Object:FindFirstChildWhichIsA("BasePart", true)
+
+            return Part and Part.Position or nil
+        end
+
+
+        Rescue.FindNormalRubble = function(Root)
+            Rescue.NormalRubbleGoal = nil
+            Rescue.NormalRubbleDistance = math.huge
+
+            if not Root
+                or workspace:GetAttribute("Mode") == "spiritedawayraid"
+            then
+                return nil
+            end
+
+            local World = workspace:FindFirstChild("World")
+            local WorldMap = World and World:FindFirstChild("Map")
+
+            if not WorldMap then
+                return nil
+            end
+
+            local Best = nil
+            local BestDistance = math.huge
+
+            for _, Border in ipairs(WorldMap:GetDescendants()) do
+                local MaxHealth = Border:GetAttribute("RubbleMaxHealth")
+
+                if MaxHealth ~= nil then
+                    local Health = Border:GetAttribute("RubbleHealth")
+
+                    if Health == nil then
+                        Health = MaxHealth
+                    end
+
+                    Health = tonumber(Health)
+
+                    if Health and Health > 0 then
+                        local Blocker = Border:FindFirstChild("Blocker")
+                        local Rubble = Border:FindFirstChild("Rubble")
+                        local RubbleBar =
+                            (Blocker and Blocker:FindFirstChild("RubbleBar", true))
+                            or Border:FindFirstChild("RubbleBar", true)
+
+                        local TargetPosition = nil
+
+                        if RubbleBar and RubbleBar:IsA("Attachment") then
+                            local Position = RubbleBar.WorldPosition
+
+                            TargetPosition = Vector3.new(
+                                Position.X,
+                                Root.Position.Y,
+                                Position.Z
+                            )
+                        end
+
+                        if not TargetPosition
+                            and Blocker
+                            and Blocker:IsA("BasePart")
+                        then
+                            local Look = Blocker.CFrame.LookVector
+                            local Flat = Vector3.new(Look.X, 0, Look.Z)
+
+                            if Flat.Magnitude < 0.01 then
+                                Flat = Vector3.new(0, 0, 1)
+                            else
+                                Flat = Flat.Unit
+                            end
+
+                            local Position = Blocker.Position + Flat * 8
+
+                            TargetPosition = Vector3.new(
+                                Position.X,
+                                Root.Position.Y,
+                                Position.Z
+                            )
+                        end
+
+                        if not TargetPosition then
+                            local Position =
+                                GetInstancePosition2(Rubble)
+                                or GetInstancePosition2(Border)
+
+                            if Position then
+                                TargetPosition = Vector3.new(
+                                    Position.X,
+                                    Root.Position.Y,
+                                    Position.Z
+                                )
+                            end
+                        end
+
+                        if TargetPosition then
+                            local Distance =
+                                (Root.Position - TargetPosition).Magnitude
+
+                            if Distance < BestDistance then
+                                local LookAt =
+                                    GetInstancePosition2(Blocker)
+                                    or GetInstancePosition2(Rubble)
+                                    or TargetPosition + Vector3.new(0, 0, -1)
+
+                                LookAt = Vector3.new(
+                                    LookAt.X,
+                                    Root.Position.Y,
+                                    LookAt.Z
+                                )
+
+                                BestDistance = Distance
+                                Best = {
+                                    Border = Border,
+                                    Blocker = Blocker,
+                                    Rubble = Rubble,
+                                    Health = Health,
+                                    Goal = CFrame.lookAt(
+                                        TargetPosition,
+                                        LookAt,
+                                        Vector3.yAxis
+                                    ),
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+
+            if Best then
+                Rescue.NormalRubbleGoal = Best.Goal
+                Rescue.NormalRubbleDistance = BestDistance
+            end
+
+            return Best
+        end
+
+
+        Rescue.GetNormalAreaGoal = function(Root)
+            if not Root
+                or workspace:GetAttribute("Mode") == "spiritedawayraid"
+            then
+                return nil
+            end
+
+            local AreaNumber = tonumber(ReadRunValue2("area"))
+
+            if not AreaNumber then
+                return nil
+            end
+
+            local World = workspace:FindFirstChild("World")
+            local Areas = World and World:FindFirstChild("Areas")
+            local Area = Areas and Areas:FindFirstChild(tostring(AreaNumber))
+
+            if not Area or not Area:IsA("BasePart") then
+                return nil
+            end
+
+            local LocalRoot = Area.CFrame:PointToObjectSpace(Root.Position)
+            local Half = Area.Size * 0.5
+            local SafeY = math.clamp(
+                LocalRoot.Y,
+                -math.max(Half.Y - 2, 0),
+                math.max(Half.Y - 2, 0)
+            )
+
+            return Area.CFrame * CFrame.new(0, SafeY, 0), Area, AreaNumber
+        end
+
+
+        Rescue.IsInsideNormalArea = function(Root, Area)
+            if not Root or not Area or not Area:IsA("BasePart") then
+                return false
+            end
+
+            local LocalPosition = Area.CFrame:PointToObjectSpace(Root.Position)
+            local Half = Area.Size * 0.5
+
+            return math.abs(LocalPosition.X) <= math.max(Half.X - 1, 0)
+                and math.abs(LocalPosition.Y) <= Half.Y
+                and math.abs(LocalPosition.Z) <= math.max(Half.Z - 1, 0)
+        end
+
+
+        Rescue.MoveToGoal = function(Root, Goal, DeltaTime, Speed)
+            if not Root or not Goal then
+                return false
+            end
+
+            if Settings.FarmMethod == "Tween" then
+                local Distance = (Root.Position - Goal.Position).Magnitude
+
+                if Distance > 0.05 then
+                    local Alpha = math.clamp(
+                        ((Speed or 135) * (DeltaTime or 0.016))
+                            / math.max(Distance, 0.001),
+                        0,
+                        1
+                    )
+
+                    Root.CFrame = Root.CFrame:Lerp(Goal, Alpha)
+                else
+                    Root.CFrame = Goal
+                end
+            else
+                Root.CFrame = Goal
+            end
+
+            return true
+        end
+
+
+        Rescue.RunNormalProgressionAssist = function(DeltaTime)
+            Rescue.NormalState = "Idle"
+
+            if workspace:GetAttribute("Mode") == "spiritedawayraid"
+                or not Settings.AutoFarm
+                or not Alive2()
+            then
+                return false
+            end
+
+            local EnemyFolder = workspace:FindFirstChild("enemies")
+            local HasVisibleEnemy = false
+
+            if EnemyFolder then
+                for _, Model in ipairs(EnemyFolder:GetChildren()) do
+                    local EnemyRoot =
+                        Model:FindFirstChild("HumanoidRootPart")
+                        or Model.PrimaryPart
+
+                    if EnemyRoot and EnemyRoot:IsA("BasePart") then
+                        HasVisibleEnemy = true
+                        break
+                    end
+                end
+            end
+
+            if HasVisibleEnemy then
+                Rescue.NormalState = "Enemy"
+                return false
+            end
+
+            local Root = GetRoot2()
+
+            if not Root then
+                return false
+            end
+
+            local Rubble = Rescue.FindNormalRubble(Root)
+
+            if Rubble and Rubble.Goal then
+                Rescue.NormalState =
+                    "Rubble " .. tostring(math.floor((Rubble.Health or 0) + 0.5))
+
+                Rescue.MoveToGoal(Root, Rubble.Goal, DeltaTime, 125)
+
+                local Distance =
+                    (Root.Position - Rubble.Goal.Position).Magnitude
+
+                -- Match the pre-update behavior: rubble damage uses M1, so the
+                -- user's Auto M1 toggle remains the attack permission.
+                if Settings.AutoM1
+                    and Distance <= 12
+                    and CharacterPackets2.performM1
+                    and os.clock() >= Rescue.NextM1
+                then
+                    Rescue.NextM1 = os.clock() + 0.40
+
+                    pcall(function()
+                        CharacterPackets2.performM1:fire()
+                    end)
+                end
+
+                return true
+            end
+
+            local Wave = tonumber(ReadRunValue2("wave")) or 0
+            local Remaining = tonumber(ReadRunValue2("remaining")) or 0
+
+            if Wave == 0 or Remaining > 0 then
+                local Goal, Area, AreaNumber =
+                    Rescue.GetNormalAreaGoal(Root)
+
+                if Goal and Area then
+                    local Inside =
+                        Rescue.IsInsideNormalArea(Root, Area)
+
+                    Rescue.NormalState =
+                        (Wave == 0 and "Enter Area " or "Wave Recovery ")
+                        .. tostring(AreaNumber)
+
+                    if not Inside
+                        or (Root.Position - Goal.Position).Magnitude > 6
+                    then
+                        Rescue.MoveToGoal(Root, Goal, DeltaTime, 145)
+                    end
+
+                    return true
+                end
+            end
+
+            Rescue.NormalState = "Waiting"
+            return false
         end
 
 
@@ -4545,7 +5272,14 @@ FarmTab:CreateToggle({
 
 
         local function MoveFarm2(DeltaTime)
-            if not Settings.AutoFarm or not Alive2() then
+            local IsRaid =
+                workspace:GetAttribute("Mode") == "spiritedawayraid"
+
+            local FarmEnabled =
+                (IsRaid and Settings.AutoRaidFarm == true)
+                or (not IsRaid and Settings.AutoFarm == true)
+
+            if not FarmEnabled or not Alive2() then
                 return
             end
 
@@ -4557,6 +5291,17 @@ FarmTab:CreateToggle({
 
             if not Root then
                 return
+            end
+
+            if not IsRaid then
+                Rescue.RaidState = "Inactive"
+                Rescue.RaidDodgeState = "Idle"
+
+                if not EnemyRoot
+                    and Rescue.RunNormalProgressionAssist(DeltaTime)
+                then
+                    return
+                end
             end
 
             -- AOE safety has first movement priority while the raid is active.
@@ -4587,10 +5332,12 @@ FarmTab:CreateToggle({
 
             -- Raid routing handles no-enemy periods by staying inside the live
             -- World.Areas volume, then uses the elevator when RaidExitOpen opens.
-            if Rescue.HandleRaidRoute(
-                Root,
-                EnemyRoot
-            ) then
+            if IsRaid
+                and Rescue.HandleRaidRoute(
+                    Root,
+                    EnemyRoot
+                )
+            then
                 return
             end
 
@@ -4742,12 +5489,32 @@ FarmTab:CreateToggle({
             end
 
             local _, EnemyRoot, EnemyDistance = NearestEnemy2()
+            local Root = GetRoot2()
+            local Now = os.clock()
 
             if not EnemyRoot then
+                if workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+                    and Settings.AutoFarm
+                    and Settings.AutoM1
+                    and Root
+                    and CharacterPackets2.performM1
+                then
+                    local Rubble = Rescue.FindNormalRubble(Root)
+
+                    if Rubble and Rubble.Goal
+                        and (Root.Position - Rubble.Goal.Position).Magnitude <= 12
+                        and Now >= Rescue.NextM1
+                    then
+                        Rescue.NextM1 = Now + 0.40
+
+                        pcall(function()
+                            CharacterPackets2.performM1:fire()
+                        end)
+                    end
+                end
+
                 return
             end
-
-            local Now = os.clock()
 
             if Settings.AutoM1
                 and Now >= Rescue.NextM1
@@ -5100,13 +5867,29 @@ FarmTab:CreateToggle({
                 local SuccessEndAction, EndActionError =
                     pcall(Rescue.RunEndAction)
 
-                -- Outside Raid, the full legacy engine wins if it initializes.
-                -- Inside Spirited Away Raid, keep this dedicated runtime in
-                -- charge because it owns spawn-settle, immunity and AOE dodge.
+                -- Outside Raid, the full legacy engine still owns enemy
+                -- movement. The rescue runtime only assists the exact pieces
+                -- that can strand Story/Endless after an update: active rubble
+                -- and entering/recovering the current area when no enemy exists.
+                -- Inside Spirited Away Raid, the rescue runtime owns movement.
                 if GENV.__AZ_FARM_FULL_ENGINE_ACTIVE == true
                     and workspace:GetAttribute("Mode") ~= "spiritedawayraid"
                 then
                     GENV.__AZ_FARM_ENGINE_ACTIVE = true
+
+                    local AssistOK, AssistError =
+                        pcall(
+                            Rescue.RunNormalProgressionAssist,
+                            DeltaTime
+                        )
+
+                    if not AssistOK then
+                        warn(
+                            "[Anime Zero][Normal Progression Assist]",
+                            tostring(AssistError)
+                        )
+                    end
+
                     return
                 end
 
@@ -5140,6 +5923,10 @@ FarmTab:CreateToggle({
                         ReadRunValue2("remaining") or "?",
                         "farm=",
                         Settings.AutoFarm == true,
+                        "raidFarm=",
+                        Settings.AutoRaidFarm == true,
+                        "normal=",
+                        Rescue.NormalState,
                         "m1=",
                         Settings.AutoM1 == true,
                         "skills=",
@@ -29501,6 +30288,13 @@ end
 
 local function UpdateAutoFarm()
 
+    if workspace:GetAttribute("Mode") == "spiritedawayraid" then
+        DesiredFarmCFrame = nil
+        SetFarmMode("Raid Uses Auto Raid Farm")
+        return
+    end
+
+
     if not IsAlive() then
 
         DesiredFarmCFrame =
@@ -29668,7 +30462,9 @@ local function RunCombatHeartbeat()
 
     if Settings.AutoM1 then
 
-        if Settings.AutoFarm then
+        if Settings.AutoFarm
+            and workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+        then
 
             if CurrentFarmMode == "Rubble"
                 and IsCurrentRubbleAlive()
