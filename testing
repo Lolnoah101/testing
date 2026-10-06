@@ -301,6 +301,10 @@ local Settings = {
     AutoExecuteOnTeleport = false,
 
     AntiAFK = false,
+
+    -- Discord match tracker
+    WebhookEnabled = false,
+    WebhookURL = "",
 }
 
 
@@ -501,6 +505,96 @@ local Settings = {
             return Data
         end
 
+end)()
+
+
+--//============================================================
+--// DISCORD WEBHOOK SETTINGS PERSISTENCE
+--//
+--// The webhook URL is intentionally stored only in the executor's local
+--// AnimeZero folder. It is not printed to console or copied into Roblox
+--// TeleportSettings.
+--//============================================================
+
+;(function()
+
+    local HttpService =
+        game:GetService("HttpService")
+
+    local DiskFile =
+        "AnimeZero/webhook_settings.json"
+
+
+    local function ReadSaved()
+
+        if type(readfile) ~= "function"
+            or type(isfile) ~= "function"
+            or not isfile(DiskFile)
+        then
+            return nil
+        end
+
+
+        local Success, Data =
+            pcall(function()
+                return HttpService:JSONDecode(
+                    readfile(DiskFile)
+                )
+            end)
+
+
+        return Success
+            and type(Data) == "table"
+            and Data
+            or nil
+    end
+
+
+    local Saved =
+        ReadSaved()
+
+
+    if type(Saved) == "table" then
+
+        Settings.WebhookEnabled =
+            Saved.Enabled == true
+
+        if type(Saved.URL) == "string" then
+            Settings.WebhookURL = Saved.URL
+        end
+    end
+
+
+    Settings.PersistWebhookSettings =
+        function()
+
+            if type(writefile) ~= "function" then
+                return false
+            end
+
+
+            if makefolder then
+                pcall(makefolder, "AnimeZero")
+            end
+
+
+            local Data = {
+                Enabled = Settings.WebhookEnabled == true,
+                URL = tostring(Settings.WebhookURL or ""),
+            }
+
+
+            local Success =
+                pcall(function()
+                    writefile(
+                        DiskFile,
+                        HttpService:JSONEncode(Data)
+                    )
+                end)
+
+
+            return Success
+        end
 end)()
 
 
@@ -3792,6 +3886,16 @@ FarmTab:CreateToggle({
         NormalState = "Idle",
         NormalRubbleGoal = nil,
         NormalRubbleDistance = math.huge,
+
+        -- Normal-map anti-idle watchdog. If the run state stops changing while
+        -- there are no enemies/rubble, force the character back through the
+        -- live Area volume instead of allowing an infinite false-idle state.
+        NormalProgressKey = nil,
+        NormalProgressAt = 0,
+        NormalFallbackStage = 0,
+        NormalLastFallbackAt = 0,
+        NormalReentryToken = 0,
+        NormalFallbackReason = "Idle",
     }
 
     GENV.__AZ_FARM_RESCUE_RUNTIME = Rescue
@@ -4343,11 +4447,16 @@ FarmTab:CreateToggle({
                 or not Settings.AutoFarm
                 or not Alive2()
             then
+                Rescue.NormalProgressKey = nil
+                Rescue.NormalProgressAt = 0
+                Rescue.NormalFallbackStage = 0
+                Rescue.NormalFallbackReason = "Inactive"
                 return false
             end
 
+            local Now = os.clock()
             local EnemyFolder = workspace:FindFirstChild("enemies")
-            local HasVisibleEnemy = false
+            local VisibleEnemyCount = 0
 
             if EnemyFolder then
                 for _, Model in ipairs(EnemyFolder:GetChildren()) do
@@ -4356,14 +4465,23 @@ FarmTab:CreateToggle({
                         or Model.PrimaryPart
 
                     if EnemyRoot and EnemyRoot:IsA("BasePart") then
-                        HasVisibleEnemy = true
-                        break
+                        VisibleEnemyCount = VisibleEnemyCount + 1
                     end
                 end
             end
 
-            if HasVisibleEnemy then
+            if VisibleEnemyCount > 0 then
                 Rescue.NormalState = "Enemy"
+                Rescue.NormalProgressKey =
+                    "enemy:"
+                    .. tostring(ReadRunValue2("area"))
+                    .. ":"
+                    .. tostring(ReadRunValue2("wave"))
+                    .. ":"
+                    .. tostring(ReadRunValue2("remaining"))
+                Rescue.NormalProgressAt = Now
+                Rescue.NormalFallbackStage = 0
+                Rescue.NormalFallbackReason = "EnemyActive"
                 return false
             end
 
@@ -4379,6 +4497,19 @@ FarmTab:CreateToggle({
                 Rescue.NormalState =
                     "Rubble " .. tostring(math.floor((Rubble.Health or 0) + 0.5))
 
+                local RubbleKey =
+                    "rubble:"
+                    .. tostring(ReadRunValue2("area"))
+                    .. ":"
+                    .. tostring(math.floor((Rubble.Health or 0) + 0.5))
+
+                if Rescue.NormalProgressKey ~= RubbleKey then
+                    Rescue.NormalProgressKey = RubbleKey
+                    Rescue.NormalProgressAt = Now
+                    Rescue.NormalFallbackStage = 0
+                end
+
+                Rescue.NormalFallbackReason = "Rubble"
                 Rescue.MoveToGoal(Root, Rubble.Goal, DeltaTime, 125)
 
                 local Distance =
@@ -4401,20 +4532,71 @@ FarmTab:CreateToggle({
                 return true
             end
 
+            local AreaNumber = tonumber(ReadRunValue2("area"))
             local Wave = tonumber(ReadRunValue2("wave")) or 0
             local Remaining = tonumber(ReadRunValue2("remaining")) or 0
+            local Status = tostring(ReadRunValue2("status") or "?")
+            local WaveStartedAt = ReadRunValue2("waveStartedAt")
+            local FinishedAt = ReadRunValue2("finishedAt")
 
-            if Wave == 0 or Remaining > 0 then
-                local Goal, Area, AreaNumber =
-                    Rescue.GetNormalAreaGoal(Root)
+            if FinishedAt ~= nil then
+                Rescue.NormalState = "Finished"
+                Rescue.NormalFallbackReason = "Finished"
+                Rescue.NormalProgressKey = nil
+                Rescue.NormalProgressAt = 0
+                Rescue.NormalFallbackStage = 0
+                return false
+            end
 
-                if Goal and Area then
-                    local Inside =
-                        Rescue.IsInsideNormalArea(Root, Area)
+            local ProgressKey =
+                tostring(AreaNumber)
+                .. ":"
+                .. tostring(Wave)
+                .. ":"
+                .. tostring(Remaining)
+                .. ":"
+                .. Status
+                .. ":"
+                .. tostring(WaveStartedAt)
 
+            if Rescue.NormalProgressKey ~= ProgressKey then
+                Rescue.NormalProgressKey = ProgressKey
+                Rescue.NormalProgressAt = Now
+                Rescue.NormalFallbackStage = 0
+                Rescue.NormalLastFallbackAt = 0
+                Rescue.NormalFallbackReason = "Progress"
+            elseif Rescue.NormalProgressAt <= 0 then
+                Rescue.NormalProgressAt = Now
+            end
+
+            local StuckFor =
+                math.max(0, Now - (Rescue.NormalProgressAt or Now))
+
+            local Goal, Area, GoalAreaNumber =
+                Rescue.GetNormalAreaGoal(Root)
+
+            -- Normal progression still gets first priority. The watchdog below
+            -- deliberately ignores Wave/Remaining after enough idle time because
+            -- the updated game can report a non-zero wave while still waiting for
+            -- the player to physically cross the next Area trigger.
+            local ShouldEnterNormally =
+                Wave == 0
+                or Remaining > 0
+
+            local WatchdogTriggered =
+                StuckFor >= 12
+
+            if Goal and Area
+                and (ShouldEnterNormally or WatchdogTriggered)
+            then
+                local Inside =
+                    Rescue.IsInsideNormalArea(Root, Area)
+
+                if not WatchdogTriggered then
                     Rescue.NormalState =
                         (Wave == 0 and "Enter Area " or "Wave Recovery ")
-                        .. tostring(AreaNumber)
+                        .. tostring(GoalAreaNumber)
+                    Rescue.NormalFallbackReason = "NormalEntry"
 
                     if not Inside
                         or (Root.Position - Goal.Position).Magnitude > 6
@@ -4424,9 +4606,148 @@ FarmTab:CreateToggle({
 
                     return true
                 end
+
+                -- Escalate every six seconds of continued no-progress. Stage 1
+                -- hard-snaps to the Area center. Stage 2+ deliberately crosses an
+                -- Area boundary (outside -> inside) to retrigger touch/zone logic.
+                local Stage =
+                    math.max(
+                        1,
+                        math.floor((StuckFor - 12) / 6) + 1
+                    )
+
+                Rescue.NormalFallbackStage = Stage
+                Rescue.NormalFallbackReason =
+                    "NoProgress " .. tostring(math.floor(StuckFor)) .. "s"
+
+                if Stage == 1 then
+                    Rescue.NormalState =
+                        "Fallback Center Area "
+                        .. tostring(GoalAreaNumber)
+
+                    if Now - (Rescue.NormalLastFallbackAt or 0) >= 1.5 then
+                        Rescue.NormalLastFallbackAt = Now
+                        Root.CFrame = Goal
+
+                        print(
+                            "[Anime Zero][Normal Fallback] forcing Area center | area:",
+                            tostring(GoalAreaNumber),
+                            "| wave:",
+                            tostring(Wave),
+                            "| remaining:",
+                            tostring(Remaining)
+                        )
+                    end
+
+                    return true
+                end
+
+                Rescue.NormalState =
+                    "Fallback Re-enter Area "
+                    .. tostring(GoalAreaNumber)
+                    .. " #"
+                    .. tostring(Stage)
+
+                if Now - (Rescue.NormalLastFallbackAt or 0) >= 3 then
+                    Rescue.NormalLastFallbackAt = Now
+                    Rescue.NormalReentryToken =
+                        (Rescue.NormalReentryToken or 0) + 1
+
+                    local Token = Rescue.NormalReentryToken
+                    local LocalRoot =
+                        Area.CFrame:PointToObjectSpace(Root.Position)
+                    local Half = Area.Size * 0.5
+                    local SafeY = math.clamp(
+                        LocalRoot.Y,
+                        -math.max(Half.Y - 2, 0),
+                        math.max(Half.Y - 2, 0)
+                    )
+                    local SafeX = math.clamp(
+                        LocalRoot.X,
+                        -math.max(Half.X - 4, 0),
+                        math.max(Half.X - 4, 0)
+                    )
+                    local SafeZ = math.clamp(
+                        LocalRoot.Z,
+                        -math.max(Half.Z - 4, 0),
+                        math.max(Half.Z - 4, 0)
+                    )
+                    local XGap = Half.X - math.abs(LocalRoot.X)
+                    local ZGap = Half.Z - math.abs(LocalRoot.Z)
+                    local OutsideLocal
+                    local InsideLocal
+
+                    if XGap <= ZGap then
+                        local Sign = LocalRoot.X >= 0 and 1 or -1
+
+                        OutsideLocal = Vector3.new(
+                            Sign * (Half.X + 4),
+                            SafeY,
+                            SafeZ
+                        )
+
+                        InsideLocal = Vector3.new(
+                            Sign * math.max(Half.X - 10, 0),
+                            SafeY,
+                            SafeZ
+                        )
+                    else
+                        local Sign = LocalRoot.Z >= 0 and 1 or -1
+
+                        OutsideLocal = Vector3.new(
+                            SafeX,
+                            SafeY,
+                            Sign * (Half.Z + 4)
+                        )
+
+                        InsideLocal = Vector3.new(
+                            SafeX,
+                            SafeY,
+                            Sign * math.max(Half.Z - 10, 0)
+                        )
+                    end
+
+                    Root.CFrame =
+                        Area.CFrame * CFrame.new(OutsideLocal)
+
+                    task.delay(0.18, function()
+                        if Rescue.Active
+                            and Settings.AutoFarm
+                            and workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+                            and Rescue.NormalReentryToken == Token
+                        then
+                            local CurrentRoot = GetRoot2()
+
+                            if CurrentRoot then
+                                CurrentRoot.CFrame =
+                                    Area.CFrame * CFrame.new(InsideLocal)
+                            end
+                        end
+                    end)
+
+                    print(
+                        "[Anime Zero][Normal Fallback] re-enter pulse | area:",
+                        tostring(GoalAreaNumber),
+                        "| stuck:",
+                        tostring(math.floor(StuckFor)),
+                        "s | stage:",
+                        tostring(Stage)
+                    )
+                end
+
+                return true
             end
 
-            Rescue.NormalState = "Waiting"
+            Rescue.NormalState =
+                WatchdogTriggered
+                and ("Fallback Waiting " .. tostring(math.floor(StuckFor)) .. "s")
+                or "Waiting"
+
+            Rescue.NormalFallbackReason =
+                WatchdogTriggered
+                and "AreaGoalMissing"
+                or "Waiting"
+
             return false
         end
 
@@ -5927,6 +6248,12 @@ FarmTab:CreateToggle({
                         Settings.AutoRaidFarm == true,
                         "normal=",
                         Rescue.NormalState,
+                        "stuckFor=",
+                        Rescue.NormalProgressAt > 0
+                            and math.floor(os.clock() - Rescue.NormalProgressAt)
+                            or 0,
+                        "fallback=",
+                        Rescue.NormalFallbackReason,
                         "m1=",
                         Settings.AutoM1 == true,
                         "skills=",
@@ -7328,6 +7655,1207 @@ end)()
 
         -- The engine is assigned later, after the lobby modules load.
         GENV.__AZ_PLAYER_MISC_REDEEM_FUNCTION = nil
+
+
+        SettingsTab:CreateSection({
+            name = "Discord Webhook",
+        })
+
+
+        SettingsTab:CreateToggle({
+            name = "Enable Match Webhook",
+            flag = "WebhookEnabled",
+            description = "Send a Discord embed when a run finishes.",
+            value = Settings.WebhookEnabled,
+            callback = function(Value)
+
+                Settings.WebhookEnabled =
+                    Value == true
+
+
+                if type(
+                    Settings.PersistWebhookSettings
+                ) == "function"
+                then
+                    Settings.PersistWebhookSettings()
+                end
+            end,
+        })
+
+
+        SettingsTab:CreateInput({
+            name = "Discord Webhook URL",
+            flag = "DiscordWebhookURL",
+            placeholder = "https://discord.com/api/webhooks/...",
+            clearOnFocus = false,
+            value = Settings.WebhookURL,
+            callback = function(Value)
+
+                Settings.WebhookURL =
+                    tostring(Value or "")
+
+
+                if type(
+                    Settings.PersistWebhookSettings
+                ) == "function"
+                then
+                    Settings.PersistWebhookSettings()
+                end
+            end,
+        })
+
+
+        SettingsTab:CreateButton({
+            name = "Send Test Webhook",
+            callback = function()
+
+                local Sender =
+                    GENV.__AZ_WEBHOOK_SEND_TEST
+
+
+                if type(Sender) ~= "function" then
+
+                    Window:Toast({
+                        title = "Webhook not ready",
+                        subtitle = "The webhook runtime is still loading.",
+                        position = "Top",
+                    })
+
+                    return
+                end
+
+
+                task.spawn(function()
+
+                    local Success,
+                        Message =
+                        Sender()
+
+
+                    Window:Toast({
+                        title = Success
+                            and "Webhook sent"
+                            or "Webhook failed",
+                        subtitle = tostring(Message or ""),
+                        position = "Top",
+                    })
+                end)
+            end,
+        })
+
+
+        --//====================================================
+        --// DISCORD MATCH WEBHOOK RUNTIME
+        --//====================================================
+
+        ;(function()
+
+            if type(GENV.__AZ_WEBHOOK_RUNTIME) == "table" then
+                GENV.__AZ_WEBHOOK_RUNTIME.Active = false
+            end
+
+
+            local Runtime = {
+                Active = true,
+                LastAttemptKey = nil,
+                LastAttemptAt = 0,
+            }
+
+
+            GENV.__AZ_WEBHOOK_RUNTIME =
+                Runtime
+
+
+            local HttpService =
+                game:GetService("HttpService")
+
+            local PlayersService =
+                game:GetService("Players")
+
+            local ReplicatedStorageService =
+                game:GetService("ReplicatedStorage")
+
+            local LocalPlayerForWebhook =
+                PlayersService.LocalPlayer
+
+            local LastMatchFile =
+                "AnimeZero/webhook_last_match.txt"
+
+
+            local function ReadLeaf(Leaf)
+
+                if Leaf == nil then
+                    return nil
+                end
+
+
+                if type(Leaf) == "table"
+                    and type(Leaf.get) == "function"
+                then
+
+                    local Success, Value =
+                        pcall(function()
+                            return Leaf:get()
+                        end)
+
+
+                    if Success then
+                        return Value
+                    end
+                end
+
+
+                return Leaf
+            end
+
+
+            local function NumberText(Value)
+
+                local Number =
+                    tonumber(Value) or 0
+
+                local Negative =
+                    Number < 0
+
+                Number =
+                    math.floor(math.abs(Number) + 0.5)
+
+                local Text =
+                    tostring(Number)
+
+                Text =
+                    Text:reverse()
+                        :gsub(
+                            "(%d%d%d)",
+                            "%1,"
+                        )
+                        :reverse()
+                        :gsub(
+                            "^,",
+                            ""
+                        )
+
+
+                return (Negative and "-" or "")
+                    .. Text
+            end
+
+
+            local function TimeText(Value)
+
+                local Seconds =
+                    math.max(
+                        0,
+                        math.floor(
+                            tonumber(Value) or 0
+                        )
+                    )
+
+                local Hours =
+                    math.floor(Seconds / 3600)
+
+                local Minutes =
+                    math.floor(
+                        (Seconds % 3600) / 60
+                    )
+
+                local Remaining =
+                    Seconds % 60
+
+
+                if Hours > 0 then
+                    return string.format(
+                        "%d:%02d:%02d",
+                        Hours,
+                        Minutes,
+                        Remaining
+                    )
+                end
+
+
+                return string.format(
+                    "%d:%02d",
+                    Minutes,
+                    Remaining
+                )
+            end
+
+
+            local function Clean(Value)
+
+                local Text =
+                    tostring(Value or "N/A")
+
+                Text =
+                    Text:gsub("```", "'''")
+
+
+                return Text
+            end
+
+
+            local function CodeBlock(Lines)
+
+                return "```\n"
+                    .. table.concat(Lines, "\n")
+                    .. "\n```"
+            end
+
+
+            local function FriendlyMode(Mode)
+
+                local Names = {
+                    spiritedawayraid = "Raid",
+                    infinite = "Endless",
+                    hxh = "Story",
+                    sakamoto = "Sakamoto",
+                    tutorial = "Tutorial",
+                }
+
+
+                return Names[tostring(Mode)]
+                    or tostring(Mode or "Story")
+            end
+
+
+            local function FriendlyMap(Name)
+
+                local Names = {
+                    hxh = "HxH",
+                    spiritedawayraid = "Spirit's Bathtub",
+                    infinite = "ZZZ World",
+                }
+
+
+                return Names[tostring(Name)]
+                    or tostring(Name or "Unknown")
+            end
+
+
+            local function DifficultyName(Value)
+
+                local Names = {
+                    [1] = "Easy",
+                    [2] = "Medium",
+                    [3] = "Hard",
+                    [4] = "Nightmare",
+                }
+
+
+                return Names[tonumber(Value)]
+                    or tostring(Value or "Unknown")
+            end
+
+
+            local function IsDiscordWebhook(URL)
+
+                URL =
+                    tostring(URL or "")
+
+
+                return URL:match(
+                    "^https://discord%.com/api/webhooks/"
+                ) ~= nil
+                    or URL:match(
+                        "^https://discordapp%.com/api/webhooks/"
+                    ) ~= nil
+            end
+
+
+            local function GetRequestFunction()
+
+                if type(request) == "function" then
+                    return request
+                end
+
+
+                if type(http_request) == "function" then
+                    return http_request
+                end
+
+
+                if type(syn) == "table"
+                    and type(syn.request) == "function"
+                then
+                    return syn.request
+                end
+
+
+                if type(http) == "table"
+                    and type(http.request) == "function"
+                then
+                    return http.request
+                end
+
+
+                return nil
+            end
+
+
+            local function PostWebhook(Payload)
+
+                local URL =
+                    tostring(Settings.WebhookURL or "")
+
+
+                if not IsDiscordWebhook(URL) then
+                    return false,
+                        "Enter a valid Discord webhook URL."
+                end
+
+
+                local Body =
+                    HttpService:JSONEncode(Payload)
+
+                local Request =
+                    GetRequestFunction()
+
+
+                if Request then
+
+                    local Success,
+                        Response =
+                        pcall(
+                            Request,
+                            {
+                                Url = URL,
+                                Method = "POST",
+                                Headers = {
+                                    ["Content-Type"] = "application/json",
+                                },
+                                Body = Body,
+                            }
+                        )
+
+
+                    if not Success then
+                        return false,
+                            "Executor HTTP request failed."
+                    end
+
+
+                    if type(Response) == "table" then
+
+                        local Status =
+                            tonumber(
+                                Response.StatusCode
+                                or Response.Status
+                                or Response.status_code
+                            )
+
+
+                        if Status
+                            and (
+                                Status < 200
+                                or Status >= 300
+                            )
+                        then
+                            return false,
+                                "Discord returned HTTP "
+                                .. tostring(Status)
+                        end
+                    end
+
+
+                    return true,
+                        "Discord received the embed."
+                end
+
+
+                local Success =
+                    pcall(function()
+                        HttpService:PostAsync(
+                            URL,
+                            Body,
+                            Enum.HttpContentType.ApplicationJson,
+                            false
+                        )
+                    end)
+
+
+                return Success,
+                    Success
+                    and "Discord received the embed."
+                    or "Your executor does not expose an HTTP request function."
+            end
+
+
+            local Modules = nil
+
+
+            local function LoadModules()
+
+                if Modules then
+                    return Modules
+                end
+
+
+                local GameFolder =
+                    ReplicatedStorageService
+                        :FindFirstChild("game")
+
+                local Stores =
+                    GameFolder
+                    and GameFolder:FindFirstChild("stores")
+
+                local Global =
+                    ReplicatedStorageService
+                        :FindFirstChild("global")
+
+                local Utils =
+                    Global
+                    and Global:FindFirstChild("utils")
+
+                local Constants =
+                    Global
+                    and Global:FindFirstChild("constants")
+
+                local Assets =
+                    ReplicatedStorageService
+                        :FindFirstChild("assets")
+
+                local Config =
+                    Assets
+                    and Assets:FindFirstChild("config")
+
+
+                if not Stores
+                    or not Stores:FindFirstChild("accountNamespace")
+                    or not Stores:FindFirstChild("runStore")
+                    or not Utils
+                    or not Utils:FindFirstChild("levelProgression")
+                then
+                    return nil
+                end
+
+
+                local Result = {}
+
+
+                local Success =
+                    pcall(function()
+                        Result.AccountNamespace =
+                            require(
+                                Stores.accountNamespace
+                            )
+
+                        Result.RunStoreModule =
+                            require(
+                                Stores.runStore
+                            )
+
+                        Result.LevelProgression =
+                            require(
+                                Utils.levelProgression
+                            )
+
+                        if Utils:FindFirstChild("largeInteger") then
+                            Result.LargeInteger =
+                                require(
+                                    Utils.largeInteger
+                                )
+                        end
+
+                        if Config
+                            and Config:FindFirstChild("materialConfig")
+                        then
+                            Result.MaterialConfig =
+                                require(
+                                    Config.materialConfig
+                                )
+                        end
+
+                        if Constants
+                            and Constants:FindFirstChild("maps")
+                        then
+                            Result.MapConstants =
+                                require(
+                                    Constants.maps
+                                )
+                        end
+                    end)
+
+
+                if not Success then
+                    return nil
+                end
+
+
+                Modules = Result
+                return Modules
+            end
+
+
+            local function GetRunState()
+
+                local Loaded =
+                    LoadModules()
+
+
+                if not Loaded
+                    or not Loaded.RunStoreModule
+                then
+                    return nil
+                end
+
+
+                local Store =
+                    Loaded.RunStoreModule.store
+                    or Loaded.RunStoreModule.Store
+
+
+                return Store
+                    and Store.state
+                    or nil
+            end
+
+
+            local function GetParticipant(State)
+
+                if not State
+                    or not State.participants
+                    or not LocalPlayerForWebhook
+                then
+                    return nil
+                end
+
+
+                local Success,
+                    Participant =
+                    pcall(function()
+                        return State.participants:get(
+                            tostring(
+                                LocalPlayerForWebhook.UserId
+                            )
+                        )
+                    end)
+
+
+                return Success
+                    and Participant
+                    or nil
+            end
+
+
+            local function GetAccountStats(Participant)
+
+                local Loaded =
+                    LoadModules()
+
+                local Stats = {
+                    Level = "N/A",
+                    Money = 0,
+                    Gems = 0,
+                    Rolls = 0,
+                    TraitRerolls = 0,
+                    Played = 0,
+                    Wins = 0,
+                    Kills = 0,
+                    Deaths = 0,
+                }
+
+
+                if not Loaded
+                    or not Loaded.AccountNamespace
+                then
+                    return Stats
+                end
+
+
+                local Account =
+                    Loaded.AccountNamespace
+                        .getLocalPlayerAccount()
+
+
+                if not Account
+                    or not Account.state
+                then
+                    return Stats
+                end
+
+
+                local Currency =
+                    Account.state.currencies
+
+
+                if Currency then
+
+                    Stats.Money =
+                        tonumber(
+                            ReadLeaf(Currency.money)
+                        ) or 0
+
+                    Stats.Gems =
+                        tonumber(
+                            ReadLeaf(Currency.gems)
+                        ) or 0
+
+                    Stats.Rolls =
+                        tonumber(
+                            ReadLeaf(Currency.rolls)
+                        ) or 0
+
+                    Stats.TraitRerolls =
+                        tonumber(
+                            ReadLeaf(Currency.traitRerolls)
+                        ) or 0
+
+
+                    local XP =
+                        ReadLeaf(Currency.xp)
+
+
+                    if Participant
+                        and Loaded.LargeInteger
+                        and type(
+                            Loaded.LargeInteger.addCanonical
+                        ) == "function"
+                    then
+
+                        local RewardXP =
+                            tonumber(
+                                ReadLeaf(Participant.xp)
+                            ) or 0
+
+                        local Awarded =
+                            ReadLeaf(
+                                Participant.xpAwarded
+                            ) == true
+
+
+                        if RewardXP > 0
+                            and not Awarded
+                            and XP ~= nil
+                        then
+
+                            local Success,
+                                ProjectedXP =
+                                pcall(
+                                    Loaded.LargeInteger.addCanonical,
+                                    tostring(XP),
+                                    tostring(RewardXP)
+                                )
+
+
+                            if Success
+                                and ProjectedXP
+                            then
+                                XP = ProjectedXP
+                            end
+                        end
+                    end
+
+
+                    if XP ~= nil
+                        and Loaded.LevelProgression
+                        and type(
+                            Loaded.LevelProgression.getProgress
+                        ) == "function"
+                    then
+
+                        local Success,
+                            Progress =
+                            pcall(
+                                Loaded.LevelProgression.getProgress,
+                                XP
+                            )
+
+
+                        if Success
+                            and type(Progress) == "table"
+                        then
+                            Stats.Level =
+                                Progress.level or "N/A"
+                        end
+                    end
+                end
+
+
+                local MatchStats =
+                    Account.state.matchStats
+
+
+                if MatchStats then
+                    Stats.Played = tonumber(ReadLeaf(MatchStats.played)) or 0
+                    Stats.Wins = tonumber(ReadLeaf(MatchStats.wins)) or 0
+                    Stats.Kills = tonumber(ReadLeaf(MatchStats.kills)) or 0
+                    Stats.Deaths = tonumber(ReadLeaf(MatchStats.deaths)) or 0
+                end
+
+
+                return Stats
+            end
+
+
+            local function GetRewardSnapshot(Participant)
+
+                local Snapshot = {
+                    Status = "Test",
+                    Kills = 0,
+                    Damage = 0,
+                    Waves = 0,
+                    Currency = "money",
+                    Earned = 0,
+                    Bonus = 0,
+                    Gems = 0,
+                    XP = 0,
+                    Crystals = 0,
+                    Materials = "",
+                    Unit = "",
+                    Elapsed = 0,
+                    FinishedAt = nil,
+                    PayoutStatus = "",
+                }
+
+
+                if not Participant then
+                    return Snapshot
+                end
+
+
+                Snapshot.Status = Clean(ReadLeaf(Participant.status) or "Complete")
+                Snapshot.Kills = tonumber(ReadLeaf(Participant.kills)) or 0
+                Snapshot.Damage = tonumber(ReadLeaf(Participant.damage)) or 0
+                Snapshot.Waves = tonumber(ReadLeaf(Participant.wavesCleared)) or 0
+                Snapshot.Currency = Clean(ReadLeaf(Participant.currency) or "money")
+                Snapshot.Earned = tonumber(ReadLeaf(Participant.earned)) or 0
+                Snapshot.Bonus = tonumber(ReadLeaf(Participant.bonus)) or 0
+                Snapshot.Gems = tonumber(ReadLeaf(Participant.gems)) or 0
+                Snapshot.XP = tonumber(ReadLeaf(Participant.xp)) or 0
+                Snapshot.Crystals = tonumber(ReadLeaf(Participant.crystals)) or 0
+                Snapshot.Materials = Clean(ReadLeaf(Participant.materials) or "")
+                Snapshot.Unit = Clean(ReadLeaf(Participant.unit) or "")
+                Snapshot.Elapsed = tonumber(ReadLeaf(Participant.elapsed)) or 0
+                Snapshot.FinishedAt = ReadLeaf(Participant.finishedAt)
+                Snapshot.PayoutStatus = Clean(ReadLeaf(Participant.payoutStatus) or "")
+
+
+                return Snapshot
+            end
+
+
+            local function GetSpecialRewards(Reward)
+
+                local Loaded =
+                    LoadModules()
+
+                local Lines = {}
+
+
+                for Id, Amount
+                    in tostring(
+                        Reward.Materials or ""
+                    ):gmatch("(%d+):(%d+)")
+                do
+
+                    local Name =
+                        "Material " .. Id
+
+
+                    if Loaded
+                        and type(Loaded.MaterialConfig) == "table"
+                        and type(Loaded.MaterialConfig[Id]) == "table"
+                        and Loaded.MaterialConfig[Id].Name
+                    then
+                        Name = Loaded.MaterialConfig[Id].Name
+                    end
+
+
+                    table.insert(
+                        Lines,
+                        Clean(Name)
+                        .. ": +"
+                        .. NumberText(Amount)
+                    )
+                end
+
+
+                if Reward.Unit ~= ""
+                    and Reward.Unit ~= "none"
+                then
+                    table.insert(
+                        Lines,
+                        "Unit: " .. Clean(Reward.Unit)
+                    )
+                end
+
+
+                if #Lines == 0 then
+                    table.insert(
+                        Lines,
+                        "No Special Rewards"
+                    )
+                end
+
+
+                return Lines
+            end
+
+
+            local function BuildEmbed(Participant, IsTest)
+
+                local State =
+                    GetRunState()
+
+                local Reward =
+                    GetRewardSnapshot(Participant)
+
+                local Stats =
+                    GetAccountStats(Participant)
+
+                local Loaded =
+                    LoadModules()
+
+                local Mode =
+                    workspace:GetAttribute("Mode")
+                    or "hxh"
+
+                local MapName =
+                    Loaded
+                    and Loaded.MapConstants
+                    and Loaded.MapConstants.currentMap
+                    or Mode
+
+                local Difficulty =
+                    State
+                    and ReadLeaf(State.difficulty)
+                    or nil
+
+                local Outcome =
+                    tostring(Reward.Status):lower()
+
+                local Victory =
+                    Outcome == "victory"
+                    or Outcome == "completed"
+                    or Outcome == "complete"
+
+                local Failed =
+                    Outcome == "failed"
+                    or Outcome == "defeat"
+
+                local Title
+                local Color
+
+
+                if IsTest then
+                    Title = "Anime Zero • Webhook Test"
+                    Color = 0x8B5CF6
+                elseif Victory then
+                    Title = "✅ Anime Zero • Match Complete"
+                    Color = 0x57F287
+                elseif Failed then
+                    Title = "❌ Anime Zero • Match Complete"
+                    Color = 0xED4245
+                else
+                    Title = "Anime Zero • Match Complete"
+                    Color = 0x8B5CF6
+                end
+
+
+                local TotalLines = {
+                    "Level: " .. Clean(Stats.Level),
+                    "Coins: " .. NumberText(Stats.Money),
+                    "Gems: " .. NumberText(Stats.Gems),
+                    "Rolls: " .. NumberText(Stats.Rolls),
+                    "Trait Rerolls: " .. NumberText(Stats.TraitRerolls),
+                    "Wins: " .. NumberText(Stats.Wins),
+                }
+
+                local InfoLines = {
+                    "Mode: " .. FriendlyMode(Mode),
+                    "Map: " .. FriendlyMap(MapName),
+                    "Difficulty: " .. DifficultyName(Difficulty),
+                    "Time Taken: " .. TimeText(Reward.Elapsed),
+                    "Kills: " .. NumberText(Reward.Kills),
+                    "Waves: " .. NumberText(Reward.Waves),
+                }
+
+                local UserLines = {
+                    Clean(
+                        LocalPlayerForWebhook
+                        and LocalPlayerForWebhook.Name
+                        or "Unknown"
+                    ),
+                }
+
+                local CurrencyLabel =
+                    Reward.Currency == "money"
+                    and "Coins"
+                    or Clean(Reward.Currency)
+
+                local RewardLines = {
+                    CurrencyLabel
+                        .. ": +"
+                        .. NumberText(
+                            Reward.Earned
+                            + Reward.Bonus
+                        ),
+                    "XP: +" .. NumberText(Reward.XP),
+                    "Gems: +" .. NumberText(Reward.Gems),
+                    "Trait Rerolls: +" .. NumberText(Reward.Crystals),
+                }
+
+
+                if IsTest then
+                    RewardLines = {
+                        "Webhook connection: OK",
+                        "Match rewards will appear here.",
+                    }
+                end
+
+
+                return {
+                    title = Title,
+                    color = Color,
+                    fields = {
+                        {
+                            name = "Total Stats:",
+                            value = CodeBlock(TotalLines),
+                            inline = true,
+                        },
+                        {
+                            name = "Info:",
+                            value = CodeBlock(InfoLines),
+                            inline = true,
+                        },
+                        {
+                            name = "User:",
+                            value = CodeBlock(UserLines),
+                            inline = true,
+                        },
+                        {
+                            name = "Rewards:",
+                            value = CodeBlock(RewardLines),
+                            inline = true,
+                        },
+                        {
+                            name = "Special Rewards:",
+                            value = CodeBlock(
+                                IsTest
+                                and {"No Special Rewards"}
+                                or GetSpecialRewards(Reward)
+                            ),
+                            inline = true,
+                        },
+                    },
+                    footer = {
+                        text = "Anime Zero • Match Tracker",
+                    },
+                    timestamp = os.date(
+                        "!%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                }
+            end
+
+
+            local function Send(Participant, IsTest)
+
+                local Payload = {
+                    username = "Anime Zero Match Tracker",
+                    allowed_mentions = {
+                        parse = {},
+                    },
+                    embeds = {
+                        BuildEmbed(
+                            Participant,
+                            IsTest == true
+                        ),
+                    },
+                }
+
+
+                return PostWebhook(Payload)
+            end
+
+
+            GENV.__AZ_WEBHOOK_SEND_TEST =
+                function()
+
+                    local State =
+                        GetRunState()
+
+                    local Participant =
+                        GetParticipant(State)
+
+
+                    return Send(
+                        Participant,
+                        true
+                    )
+                end
+
+
+            local function ReadLastMatchKey()
+
+                if type(readfile) == "function"
+                    and type(isfile) == "function"
+                    and isfile(LastMatchFile)
+                then
+
+                    local Success, Value =
+                        pcall(
+                            readfile,
+                            LastMatchFile
+                        )
+
+
+                    if Success then
+                        return tostring(Value)
+                    end
+                end
+
+
+                return tostring(
+                    GENV.__AZ_WEBHOOK_LAST_MATCH_KEY
+                    or ""
+                )
+            end
+
+
+            local function SaveLastMatchKey(Key)
+
+                GENV.__AZ_WEBHOOK_LAST_MATCH_KEY =
+                    Key
+
+
+                if type(writefile) == "function" then
+
+                    if makefolder then
+                        pcall(makefolder, "AnimeZero")
+                    end
+
+
+                    pcall(
+                        writefile,
+                        LastMatchFile,
+                        tostring(Key)
+                    )
+                end
+            end
+
+
+            task.spawn(function()
+
+                local LastSentKey =
+                    ReadLastMatchKey()
+
+
+                while Runtime.Active do
+
+                    task.wait(0.5)
+
+
+                    if not Settings.WebhookEnabled
+                        or not IsDiscordWebhook(
+                            Settings.WebhookURL
+                        )
+                    then
+                        continue
+                    end
+
+
+                    local State =
+                        GetRunState()
+
+                    local Participant =
+                        GetParticipant(State)
+
+
+                    if not Participant then
+                        continue
+                    end
+
+
+                    local Status =
+                        tostring(
+                            ReadLeaf(Participant.status)
+                            or "active"
+                        )
+
+                    local FinishedAt =
+                        ReadLeaf(Participant.finishedAt)
+
+
+                    if not FinishedAt
+                        and State
+                        and State.finishedAt
+                    then
+                        FinishedAt =
+                            ReadLeaf(State.finishedAt)
+                    end
+
+
+                    if Status == "active"
+                        or FinishedAt == nil
+                    then
+                        continue
+                    end
+
+
+                    local Key =
+                        tostring(game.PlaceId)
+                        .. ":"
+                        .. tostring(FinishedAt)
+                        .. ":"
+                        .. Status
+
+
+                    if Key == LastSentKey then
+                        continue
+                    end
+
+
+                    local Now =
+                        os.clock()
+
+
+                    if Runtime.LastAttemptKey == Key
+                        and Now - Runtime.LastAttemptAt < 4
+                    then
+                        continue
+                    end
+
+
+                    Runtime.LastAttemptKey = Key
+                    Runtime.LastAttemptAt = Now
+
+
+                    task.wait(0.75)
+
+
+                    if not Runtime.Active then
+                        break
+                    end
+
+
+                    local Success,
+                        Message =
+                        Send(
+                            Participant,
+                            false
+                        )
+
+
+                    if Success then
+
+                        LastSentKey = Key
+                        SaveLastMatchKey(Key)
+
+                        print(
+                            "[Anime Zero] Match webhook sent |",
+                            Status
+                        )
+
+                    else
+
+                        warn(
+                            "[Anime Zero][Webhook] Send failed:",
+                            tostring(Message)
+                        )
+                    end
+                end
+            end)
+        end)()
 
 
         task.spawn(function()
@@ -10397,6 +11925,16 @@ end
 
 
                 pcall(function()
+                    if type(
+                        Settings.PersistWebhookSettings
+                    ) == "function"
+                    then
+                        Settings.PersistWebhookSettings()
+                    end
+                end)
+
+
+                pcall(function()
                     local Save =
                         GENV.__AZ_PLAYER_MISC_SAVE_FUNCTION
 
@@ -10583,6 +12121,14 @@ end
 
                 GENV.__AZ_FORCE_CONFIG_SAVE = nil
                 GENV.__AZ_SAVE_CROSSPLACE_STATE = nil
+
+
+                -- Stop the webhook monitor.
+                if type(GENV.__AZ_WEBHOOK_RUNTIME) == "table" then
+                    GENV.__AZ_WEBHOOK_RUNTIME.Active = false
+                end
+
+                GENV.__AZ_WEBHOOK_SEND_TEST = nil
 
 
                 -- Stop Anti-AFK.
