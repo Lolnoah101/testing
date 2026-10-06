@@ -7657,93 +7657,6 @@ end)()
         GENV.__AZ_PLAYER_MISC_REDEEM_FUNCTION = nil
 
 
-        SettingsTab:CreateSection({
-            name = "Discord Webhook",
-        })
-
-
-        SettingsTab:CreateToggle({
-            name = "Enable Match Webhook",
-            flag = "WebhookEnabled",
-            description = "Send a Discord embed when a run finishes.",
-            value = Settings.WebhookEnabled,
-            callback = function(Value)
-
-                Settings.WebhookEnabled =
-                    Value == true
-
-
-                if type(
-                    Settings.PersistWebhookSettings
-                ) == "function"
-                then
-                    Settings.PersistWebhookSettings()
-                end
-            end,
-        })
-
-
-        SettingsTab:CreateInput({
-            name = "Discord Webhook URL",
-            flag = "DiscordWebhookURL",
-            placeholder = "https://discord.com/api/webhooks/...",
-            clearOnFocus = false,
-            value = Settings.WebhookURL,
-            callback = function(Value)
-
-                Settings.WebhookURL =
-                    tostring(Value or "")
-
-
-                if type(
-                    Settings.PersistWebhookSettings
-                ) == "function"
-                then
-                    Settings.PersistWebhookSettings()
-                end
-            end,
-        })
-
-
-        SettingsTab:CreateButton({
-            name = "Send Test Webhook",
-            callback = function()
-
-                local Sender =
-                    GENV.__AZ_WEBHOOK_SEND_TEST
-
-
-                if type(Sender) ~= "function" then
-
-                    Window:Toast({
-                        title = "Webhook not ready",
-                        subtitle = "The webhook runtime is still loading.",
-                        position = "Top",
-                    })
-
-                    return
-                end
-
-
-                task.spawn(function()
-
-                    local Success,
-                        Message =
-                        Sender()
-
-
-                    Window:Toast({
-                        title = Success
-                            and "Webhook sent"
-                            or "Webhook failed",
-                        subtitle = tostring(Message or ""),
-                        position = "Top",
-                    })
-                end)
-            end,
-        })
-
-
         --//====================================================
         --// DISCORD MATCH WEBHOOK RUNTIME
         --//====================================================
@@ -11599,6 +11512,113 @@ end)()
             Window:CreateTab({
                 name = "Settings",
             })
+
+        -- Discord webhook controls are created only after SettingsTab exists.
+        -- Keeping this here prevents an early nil SettingsTab error from
+        -- aborting every tab that is created later in the script.
+
+        local WebhookUiSuccess, WebhookUiError =
+            pcall(function()
+
+            SettingsTab:CreateSection({
+                name = "Discord Webhook",
+            })
+
+
+            SettingsTab:CreateToggle({
+                name = "Enable Match Webhook",
+                flag = "WebhookEnabled",
+                description = "Send a Discord embed when a run finishes.",
+                value = Settings.WebhookEnabled,
+                callback = function(Value)
+
+                    Settings.WebhookEnabled =
+                        Value == true
+
+
+                    if type(
+                        Settings.PersistWebhookSettings
+                    ) == "function"
+                    then
+                        Settings.PersistWebhookSettings()
+                    end
+                end,
+            })
+
+
+            SettingsTab:CreateInput({
+                name = "Discord Webhook URL",
+                flag = "DiscordWebhookURL",
+                placeholder = "https://discord.com/api/webhooks/...",
+                clearOnFocus = false,
+                value = Settings.WebhookURL,
+                callback = function(Value)
+
+                    Settings.WebhookURL =
+                        tostring(Value or "")
+
+
+                    if type(
+                        Settings.PersistWebhookSettings
+                    ) == "function"
+                    then
+                        Settings.PersistWebhookSettings()
+                    end
+                end,
+            })
+
+
+            SettingsTab:CreateButton({
+                name = "Send Test Webhook",
+                callback = function()
+
+                    local Sender =
+                        GENV.__AZ_WEBHOOK_SEND_TEST
+
+
+                    if type(Sender) ~= "function" then
+
+                        Window:Toast({
+                            title = "Webhook not ready",
+                            subtitle = "The webhook runtime is still loading.",
+                            position = "Top",
+                        })
+
+                        return
+                    end
+
+
+                    task.spawn(function()
+
+                        local Success,
+                            Message =
+                            Sender()
+
+
+                        Window:Toast({
+                            title = Success
+                                and "Webhook sent"
+                                or "Webhook failed",
+                            subtitle = tostring(Message or ""),
+                            position = "Top",
+                        })
+                    end)
+                end,
+            })
+
+            end)
+
+
+        if not WebhookUiSuccess then
+            warn(
+                "[Anime Zero] Webhook Settings UI failed:",
+                tostring(WebhookUiError)
+            )
+        end
+
+
+        print("[Anime Zero] Settings/Webhook UI ready")
+
 
         SettingsTab:CreateSection({
             name = "Interface",
