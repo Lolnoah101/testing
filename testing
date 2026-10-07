@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// UPDATE-COMPATIBLE LOBBY + FARM
+--// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + STABLE HORIZONTAL HOLD
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -302,6 +302,10 @@ local Settings = {
 
     AntiAFK = false,
 
+    -- Mobile/session recovery
+    AutoReconnect = false,
+    ReconnectDelay = 5,
+
     -- Discord match tracker
     WebhookEnabled = false,
     WebhookURL = "",
@@ -399,6 +403,10 @@ local Settings = {
                     Legacy.AutoExecuteOnTeleport,
                 AntiAFK =
                     Legacy.AntiAFK,
+                AutoReconnect =
+                    Legacy.AutoReconnect,
+                ReconnectDelay =
+                    Legacy.ReconnectDelay,
             }
         end
     end
@@ -418,6 +426,22 @@ local Settings = {
         if type(Saved.AntiAFK) == "boolean" then
             Settings.AntiAFK =
                 Saved.AntiAFK
+        end
+
+
+        if type(Saved.AutoReconnect) == "boolean" then
+            Settings.AutoReconnect =
+                Saved.AutoReconnect
+        end
+
+
+        if tonumber(Saved.ReconnectDelay) then
+            Settings.ReconnectDelay =
+                math.clamp(
+                    tonumber(Saved.ReconnectDelay) or 5,
+                    2,
+                    30
+                )
         end
     end
 
@@ -455,6 +479,17 @@ local Settings = {
                 AntiAFK =
                     Settings.AntiAFK
                     == true,
+
+                AutoReconnect =
+                    Settings.AutoReconnect
+                    == true,
+
+                ReconnectDelay =
+                    math.clamp(
+                        tonumber(Settings.ReconnectDelay) or 5,
+                        2,
+                        30
+                    ),
             }
 
 
@@ -504,6 +539,854 @@ local Settings = {
 
             return Data
         end
+
+end)()
+
+
+--//============================================================
+--// AUTO RECONNECT V2
+--//
+--// More defensive mobile reconnect flow:
+--// - watches GuiService + Roblox disconnect prompt
+--// - detects long iOS/Delta resume gaps and immediately rescans prompts
+--// - de-duplicates repeated disconnect signals
+--// - retries the SAME server twice for ordinary network drops
+--// - skips a dead/shutdown server and goes straight to lobby
+--// - uses progressive retry delays instead of hammering teleports
+--// - watches LocalPlayer.OnTeleport + TeleportInitFailed
+--// - queues the current script only once per reconnect cycle
+--// - exposes a manual reconnect hook for the Settings tab
+--//============================================================
+
+;(function()
+
+    if type(GENV.__AZ_RECONNECT_RUNTIME) == "table" then
+        GENV.__AZ_RECONNECT_RUNTIME.Active = false
+
+        if type(GENV.__AZ_RECONNECT_RUNTIME.Connections) == "table" then
+            for _, Connection in pairs(
+                GENV.__AZ_RECONNECT_RUNTIME.Connections
+            ) do
+                if typeof(Connection) == "RBXScriptConnection" then
+                    pcall(function()
+                        Connection:Disconnect()
+                    end)
+                end
+            end
+        end
+    end
+
+
+    local PlayersService =
+        game:GetService("Players")
+
+    local TeleportService =
+        game:GetService("TeleportService")
+
+    local GuiService =
+        game:GetService("GuiService")
+
+    local CoreGui =
+        game:GetService("CoreGui")
+
+    local LocalPlayer =
+        PlayersService.LocalPlayer
+
+
+    local Runtime = {
+        Active = true,
+        Busy = false,
+        State = "Idle",
+        LastReason = "",
+        LastTriggerAt = 0,
+        Cycle = 0,
+        SameServerAttempts = 0,
+        MaxSameServerAttempts = 2,
+        QueuePrepared = false,
+        Persisted = false,
+        FallbackStarted = false,
+        TeleportStarted = false,
+        StartedAt = 0,
+        Connections = {},
+    }
+
+    GENV.__AZ_RECONNECT_RUNTIME = Runtime
+
+
+    -- Anime Zero lobby. If the dungeon/raid instance died, this is the safest
+    -- place to recover because saved Auto Join settings can start a fresh run.
+    local LOBBY_PLACE_ID =
+        114574503491412
+
+
+    local function AddConnection(Connection)
+        if typeof(Connection) == "RBXScriptConnection" then
+            table.insert(Runtime.Connections, Connection)
+        end
+
+        return Connection
+    end
+
+
+    local function SetState(State)
+        Runtime.State = tostring(State or "Unknown")
+    end
+
+
+    local function PersistBeforeReconnect()
+
+        if Runtime.Persisted then
+            return
+        end
+
+        Runtime.Persisted = true
+
+        for _, FunctionName in ipairs({
+            "PersistInterfaceSettings",
+            "PersistWebhookSettings",
+            "PersistDungeonAutomation",
+            "PersistFarmSettings",
+            "PersistLobbyPreferences",
+            "PersistEndActionSettings",
+        }) do
+
+            local Callback =
+                Settings[FunctionName]
+
+            if type(Callback) == "function" then
+                pcall(Callback)
+            end
+        end
+    end
+
+
+    local function QueueCurrentScript()
+
+        if Runtime.QueuePrepared then
+            return true
+        end
+
+        local Queue =
+            queue_on_teleport
+            or queueonteleport
+
+        if type(Queue) ~= "function"
+            or type(readfile) ~= "function"
+            or type(isfile) ~= "function"
+            or not isfile("AnimeZero/AnimeZero_AutoExec.lua")
+        then
+            return false
+        end
+
+        local Queued = [[
+task.wait(1)
+local source = "AnimeZero/AnimeZero_AutoExec.lua"
+if readfile and isfile and isfile(source) then
+    local code = readfile(source)
+    if code and code ~= "" then
+        local fn = loadstring(code)
+        if fn then fn() end
+    end
+end
+]]
+
+        local Success =
+            pcall(Queue, Queued)
+
+        if Success then
+            Runtime.QueuePrepared = true
+        end
+
+        return Success
+    end
+
+
+    local function NormalizeReason(Message)
+        return string.lower(
+            tostring(Message or "")
+        )
+    end
+
+
+    local function IsBlockedReason(Message)
+
+        local Lower =
+            NormalizeReason(Message)
+
+        for _, Phrase in ipairs({
+            "banned",
+            "moderation",
+            "moderated",
+            "kicked by",
+            "you have been kicked",
+            "another device",
+            "same account launched",
+            "same account",
+            "error code: 267",
+            "error code 267",
+            "error code: 268",
+            "error code 268",
+            "error code: 273",
+            "error code 273",
+        }) do
+            if string.find(Lower, Phrase, 1, true) then
+                return true
+            end
+        end
+
+        return false
+    end
+
+
+    local function IsDeadServerReason(Message)
+
+        local Lower =
+            NormalizeReason(Message)
+
+        for _, Phrase in ipairs({
+            "server shut down",
+            "server shutdown",
+            "server has shut down",
+            "server is shutting down",
+            "server no longer available",
+            "reserved server",
+        }) do
+            if string.find(Lower, Phrase, 1, true) then
+                return true
+            end
+        end
+
+        return false
+    end
+
+
+    local function IsDisconnectReason(Message)
+
+        local Lower =
+            NormalizeReason(Message)
+
+        if Lower == ""
+            or IsBlockedReason(Lower)
+        then
+            return false
+        end
+
+        for _, Phrase in ipairs({
+            "disconnected",
+            "connection",
+            "error code",
+            "please check your internet",
+            "server shut down",
+            "server shutdown",
+            "lost connection",
+            "failed to connect",
+            "teleport failed",
+            "timed out",
+            "timeout",
+        }) do
+            if string.find(Lower, Phrase, 1, true) then
+                return true
+            end
+        end
+
+        return false
+    end
+
+
+    local function ReconnectDelayForAttempt(Attempt)
+
+        local Base =
+            math.clamp(
+                tonumber(Settings.ReconnectDelay) or 5,
+                2,
+                30
+            )
+
+        -- First attempt respects the UI value. Later attempts back off a little
+        -- so poor mobile data does not spam Roblox's teleport service.
+        return math.clamp(
+            Base + math.max(0, Attempt - 1) * 3,
+            2,
+            30
+        )
+    end
+
+
+    local BeginSameServerAttempt
+    local FallbackToLobby
+
+
+    FallbackToLobby = function(Cycle, Reason, Manual)
+
+        if not Runtime.Active
+            or Runtime.Cycle ~= Cycle
+            or Runtime.FallbackStarted
+            or (not Manual and not Settings.AutoReconnect)
+            or not LocalPlayer
+        then
+            return
+        end
+
+        Runtime.FallbackStarted = true
+        Runtime.Busy = true
+        Runtime.TeleportStarted = false
+        SetState("LobbyFallback")
+
+        print(
+            "[Anime Zero][Reconnect] Falling back to lobby | reason:",
+            tostring(Reason or Runtime.LastReason)
+        )
+
+        PersistBeforeReconnect()
+        QueueCurrentScript()
+
+        local Started =
+            pcall(function()
+                TeleportService:Teleport(
+                    LOBBY_PLACE_ID,
+                    LocalPlayer
+                )
+            end)
+
+        if not Started then
+            Runtime.FallbackStarted = false
+            SetState("LobbyRetryWait")
+
+            task.delay(5, function()
+                if Runtime.Active
+                    and Runtime.Cycle == Cycle
+                    and Runtime.Busy
+                then
+                    FallbackToLobby(
+                        Cycle,
+                        "Lobby teleport call failed",
+                        Manual
+                    )
+                end
+            end)
+
+            return
+        end
+
+        -- If the call was accepted but the client never transitions, retry the
+        -- lobby request. This is common after a long mobile network outage.
+        task.delay(15, function()
+            if Runtime.Active
+                and Runtime.Cycle == Cycle
+                and Runtime.Busy
+                and not Runtime.TeleportStarted
+            then
+                Runtime.FallbackStarted = false
+                SetState("LobbyTimeout")
+
+                FallbackToLobby(
+                    Cycle,
+                    "Lobby teleport timeout",
+                    Manual
+                )
+            end
+        end)
+    end
+
+
+    BeginSameServerAttempt = function(Cycle, Reason, Manual)
+
+        if not Runtime.Active
+            or Runtime.Cycle ~= Cycle
+            or (not Manual and not Settings.AutoReconnect)
+            or not LocalPlayer
+        then
+            return
+        end
+
+        if Runtime.SameServerAttempts
+            >= Runtime.MaxSameServerAttempts
+        then
+            FallbackToLobby(
+                Cycle,
+                "Same-server retries exhausted",
+                Manual
+            )
+            return
+        end
+
+        if not game.JobId
+            or game.JobId == ""
+        then
+            FallbackToLobby(
+                Cycle,
+                "No current server id",
+                Manual
+            )
+            return
+        end
+
+        Runtime.SameServerAttempts =
+            Runtime.SameServerAttempts + 1
+
+        local Attempt =
+            Runtime.SameServerAttempts
+
+        local Delay =
+            ReconnectDelayForAttempt(Attempt)
+
+        SetState(
+            "SameServerWait"
+            .. tostring(Attempt)
+        )
+
+        print(
+            "[Anime Zero][Reconnect] Same-server attempt",
+            Attempt,
+            "of",
+            Runtime.MaxSameServerAttempts,
+            "in",
+            Delay,
+            "seconds"
+        )
+
+        task.delay(Delay, function()
+
+            if not Runtime.Active
+                or Runtime.Cycle ~= Cycle
+                or (not Manual and not Settings.AutoReconnect)
+            then
+                return
+            end
+
+            Runtime.TeleportStarted = false
+            SetState(
+                "SameServerAttempt"
+                .. tostring(Attempt)
+            )
+
+            PersistBeforeReconnect()
+            QueueCurrentScript()
+
+            local CallSucceeded =
+                pcall(function()
+                    TeleportService:TeleportToPlaceInstance(
+                        game.PlaceId,
+                        game.JobId,
+                        LocalPlayer
+                    )
+                end)
+
+            if CallSucceeded then
+                print(
+                    "[Anime Zero][Reconnect] Rejoining current server | attempt",
+                    Attempt
+                )
+            else
+                warn(
+                    "[Anime Zero][Reconnect] Same-server teleport call failed | attempt",
+                    Attempt
+                )
+            end
+
+            -- TeleportInitFailed usually fires quickly, but some mobile
+            -- failures simply stall. Treat no transition after 12s as failed.
+            task.delay(12, function()
+
+                if not Runtime.Active
+                    or Runtime.Cycle ~= Cycle
+                    or not Runtime.Busy
+                    or Runtime.TeleportStarted
+                then
+                    return
+                end
+
+                if Runtime.SameServerAttempts
+                    < Runtime.MaxSameServerAttempts
+                then
+                    BeginSameServerAttempt(
+                        Cycle,
+                        "Same-server attempt timed out",
+                        Manual
+                    )
+                else
+                    FallbackToLobby(
+                        Cycle,
+                        "Same-server timeout",
+                        Manual
+                    )
+                end
+            end)
+        end)
+    end
+
+
+    local function StartReconnect(Reason, Manual)
+
+        if not Runtime.Active
+            or not LocalPlayer
+            or (not Manual and not Settings.AutoReconnect)
+        then
+            return
+        end
+
+        if IsBlockedReason(Reason) then
+            warn(
+                "[Anime Zero][Reconnect] Not reconnecting from account/moderation kick."
+            )
+            return
+        end
+
+        local Now =
+            os.clock()
+
+        -- GuiService + ErrorPrompt often report the same disconnect within the
+        -- same second. Only one reconnect cycle should be created.
+        if Runtime.Busy
+            or (
+                not Manual
+                and Now - Runtime.LastTriggerAt < 2
+            )
+        then
+            return
+        end
+
+        Runtime.LastTriggerAt = Now
+        Runtime.LastReason =
+            tostring(Reason or "Disconnected")
+        Runtime.Busy = true
+        Runtime.FallbackStarted = false
+        Runtime.TeleportStarted = false
+        Runtime.SameServerAttempts = 0
+        Runtime.QueuePrepared = false
+        Runtime.Persisted = false
+        Runtime.StartedAt = Now
+        Runtime.Cycle = Runtime.Cycle + 1
+
+        local Cycle =
+            Runtime.Cycle
+
+        print(
+            "[Anime Zero][Reconnect] Recovery started | reason:",
+            Runtime.LastReason
+        )
+
+        -- A server-shutdown message means the old JobId is useless. Going
+        -- straight to lobby is faster and avoids two guaranteed failures.
+        if IsDeadServerReason(Runtime.LastReason) then
+            SetState("DeadServer")
+
+            FallbackToLobby(
+                Cycle,
+                Runtime.LastReason,
+                Manual
+            )
+        else
+            BeginSameServerAttempt(
+                Cycle,
+                Runtime.LastReason,
+                Manual
+            )
+        end
+    end
+
+
+    local function ReadPromptText(Prompt)
+
+        if not Prompt then
+            return ""
+        end
+
+        local Parts = {}
+
+        pcall(function()
+            for _, Item in ipairs(
+                Prompt:GetDescendants()
+            ) do
+                if Item:IsA("TextLabel")
+                    or Item:IsA("TextButton")
+                then
+                    local Value =
+                        tostring(Item.Text or "")
+
+                    if Value ~= "" then
+                        table.insert(Parts, Value)
+                    end
+                end
+            end
+        end)
+
+        return table.concat(Parts, " ")
+    end
+
+
+    local function CheckPrompt(Prompt)
+
+        if not Runtime.Active
+            or not Settings.AutoReconnect
+            or not Prompt
+        then
+            return
+        end
+
+        task.delay(0.15, function()
+
+            if not Runtime.Active
+                or not Settings.AutoReconnect
+                or not Prompt.Parent
+            then
+                return
+            end
+
+            local Message =
+                ReadPromptText(Prompt)
+
+            if IsBlockedReason(Message) then
+                return
+            end
+
+            if Prompt.Name == "ErrorPrompt"
+                or IsDisconnectReason(Message)
+            then
+                StartReconnect(
+                    Message ~= ""
+                        and Message
+                        or "Roblox ErrorPrompt",
+                    false
+                )
+            end
+        end)
+    end
+
+
+    -- Expose lightweight status/manual controls for the Settings tab.
+    GENV.__AZ_RECONNECT_NOW =
+        function()
+            StartReconnect(
+                "Manual reconnect requested",
+                true
+            )
+        end
+
+    GENV.__AZ_RECONNECT_GET_STATUS =
+        function()
+            return {
+                active = Runtime.Active,
+                busy = Runtime.Busy,
+                state = Runtime.State,
+                attempts = Runtime.SameServerAttempts,
+                reason = Runtime.LastReason,
+            }
+        end
+
+
+    pcall(function()
+        AddConnection(
+            GuiService.ErrorMessageChanged
+                :Connect(function(Message)
+                    if IsDisconnectReason(Message) then
+                        StartReconnect(
+                            Message,
+                            false
+                        )
+                    end
+                end)
+        )
+    end)
+
+
+    pcall(function()
+        AddConnection(
+            LocalPlayer.OnTeleport
+                :Connect(function(State)
+
+                    local Name =
+                        tostring(State)
+
+                    if string.find(
+                        Name,
+                        "Started",
+                        1,
+                        true
+                    )
+                        or string.find(
+                            Name,
+                            "InProgress",
+                            1,
+                            true
+                        )
+                    then
+                        Runtime.TeleportStarted = true
+                        SetState("Teleporting")
+
+                    elseif string.find(
+                        Name,
+                        "Failed",
+                        1,
+                        true
+                    )
+                        and Runtime.Busy
+                    then
+                        Runtime.TeleportStarted = false
+                    end
+                end)
+        )
+    end)
+
+
+    pcall(function()
+        AddConnection(
+            TeleportService.TeleportInitFailed
+                :Connect(function(
+                    Player,
+                    _,
+                    ErrorMessage
+                )
+
+                    if Player ~= LocalPlayer
+                        or not Runtime.Busy
+                    then
+                        return
+                    end
+
+                    Runtime.TeleportStarted = false
+
+                    warn(
+                        "[Anime Zero][Reconnect] TeleportInitFailed:",
+                        tostring(ErrorMessage or "unknown")
+                    )
+
+                    local Cycle =
+                        Runtime.Cycle
+
+                    if Runtime.FallbackStarted then
+                        Runtime.FallbackStarted = false
+
+                        task.delay(4, function()
+                            FallbackToLobby(
+                                Cycle,
+                                ErrorMessage,
+                                true
+                            )
+                        end)
+
+                    elseif Runtime.SameServerAttempts
+                        < Runtime.MaxSameServerAttempts
+                    then
+                        BeginSameServerAttempt(
+                            Cycle,
+                            ErrorMessage,
+                            true
+                        )
+                    else
+                        FallbackToLobby(
+                            Cycle,
+                            ErrorMessage,
+                            true
+                        )
+                    end
+                end)
+        )
+    end)
+
+
+    task.spawn(function()
+
+        local PromptOverlay = nil
+
+        pcall(function()
+            local PromptGui =
+                CoreGui:WaitForChild(
+                    "RobloxPromptGui",
+                    15
+                )
+
+            PromptOverlay =
+                PromptGui
+                and PromptGui:FindFirstChild(
+                    "promptOverlay"
+                )
+        end)
+
+        if PromptOverlay then
+
+            AddConnection(
+                PromptOverlay.ChildAdded
+                    :Connect(CheckPrompt)
+            )
+
+            for _, Child in ipairs(
+                PromptOverlay:GetChildren()
+            ) do
+                CheckPrompt(Child)
+            end
+        end
+
+
+        local LastLoopAt =
+            os.clock()
+
+        while Runtime.Active do
+
+            task.wait(2)
+
+            local Now =
+                os.clock()
+
+            local ResumeGap =
+                Now - LastLoopAt
+
+            LastLoopAt = Now
+
+            if Settings.AutoReconnect
+                and not Runtime.Busy
+            then
+
+                -- On iOS, Roblox/Delta may be suspended for a while. When the
+                -- script resumes, do an immediate full prompt/error rescan.
+                if ResumeGap >= 12 then
+                    print(
+                        "[Anime Zero][Reconnect] Mobile resume detected | gap:",
+                        math.floor(ResumeGap),
+                        "seconds"
+                    )
+                end
+
+                if PromptOverlay then
+                    for _, Child in ipairs(
+                        PromptOverlay:GetChildren()
+                    ) do
+                        CheckPrompt(Child)
+                    end
+                end
+
+                pcall(function()
+                    local Message =
+                        GuiService:GetErrorMessage()
+
+                    if IsDisconnectReason(Message) then
+                        StartReconnect(
+                            Message,
+                            false
+                        )
+                    end
+                end)
+            end
+
+            -- Safety valve: if Roblox never produces a teleport transition or
+            -- failure event, don't leave the reconnect runtime permanently busy.
+            if Runtime.Busy
+                and not Runtime.TeleportStarted
+                and Runtime.StartedAt > 0
+                and Now - Runtime.StartedAt > 75
+            then
+                local Cycle = Runtime.Cycle
+
+                Runtime.FallbackStarted = false
+
+                FallbackToLobby(
+                    Cycle,
+                    "Reconnect cycle watchdog timeout",
+                    true
+                )
+            end
+        end
+    end)
 
 end)()
 
@@ -3917,6 +4800,10 @@ FarmTab:CreateToggle({
         NormalLastFallbackAt = 0,
         NormalReentryToken = 0,
         NormalFallbackReason = "Idle",
+
+        -- Cached vertical offsets keep Above/Below anchored to one stable
+        -- head/feet height instead of following animated limbs every frame.
+        VerticalFarmOffsets = {},
     }
 
     GENV.__AZ_FARM_RESCUE_RUNTIME = Rescue
@@ -4884,11 +5771,109 @@ FarmTab:CreateToggle({
                     30
                 )
 
-            if Settings.FarmPosition == "Above" then
-                return EnemyRoot.CFrame * CFrame.new(0, Distance, 0)
+            -- Above/Below use the enemy root as the movement anchor. Head and
+            -- feet offsets are sampled once per enemy so attack animations do
+            -- not make the player bob up/down. A fixed world-Z roll reference
+            -- keeps the character truly horizontal without spinning when the
+            -- enemy turns.
+            if Settings.FarmPosition == "Above"
+                or Settings.FarmPosition == "Below"
+            then
+                local Model = EnemyRoot.Parent
+                local Offsets =
+                    Model
+                    and Rescue.VerticalFarmOffsets[Model]
+                    or nil
 
-            elseif Settings.FarmPosition == "Below" then
-                return EnemyRoot.CFrame * CFrame.new(0, -Distance, 0)
+                if not Offsets then
+                    local HeadOffset = 3
+                    local FeetOffset = 3
+
+                    if Model then
+                        local Head = Model:FindFirstChild("Head")
+
+                        if Head and Head:IsA("BasePart") then
+                            HeadOffset = math.clamp(
+                                Head.Position.Y - EnemyRoot.Position.Y,
+                                1.5,
+                                12
+                            )
+                        end
+
+                        local LowestY = math.huge
+
+                        for _, Name in ipairs({
+                            "LeftFoot",
+                            "RightFoot",
+                            "Left Foot",
+                            "Right Foot",
+                            "Left Leg",
+                            "Right Leg",
+                        }) do
+                            local Part = Model:FindFirstChild(Name)
+
+                            if Part and Part:IsA("BasePart") then
+                                local Bottom =
+                                    Part.Position.Y
+                                    - Part.Size.Y / 2
+
+                                if Bottom < LowestY then
+                                    LowestY = Bottom
+                                end
+                            end
+                        end
+
+                        if LowestY < math.huge then
+                            FeetOffset = math.clamp(
+                                EnemyRoot.Position.Y - LowestY,
+                                1.5,
+                                12
+                            )
+                        end
+                    end
+
+                    Offsets = {
+                        Head = HeadOffset,
+                        Feet = FeetOffset,
+                    }
+
+                    if Model then
+                        Rescue.VerticalFarmOffsets[Model] = Offsets
+                    end
+                end
+
+                local StableRoll = Vector3.new(0, 0, -1)
+                local RootPosition = EnemyRoot.Position
+
+                if Settings.FarmPosition == "Above" then
+                    local Aim =
+                        RootPosition
+                        + Vector3.new(0, Offsets.Head, 0)
+
+                    local Position =
+                        Aim
+                        + Vector3.new(0, Distance, 0)
+
+                    return CFrame.lookAt(
+                        Position,
+                        Aim,
+                        StableRoll
+                    )
+                end
+
+                local Aim =
+                    RootPosition
+                    - Vector3.new(0, Offsets.Feet, 0)
+
+                local Position =
+                    Aim
+                    - Vector3.new(0, Distance, 0)
+
+                return CFrame.lookAt(
+                    Position,
+                    Aim,
+                    StableRoll
+                )
             end
 
             return EnemyRoot.CFrame * CFrame.new(0, 0, Distance)
@@ -5693,6 +6678,62 @@ FarmTab:CreateToggle({
                 )
 
             if not Goal then
+                return
+            end
+
+            local HorizontalHold =
+                Settings.FarmPosition == "Above"
+                or Settings.FarmPosition == "Below"
+
+            if HorizontalHold then
+                local HoldDistance =
+                    (
+                        Root.Position
+                        - Goal.Position
+                    ).Magnitude
+
+                -- Teleport mode still gets into range immediately when far
+                -- away, but once in range it becomes a damped horizontal hold
+                -- instead of hard-setting CFrame every heartbeat. Tween mode
+                -- uses its normal travel speed while far away and the same
+                -- damped hold once close. No extra UI sliders are needed.
+                if Settings.FarmMethod ~= "Tween"
+                    and HoldDistance > 24
+                then
+                    Root.CFrame = Goal
+
+                else
+                    local Alpha
+
+                    if Settings.FarmMethod == "Tween"
+                        and HoldDistance > 12
+                    then
+                        Alpha = math.clamp(
+                            (135 * DeltaTime)
+                            / math.max(HoldDistance, 0.001),
+                            0,
+                            1
+                        )
+                    else
+                        Alpha = math.clamp(
+                            1 - math.exp(-20 * DeltaTime),
+                            0,
+                            1
+                        )
+                    end
+
+                    Root.CFrame =
+                        Root.CFrame:Lerp(
+                            Goal,
+                            Alpha
+                        )
+                end
+
+                -- Kill leftover physics motion that otherwise makes a
+                -- horizontal character bounce, roll, or wobble in place.
+                Root.AssemblyLinearVelocity = Vector3.zero
+                Root.AssemblyAngularVelocity = Vector3.zero
+
                 return
             end
 
@@ -11989,6 +13030,131 @@ end
                     end
                 end,
             })
+        end)()
+
+
+        -- Auto reconnect is separate from Anti AFK: Anti AFK handles
+        -- inactivity, while reconnect handles actual Roblox network/server drops.
+        ;(function()
+
+            SettingsTab:CreateToggle({
+                name = "Auto Reconnect",
+                flag = "AutoReconnect",
+                description = "Mobile-safe reconnect: retries the current server twice for network drops, then falls back to the lobby.",
+                value = Settings.AutoReconnect,
+                callback = function(Value)
+
+                    Settings.AutoReconnect =
+                        Value == true
+
+                    if type(
+                        Settings.PersistInterfaceSettings
+                    ) == "function"
+                    then
+                        Settings.PersistInterfaceSettings()
+                    end
+
+                    Window:Toast({
+                        title = Settings.AutoReconnect
+                            and "Auto Reconnect enabled"
+                            or "Auto Reconnect disabled",
+                        subtitle = Settings.AutoReconnect
+                            and "Same-server retry + lobby fallback armed."
+                            or "Disconnect recovery is off.",
+                        position = "Top",
+                    })
+                end,
+            })
+
+
+            SettingsTab:CreateSlider({
+                name = "Reconnect Delay",
+                flag = "ReconnectDelay",
+                range = { 2, 30 },
+                increment = 1,
+                value = math.clamp(
+                    tonumber(Settings.ReconnectDelay) or 5,
+                    2,
+                    30
+                ),
+                suffix = "s",
+                callback = function(Value)
+
+                    Settings.ReconnectDelay =
+                        math.clamp(
+                            tonumber(Value) or 5,
+                            2,
+                            30
+                        )
+
+                    if type(
+                        Settings.PersistInterfaceSettings
+                    ) == "function"
+                    then
+                        Settings.PersistInterfaceSettings()
+                    end
+                end,
+            })
+
+
+            SettingsTab:CreateButton({
+                name = "Reconnect Now",
+                description = "Manually test the reconnect flow without waiting for a disconnect.",
+                callback = function()
+
+                    local Reconnect =
+                        GENV.__AZ_RECONNECT_NOW
+
+                    if type(Reconnect) == "function" then
+                        Window:Toast({
+                            title = "Reconnect requested",
+                            subtitle = "Saving settings and attempting the current server.",
+                            position = "Top",
+                        })
+
+                        Reconnect()
+                    else
+                        Window:Notify({
+                            title = "Reconnect unavailable",
+                            content = "The reconnect runtime is not active yet.",
+                            duration = 5,
+                        })
+                    end
+                end,
+            })
+
+
+            SettingsTab:CreateButton({
+                name = "Print Reconnect Status",
+                description = "Print the reconnect runtime state to the Delta console.",
+                callback = function()
+
+                    local Getter =
+                        GENV.__AZ_RECONNECT_GET_STATUS
+
+                    if type(Getter) ~= "function" then
+                        warn(
+                            "[Anime Zero][Reconnect] Status runtime unavailable"
+                        )
+                        return
+                    end
+
+                    local Status =
+                        Getter()
+
+                    print(
+                        "[Anime Zero][Reconnect] Status | state:",
+                        tostring(Status.state),
+                        "| busy:",
+                        tostring(Status.busy),
+                        "| attempts:",
+                        tostring(Status.attempts),
+                        "| reason:",
+                        tostring(Status.reason)
+                    )
+                end,
+            })
+
         end)()
 
 
@@ -27949,33 +29115,100 @@ local function GetEnemyFarmCFrame(
     end
 
 
-    if Settings.FarmPosition
-        == "Above"
+    if Settings.FarmPosition == "Above"
+        or Settings.FarmPosition == "Below"
     then
 
-        local Position =
-            Visual.HeadPosition
-            + Vector3.new(
+        -- Cache one head/feet offset per enemy. Using the animated Head/Feet
+        -- positions directly made Above/Below inherit animation bobbing. The
+        -- enemy root is much more stable, so only the first relative offset is
+        -- kept and all later movement follows the root.
+        GENV.__AZ_FARM_EXT.VerticalFarmOffsets =
+            GENV.__AZ_FARM_EXT.VerticalFarmOffsets
+            or {}
+
+
+        local OffsetKey =
+            tostring(EnemyId)
+
+
+        local Offsets =
+            GENV.__AZ_FARM_EXT.VerticalFarmOffsets[OffsetKey]
+
+
+        if not Offsets then
+
+            Offsets = {
+                Head = math.clamp(
+                    Visual.HeadPosition.Y
+                    - Visual.RootPosition.Y,
+                    1.5,
+                    12
+                ),
+
+                Feet = math.clamp(
+                    Visual.RootPosition.Y
+                    - Visual.FeetPosition.Y,
+                    1.5,
+                    12
+                ),
+            }
+
+
+            GENV.__AZ_FARM_EXT.VerticalFarmOffsets[OffsetKey] =
+                Offsets
+        end
+
+
+        -- Fixed horizontal roll reference. Enemy facing is intentionally NOT
+        -- used here because enemies turning would spin/roll the player.
+        local StableRoll =
+            Vector3.new(
                 0,
-                Distance,
+                0,
+                -1
+            )
+
+
+        if Settings.FarmPosition == "Above" then
+
+            local Aim =
+                Visual.RootPosition
+                + Vector3.new(
+                    0,
+                    Offsets.Head,
+                    0
+                )
+
+
+            local Position =
+                Aim
+                + Vector3.new(
+                    0,
+                    Distance,
+                    0
+                )
+
+
+            return CFrame.lookAt(
+                Position,
+                Aim,
+                StableRoll
+            )
+        end
+
+
+        local Aim =
+            Visual.RootPosition
+            - Vector3.new(
+                0,
+                Offsets.Feet,
                 0
             )
 
 
-        return CFrame.lookAt(
-            Position,
-            Visual.HeadPosition,
-            Forward
-        )
-    end
-
-
-    if Settings.FarmPosition
-        == "Below"
-    then
-
         local Position =
-            Visual.FeetPosition
+            Aim
             - Vector3.new(
                 0,
                 Distance,
@@ -27985,8 +29218,8 @@ local function GetEnemyFarmCFrame(
 
         return CFrame.lookAt(
             Position,
-            Visual.FeetPosition,
-            Forward
+            Aim,
+            StableRoll
         )
     end
 
@@ -30457,6 +31690,88 @@ local function ApplyFarmMovement(
         GENV.__AZ_FARM_EXT.EnemyMoveTarget = nil
         GENV.__AZ_FARM_EXT.EnemyMoveBestDistance = nil
         GENV.__AZ_FARM_EXT.EnemyMoveLastProgressAt = 0
+    end
+
+
+    -- Above/Below use one damped movement path regardless of the selected
+    -- method once close to the target. This prevents physics + repeated hard
+    -- snaps from making the horizontal hold bounce or glitch. Farm Distance is
+    -- still the existing single distance control; no new sliders are added.
+    if CurrentFarmMode == "Enemy"
+        and (
+            Settings.FarmPosition == "Above"
+            or Settings.FarmPosition == "Below"
+        )
+    then
+
+        local HoldDistance =
+            (
+                Root.Position
+                - DesiredFarmCFrame.Position
+            ).Magnitude
+
+
+        if Settings.FarmMethod == "Teleport"
+            and HoldDistance > 24
+        then
+
+            Root.CFrame =
+                DesiredFarmCFrame
+
+        else
+
+            local HoldAlpha
+
+
+            if Settings.FarmMethod == "Tween"
+                and HoldDistance > 12
+            then
+
+                HoldAlpha =
+                    math.clamp(
+                        (TWEEN_SPEED * DeltaTime)
+                        / math.max(
+                            HoldDistance,
+                            0.001
+                        ),
+                        0,
+                        1
+                    )
+
+            else
+
+                HoldAlpha =
+                    math.clamp(
+                        1
+                        - math.exp(
+                            -20 * DeltaTime
+                        ),
+                        0,
+                        1
+                    )
+            end
+
+
+            Root.CFrame =
+                Root.CFrame:Lerp(
+                    DesiredFarmCFrame,
+                    HoldAlpha
+                )
+        end
+
+
+        Root.AssemblyLinearVelocity =
+            Vector3.zero
+
+        Root.AssemblyAngularVelocity =
+            Vector3.zero
+
+
+        TeleportFollowingEnemy =
+            true
+
+
+        return
     end
 
 
