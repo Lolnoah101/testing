@@ -524,6 +524,9 @@ end)()
     local DiskFile =
         "AnimeZero/webhook_settings.json"
 
+    local TeleportService = game:GetService("TeleportService")
+    local EnabledTeleportKey = "__AZ_WEBHOOK_ENABLED_V1"
+
 
     local function ReadSaved()
 
@@ -550,9 +553,20 @@ end)()
     end
 
 
-    local Saved =
-        ReadSaved()
+    local Saved = ReadSaved()
 
+    if type(Saved) ~= "table" then
+        Saved = GENV.__AZ_WEBHOOK_SETTINGS_LOCAL
+    end
+
+    if type(Saved) ~= "table" then
+        local Good, EnabledSaved = pcall(function()
+            return TeleportService:GetTeleportSetting(EnabledTeleportKey)
+        end)
+        if Good and type(EnabledSaved) == "table" then
+            Saved = { Enabled = EnabledSaved.Enabled == true }
+        end
+    end
 
     if type(Saved) == "table" then
 
@@ -568,20 +582,27 @@ end)()
     Settings.PersistWebhookSettings =
         function()
 
-            if type(writefile) ~= "function" then
-                return false
-            end
-
-
-            if makefolder then
-                pcall(makefolder, "AnimeZero")
-            end
-
-
             local Data = {
                 Enabled = Settings.WebhookEnabled == true,
                 URL = tostring(Settings.WebhookURL or ""),
             }
+
+            GENV.__AZ_WEBHOOK_SETTINGS_LOCAL = Data
+            -- Only the non-secret enabled flag is sent via Roblox teleport settings.
+            pcall(function()
+                TeleportService:SetTeleportSetting(
+                    EnabledTeleportKey,
+                    { Enabled = Data.Enabled }
+                )
+            end)
+
+            if type(writefile) ~= "function" then
+                return false
+            end
+
+            if makefolder then
+                pcall(makefolder, "AnimeZero")
+            end
 
 
             local Success =
@@ -6141,6 +6162,15 @@ FarmTab:CreateToggle({
                 return
             end
 
+            if type(GENV.__AZ_WEBHOOK_BEFORE_END_ACTION) == "function" then
+                local GuardOK, Ready = pcall(GENV.__AZ_WEBHOOK_BEFORE_END_ACTION)
+                if GuardOK and Ready == false then
+                    Rescue.EndActionState = "WebhookPending"
+                    Rescue.NextEndAction = Now + 0.30
+                    return
+                end
+            end
+
             Rescue.NextEndAction = Now + 1.00
             Rescue.EndActionState = "RetrySent"
 
@@ -8015,6 +8045,11 @@ end)()
                     ReplicatedStorageService
                         :FindFirstChild("global")
 
+                -- Account data is in ReplicatedStorage.global.stores,
+                -- while the run state is in ReplicatedStorage.game.stores.
+                local GlobalStores =
+                    Global and Global:FindFirstChild("stores")
+
                 local Utils =
                     Global
                     and Global:FindFirstChild("utils")
@@ -8032,9 +8067,10 @@ end)()
                     and Assets:FindFirstChild("config")
 
 
-                if not Stores
-                    or not Stores:FindFirstChild("accountNamespace")
-                    or not Stores:FindFirstChild("runStore")
+                -- Account stats can load in the lobby too. A run store is
+                -- only required for finished-match rewards inside a map.
+                if not GlobalStores
+                    or not GlobalStores:FindFirstChild("accountNamespace")
                     or not Utils
                     or not Utils:FindFirstChild("levelProgression")
                 then
@@ -8049,13 +8085,12 @@ end)()
                     pcall(function()
                         Result.AccountNamespace =
                             require(
-                                Stores.accountNamespace
+                                GlobalStores.accountNamespace
                             )
 
-                        Result.RunStoreModule =
-                            require(
-                                Stores.runStore
-                            )
+                        if Stores and Stores:FindFirstChild("runStore") then
+                            Result.RunStoreModule = require(Stores.runStore)
+                        end
 
                         Result.LevelProgression =
                             require(
@@ -8509,10 +8544,10 @@ end)()
                 }
 
 
-                if IsTest then
+                if IsTest and not Participant then
                     RewardLines = {
-                        "Webhook connection: OK",
-                        "Match rewards will appear here.",
+                        "Test delivery successful",
+                        "No live match results in this place",
                     }
                 end
 
@@ -8544,9 +8579,7 @@ end)()
                         {
                             name = "Special Rewards:",
                             value = CodeBlock(
-                                IsTest
-                                and {"No Special Rewards"}
-                                or GetSpecialRewards(Reward)
+                                GetSpecialRewards(Reward)
                             ),
                             inline = true,
                         },
@@ -8647,124 +8680,189 @@ end)()
             end
 
 
-            task.spawn(function()
+            -- Runtime-level state: a single dispatch path is shared by both
+            -- the watcher and the end-action vote guard.
+            local LastSentKey = ReadLastMatchKey()
+            local LastNotice = nil
+            local LastNoticeAt = 0
+            local LastFailureAt = 0
 
-                local LastSentKey =
-                    ReadLastMatchKey()
+            local function Notice(Status)
+                local Now = os.clock()
+                if Status ~= LastNotice or Now - LastNoticeAt >= 30 then
+                    LastNotice = Status
+                    LastNoticeAt = Now
+                    print("[Anime Zero][Webhook] " .. tostring(Status))
+                end
+            end
 
+            local function ReadCompletedResult()
+                local State = GetRunState()
+                if not State then
+                    return nil, nil, nil, "Waiting for run modules"
+                end
 
-                while Runtime.Active do
+                local Participant = GetParticipant(State)
+                if not Participant then
+                    return nil, nil, nil, "Waiting for player result data"
+                end
 
-                    task.wait(0.5)
+                local Status = tostring(ReadLeaf(Participant.status) or "active")
+                if Status == "active" then
+                    return nil, nil, nil, "Watching active match"
+                end
 
+                local FinishedAt = ReadLeaf(State.finishedAt)
+                    or ReadLeaf(Participant.finishedAt)
+                    or ReadLeaf(State.resultEndsAt)
 
-                    if not Settings.WebhookEnabled
-                        or not IsDiscordWebhook(
-                            Settings.WebhookURL
-                        )
-                    then
-                        continue
-                    end
+                if FinishedAt == nil then
+                    return nil, nil, nil, "Waiting for final result"
+                end
 
+                local RunStartedAt = tonumber(ReadLeaf(State.startedAt))
+                if not RunStartedAt or RunStartedAt <= 0 then
+                    RunStartedAt = tonumber(ReadLeaf(Participant.joinedAt))
+                end
+                if not RunStartedAt or RunStartedAt <= 0 then
+                    RunStartedAt = tonumber(FinishedAt) or 0
+                end
 
-                    local State =
-                        GetRunState()
+                local Key = tostring(game.PlaceId)
+                    .. ":" .. tostring(RunStartedAt)
+                    .. ":" .. tostring(Status)
 
-                    local Participant =
-                        GetParticipant(State)
+                return State, Participant, Key, Status
+            end
 
+            local function BeginReport(Participant, Key, Status)
+                if Key == LastSentKey or Runtime.PendingKey == Key then
+                    return
+                end
 
-                    if not Participant then
-                        continue
-                    end
+                local Now = os.clock()
+                if Runtime.LastAttemptKey == Key
+                    and Now - (Runtime.LastAttemptAt or 0) < 3
+                then
+                    return
+                end
 
+                Runtime.LastAttemptKey = Key
+                Runtime.LastAttemptAt = Now
+                Runtime.PendingKey = Key
+                Runtime.PendingAt = Now
+                Notice("Match " .. Status .. " detected; sending report")
 
-                    local Status =
-                        tostring(
-                            ReadLeaf(Participant.status)
-                            or "active"
-                        )
-
-                    local FinishedAt =
-                        ReadLeaf(Participant.finishedAt)
-
-
-                    if not FinishedAt
-                        and State
-                        and State.finishedAt
-                    then
-                        FinishedAt =
-                            ReadLeaf(State.finishedAt)
-                    end
-
-
-                    if Status == "active"
-                        or FinishedAt == nil
-                    then
-                        continue
-                    end
-
-
-                    local Key =
-                        tostring(game.PlaceId)
-                        .. ":"
-                        .. tostring(FinishedAt)
-                        .. ":"
-                        .. Status
-
-
-                    if Key == LastSentKey then
-                        continue
-                    end
-
-
-                    local Now =
-                        os.clock()
-
-
-                    if Runtime.LastAttemptKey == Key
-                        and Now - Runtime.LastAttemptAt < 4
-                    then
-                        continue
-                    end
-
-
-                    Runtime.LastAttemptKey = Key
-                    Runtime.LastAttemptAt = Now
-
-
-                    task.wait(0.75)
-
-
-                    if not Runtime.Active then
-                        break
-                    end
-
-
-                    local Success,
-                        Message =
-                        Send(
-                            Participant,
-                            false
-                        )
-
-
-                    if Success then
-
+                task.spawn(function()
+                    -- Give payout totals a short replication beat while the
+                    -- end-action guard keeps the result store available.
+                    task.wait(0.35)
+                    local Ok, Sent, Message = pcall(Send, Participant, false)
+                    if Ok and Sent then
                         LastSentKey = Key
                         SaveLastMatchKey(Key)
-
-                        print(
-                            "[Anime Zero] Match webhook sent |",
-                            Status
-                        )
-
+                        Notice("Match report sent to Discord")
                     else
+                        if os.clock() - LastFailureAt > 2 then
+                            LastFailureAt = os.clock()
+                            warn(
+                                "[Anime Zero][Webhook] Match report failed:",
+                                Ok and tostring(Message) or tostring(Sent)
+                            )
+                        end
+                    end
+                    if Runtime.PendingKey == Key then
+                        Runtime.PendingKey = nil
+                    end
+                end)
+            end
 
-                        warn(
-                            "[Anime Zero][Webhook] Send failed:",
-                            tostring(Message)
-                        )
+            local function PollResult()
+                if not Settings.WebhookEnabled then
+                    Notice("Disabled (test button bypasses this switch)")
+                    return true
+                end
+                if not IsDiscordWebhook(Settings.WebhookURL) then
+                    Notice("Enabled, but Discord URL is missing or invalid")
+                    return true
+                end
+
+                local State, Participant, Key, Status = ReadCompletedResult()
+                if not Key then
+                    Notice(Status)
+                    return true
+                end
+                if Key == LastSentKey then
+                    Notice("Already reported this match")
+                    return true
+                end
+
+                BeginReport(Participant, Key, Status)
+                return false
+            end
+
+            -- Both normal and Raid end-action loops call this BEFORE voting
+            -- Retry / Next / Leave. It delays travel only briefly and never
+            -- blocks a run indefinitely if Discord has an outage.
+            GENV.__AZ_WEBHOOK_BEFORE_END_ACTION = function()
+                if not Runtime.Active
+                    or not Settings.WebhookEnabled
+                    or not IsDiscordWebhook(Settings.WebhookURL)
+                then
+                    return true
+                end
+
+                local State, Participant, Key, Status = ReadCompletedResult()
+                if not Key then
+                    return true
+                end
+                if Key == LastSentKey then
+                    return true
+                end
+
+                if Runtime.VoteHoldKey ~= Key then
+                    Runtime.VoteHoldKey = Key
+                    Runtime.VoteHoldAt = os.clock()
+                end
+
+                BeginReport(Participant, Key, Status)
+
+                if os.clock() - Runtime.VoteHoldAt >= 5 then
+                    Notice("Report timeout; allowing game retry/leave")
+                    return true
+                end
+
+                return false
+            end
+
+            -- Manually send actual finished-match data while its result store
+            -- is still available; unlike the ordinary connection test.
+            GENV.__AZ_WEBHOOK_SEND_RESULT = function()
+                local State, Participant, Key, Status = ReadCompletedResult()
+                if not Key then
+                    return false, "No finished match data is available: " .. tostring(Status)
+                end
+                local Ok, Sent, Message = pcall(Send, Participant, false)
+                if Ok and Sent then
+                    LastSentKey = Key
+                    SaveLastMatchKey(Key)
+                    Notice("Match report sent manually")
+                    return true, tostring(Message)
+                end
+                return false, Ok and tostring(Message) or tostring(Sent)
+            end
+
+            Notice("Reporter started; waiting for settings and match data")
+            task.spawn(function()
+                while Runtime.Active do
+                    task.wait(0.15)
+                    local Good, Err = pcall(PollResult)
+                    if not Good then
+                        local Now = os.clock()
+                        if Now - LastFailureAt >= 8 then
+                            LastFailureAt = Now
+                            warn("[Anime Zero][Webhook] Watcher error:", tostring(Err))
+                        end
                     end
                 end
             end)
@@ -11606,6 +11704,29 @@ end)()
                 end,
             })
 
+            SettingsTab:CreateButton({
+                name = "Send Available Match Results",
+                callback = function()
+                    local Sender = GENV.__AZ_WEBHOOK_SEND_RESULT
+                    if type(Sender) ~= "function" then
+                        Window:Toast({
+                            title = "Match reporter unavailable",
+                            subtitle = "Wait for the script to finish initializing.",
+                            position = "Top",
+                        })
+                        return
+                    end
+                    task.spawn(function()
+                        local Ok, Sent, Message = pcall(Sender)
+                        Window:Toast({
+                            title = Ok and Sent and "Match report sent" or "No report sent",
+                            subtitle = tostring(Ok and Message or Sent),
+                            position = "Top",
+                        })
+                    end)
+                end,
+            })
+
             end)
 
 
@@ -12149,6 +12270,8 @@ end
                 end
 
                 GENV.__AZ_WEBHOOK_SEND_TEST = nil
+                GENV.__AZ_WEBHOOK_SEND_RESULT = nil
+                GENV.__AZ_WEBHOOK_BEFORE_END_ACTION = nil
 
 
                 -- Stop Anti-AFK.
@@ -25927,13 +26050,18 @@ local RunStore =
                     end)
 
 
-                    local Fired =
-                        pcall(function()
+                    local Allowed = true
+                    if type(GENV.__AZ_WEBHOOK_BEFORE_END_ACTION) == "function" then
+                        local GuardOK, Ready = pcall(GENV.__AZ_WEBHOOK_BEFORE_END_ACTION)
+                        Allowed = not GuardOK or Ready ~= false
+                    end
 
-                            RunPackets
-                                .endAction
-                                :fire(Action)
+                    local Fired = false
+                    if Allowed then
+                        Fired = pcall(function()
+                            RunPackets.endAction:fire(Action)
                         end)
+                    end
 
 
                     if Fired then
