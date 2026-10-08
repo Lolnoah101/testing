@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + STABLE HORIZONTAL HOLD + SHADOW GATE RAID
+--// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + RAID DODGE PRIORITY + SHADOW GATE RAID
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -4848,6 +4848,20 @@ FarmTab:CreateToggle({
         SpikeListenerCleanup = nil,
         LastDodgeAt = 0,
 
+        -- Dodge lock. Once an AOE forces us away from the boss, farming is
+        -- suspended until the telegraph actually clears. This prevents the
+        -- old dodge -> farm boss -> dodge loop every other heartbeat.
+        RaidDodgeActive = false,
+        RaidDodgeGoal = nil,
+        RaidDodgeHoldUntil = 0,
+        RaidDodgeReason = "Idle",
+
+        -- Above/Below must own character rotation while active. Position is
+        -- smoothed separately, but orientation is applied exactly so Roblox's
+        -- humanoid upright correction cannot leave the avatar merely leaning.
+        HorizontalHoldActive = false,
+        HorizontalAutoRotateWas = nil,
+
         -- Story / Endless rescue progression state. This is only used when the
         -- large legacy engine is late/broken, or as a rubble/area assist while
         -- that engine is active. It never chases enemies when the full engine
@@ -5839,6 +5853,62 @@ FarmTab:CreateToggle({
         end
 
 
+        Rescue.SetHorizontalHoldActive = function(Active)
+            local Character = LocalPlayerObject.Character
+            local Humanoid = Character
+                and Character:FindFirstChildOfClass("Humanoid")
+                or nil
+
+            if Active then
+                if not Rescue.HorizontalHoldActive then
+                    Rescue.HorizontalAutoRotateWas =
+                        Humanoid and Humanoid.AutoRotate or nil
+                end
+
+                Rescue.HorizontalHoldActive = true
+
+                if Humanoid then
+                    Humanoid.AutoRotate = false
+                end
+            else
+                if Rescue.HorizontalHoldActive
+                    and Humanoid
+                    and Rescue.HorizontalAutoRotateWas ~= nil
+                then
+                    Humanoid.AutoRotate = Rescue.HorizontalAutoRotateWas
+                end
+
+                Rescue.HorizontalHoldActive = false
+                Rescue.HorizontalAutoRotateWas = nil
+            end
+        end
+
+
+        -- Build an exact 90-degree horizontal body orientation. The avatar's
+        -- local forward axis points straight down/up while its body-up axis is
+        -- parallel to the floor. Using fromMatrix avoids lookAt's near-vertical
+        -- interpolation ambiguity and never follows enemy yaw.
+        Rescue.MakeHorizontalFarmCFrame = function(Position, LookDown)
+            if LookDown then
+                -- Right = +X, Up = -Z, Back = +Y -> LookVector = -Y.
+                return CFrame.fromMatrix(
+                    Position,
+                    Vector3.xAxis,
+                    -Vector3.zAxis,
+                    Vector3.yAxis
+                )
+            end
+
+            -- Right = +X, Up = +Z, Back = -Y -> LookVector = +Y.
+            return CFrame.fromMatrix(
+                Position,
+                Vector3.xAxis,
+                Vector3.zAxis,
+                -Vector3.yAxis
+            )
+        end
+
+
         local function DesiredEnemyCFrame2(EnemyRoot)
             if not EnemyRoot then
                 return nil
@@ -5853,9 +5923,8 @@ FarmTab:CreateToggle({
 
             -- Above/Below use the enemy root as the movement anchor. Head and
             -- feet offsets are sampled once per enemy so attack animations do
-            -- not make the player bob up/down. A fixed world-Z roll reference
-            -- keeps the character truly horizontal without spinning when the
-            -- enemy turns.
+            -- not make the player bob up/down. An explicit orthonormal basis keeps the character exactly 90 degrees
+            -- horizontal without spinning when the enemy turns.
             if Settings.FarmPosition == "Above"
                 or Settings.FarmPosition == "Below"
             then
@@ -5922,7 +5991,6 @@ FarmTab:CreateToggle({
                     end
                 end
 
-                local StableRoll = Vector3.new(0, 0, -1)
                 local RootPosition = EnemyRoot.Position
 
                 if Settings.FarmPosition == "Above" then
@@ -5934,10 +6002,9 @@ FarmTab:CreateToggle({
                         Aim
                         + Vector3.new(0, Distance, 0)
 
-                    return CFrame.lookAt(
+                    return Rescue.MakeHorizontalFarmCFrame(
                         Position,
-                        Aim,
-                        StableRoll
+                        true
                     )
                 end
 
@@ -5949,10 +6016,9 @@ FarmTab:CreateToggle({
                     Aim
                     - Vector3.new(0, Distance, 0)
 
-                return CFrame.lookAt(
+                return Rescue.MakeHorizontalFarmCFrame(
                     Position,
-                    Aim,
-                    StableRoll
+                    false
                 )
             end
 
@@ -6353,33 +6419,93 @@ FarmTab:CreateToggle({
         end
 
 
-        Rescue.GetRaidDodgeGoal = function(Root, Area)
+        Rescue.GetRaidDodgeGoal = function(Root, Area, FarmGoal)
             if Settings.AutoDodgeRaidAOE == false
                 or not GENV.__AZ_IS_RAID_MODE()
                 or not Root
                 or not Area
             then
                 Rescue.RaidDodgeState = "Idle"
+                Rescue.RaidDodgeActive = false
+                Rescue.RaidDodgeGoal = nil
                 return nil
             end
 
             local Threats, InDanger =
                 Rescue.CollectRaidThreats(Root.Position)
 
-            if not InDanger or #Threats == 0 then
+            local Now = os.clock()
+            local FarmDanger = false
+
+            -- The old detector only checked the player's CURRENT position.
+            -- After one dodge frame the player was safe, so Auto Farm pulled
+            -- them straight back onto the boss/AOE. Also test the farm goal.
+            if FarmGoal and #Threats > 0 then
+                FarmDanger =
+                    not Rescue.PositionSafeFromThreats(
+                        FarmGoal.Position,
+                        Threats
+                    )
+            end
+
+            -- Once a dodge starts, keep the safe point as exclusive movement
+            -- ownership while the telegraph exists. A short clear hold absorbs
+            -- one-frame indicator flicker before Auto Farm is allowed back in.
+            if Rescue.RaidDodgeActive then
+                if #Threats == 0 then
+                    if Rescue.RaidDodgeGoal
+                        and Now < (Rescue.RaidDodgeHoldUntil or 0)
+                    then
+                        Rescue.RaidDodgeState = "ClearHold"
+                        return Rescue.RaidDodgeGoal
+                    end
+
+                    Rescue.RaidDodgeActive = false
+                    Rescue.RaidDodgeGoal = nil
+                    Rescue.RaidDodgeReason = "Cleared"
+                    Rescue.RaidDodgeState = "Safe"
+                    return nil
+                end
+
+                if Rescue.RaidDodgeGoal
+                    and Rescue.PointInsideRaidArea(
+                        Rescue.RaidDodgeGoal.Position,
+                        Area
+                    )
+                    and Rescue.PositionSafeFromThreats(
+                        Rescue.RaidDodgeGoal.Position,
+                        Threats
+                    )
+                then
+                    Rescue.RaidDodgeHoldUntil = Now + 0.55
+                    Rescue.RaidDodgeState =
+                        "Locked " .. tostring(Rescue.RaidDodgeReason)
+                    return Rescue.RaidDodgeGoal
+                end
+            end
+
+            if (not InDanger and not FarmDanger) or #Threats == 0 then
                 Rescue.RaidDodgeState = "Safe"
                 return nil
             end
 
             local Closest = nil
             local ClosestDistance = math.huge
+            local Origin = Root.Position
+
+            -- If the boss-farm point is what's dangerous, choose a direction
+            -- away from the threat around that point instead of waiting until
+            -- the player has already been pulled into it.
+            local ThreatReference =
+                (FarmDanger and FarmGoal and FarmGoal.Position)
+                or Root.Position
 
             for _, Threat in ipairs(Threats) do
                 local Distance =
                     Vector3.new(
-                        Root.Position.X - Threat.Position.X,
+                        ThreatReference.X - Threat.Position.X,
                         0,
-                        Root.Position.Z - Threat.Position.Z
+                        ThreatReference.Z - Threat.Position.Z
                     ).Magnitude
 
                 if Distance < ClosestDistance then
@@ -6393,9 +6519,9 @@ FarmTab:CreateToggle({
             if Closest then
                 local Delta =
                     Vector3.new(
-                        Root.Position.X - Closest.Position.X,
+                        ThreatReference.X - Closest.Position.X,
                         0,
-                        Root.Position.Z - Closest.Position.Z
+                        ThreatReference.Z - Closest.Position.Z
                     )
 
                 if Delta.Magnitude > 0.05 then
@@ -6423,8 +6549,7 @@ FarmTab:CreateToggle({
                             :VectorToWorldSpace(Away)
 
                     local Candidate =
-                        Root.Position
-                        + Direction * Distance
+                        Origin + Direction * Distance
 
                     if Rescue.PointInsideRaidArea(Candidate, Area)
                         and Rescue.PositionSafeFromThreats(
@@ -6432,15 +6557,20 @@ FarmTab:CreateToggle({
                             Threats
                         )
                     then
-                        Rescue.RaidDodgeState =
+                        local Reason =
                             Closest and Closest.Kind or "AOE"
 
-                        Rescue.LastDodgeAt = os.clock()
+                        local Goal = CFrame.new(Candidate)
+                            * Root.CFrame.Rotation
 
-                        return CFrame.lookAt(
-                            Candidate,
-                            Candidate + Root.CFrame.LookVector
-                        )
+                        Rescue.RaidDodgeActive = true
+                        Rescue.RaidDodgeGoal = Goal
+                        Rescue.RaidDodgeReason = Reason
+                        Rescue.RaidDodgeState = Reason
+                        Rescue.RaidDodgeHoldUntil = Now + 0.75
+                        Rescue.LastDodgeAt = Now
+
+                        return Goal
                     end
                 end
             end
@@ -6456,8 +6586,15 @@ FarmTab:CreateToggle({
                     Threats
                 )
             then
+                CenterGoal = CFrame.new(CenterGoal.Position)
+                    * Root.CFrame.Rotation
+
+                Rescue.RaidDodgeActive = true
+                Rescue.RaidDodgeGoal = CenterGoal
+                Rescue.RaidDodgeReason = "CenterFallback"
                 Rescue.RaidDodgeState = "CenterFallback"
-                Rescue.LastDodgeAt = os.clock()
+                Rescue.RaidDodgeHoldUntil = Now + 0.75
+                Rescue.LastDodgeAt = Now
                 return CenterGoal
             end
 
@@ -6684,7 +6821,18 @@ FarmTab:CreateToggle({
                 (IsRaid and Settings.AutoRaidFarm == true)
                 or (not IsRaid and Settings.AutoFarm == true)
 
+            local WantsHorizontalHold =
+                FarmEnabled
+                and (
+                    Settings.FarmPosition == "Above"
+                    or Settings.FarmPosition == "Below"
+                )
+
+            Rescue.SetHorizontalHoldActive(WantsHorizontalHold)
+
             if not FarmEnabled or not Alive2() then
+                Rescue.RaidDodgeActive = false
+                Rescue.RaidDodgeGoal = nil
                 return
             end
 
@@ -6697,6 +6845,11 @@ FarmTab:CreateToggle({
             if not Root then
                 return
             end
+
+            local EnemyFarmGoal =
+                EnemyRoot
+                and DesiredEnemyCFrame2(EnemyRoot)
+                or nil
 
             if not IsRaid then
                 Rescue.RaidState = "Inactive"
@@ -6721,11 +6874,40 @@ FarmTab:CreateToggle({
                 local DodgeGoal =
                     Rescue.GetRaidDodgeGoal(
                         Root,
-                        RaidArea
+                        RaidArea,
+                        EnemyFarmGoal
                     )
 
                 if DodgeGoal then
-                    Root.CFrame = DodgeGoal
+                    -- Dodge movement has EXCLUSIVE priority. Move quickly but
+                    -- smoothly to the locked safe point; do not teleport back
+                    -- and forth between the boss and the hazard.
+                    local DodgeDistance =
+                        (Root.Position - DodgeGoal.Position).Magnitude
+
+                    if DodgeDistance > 0.05 then
+                        local DodgeAlpha =
+                            math.clamp(
+                                (240 * DeltaTime)
+                                / math.max(DodgeDistance, 0.001),
+                                0,
+                                1
+                            )
+
+                        local DodgePosition =
+                            Root.Position:Lerp(
+                                DodgeGoal.Position,
+                                DodgeAlpha
+                            )
+
+                        Root.CFrame =
+                            CFrame.new(DodgePosition)
+                            * Root.CFrame.Rotation
+                    end
+
+                    Root.AssemblyLinearVelocity = Vector3.zero
+                    Root.AssemblyAngularVelocity = Vector3.zero
+
                     Rescue.RaidState =
                         "Dodge "
                         .. tostring(
@@ -6751,7 +6933,8 @@ FarmTab:CreateToggle({
             end
 
             local Goal =
-                DesiredEnemyCFrame2(
+                EnemyFarmGoal
+                or DesiredEnemyCFrame2(
                     EnemyRoot
                 )
 
@@ -6800,11 +6983,18 @@ FarmTab:CreateToggle({
                         )
                     end
 
-                    Root.CFrame =
-                        Root.CFrame:Lerp(
-                            Goal,
+                    local SmoothPosition =
+                        Root.Position:Lerp(
+                            Goal.Position,
                             Alpha
                         )
+
+                    -- Position is damped, orientation is exact. Lerp-ing the
+                    -- full CFrame let the humanoid upright correction win part
+                    -- of every frame, which looked like a forward lean.
+                    Root.CFrame =
+                        CFrame.new(SmoothPosition)
+                        * Goal.Rotation
                 end
 
                 -- Kill leftover physics motion that otherwise makes a
@@ -6946,6 +7136,16 @@ FarmTab:CreateToggle({
 
         local function RunCombat2()
             if not Alive2() then
+                return
+            end
+
+            -- Skills/M1s can contain their own movement and pull the character
+            -- back toward the boss. While a Raid AOE dodge lock is active,
+            -- movement safety wins completely; combat resumes automatically
+            -- after the telegraph clears.
+            if GENV.__AZ_IS_RAID_MODE()
+                and Rescue.RaidDodgeActive
+            then
                 return
             end
 
@@ -29309,16 +29509,6 @@ local function GetEnemyFarmCFrame(
         end
 
 
-        -- Fixed horizontal roll reference. Enemy facing is intentionally NOT
-        -- used here because enemies turning would spin/roll the player.
-        local StableRoll =
-            Vector3.new(
-                0,
-                0,
-                -1
-            )
-
-
         if Settings.FarmPosition == "Above" then
 
             local Aim =
@@ -29339,10 +29529,11 @@ local function GetEnemyFarmCFrame(
                 )
 
 
-            return CFrame.lookAt(
+            return CFrame.fromMatrix(
                 Position,
-                Aim,
-                StableRoll
+                Vector3.xAxis,
+                -Vector3.zAxis,
+                Vector3.yAxis
             )
         end
 
@@ -29365,10 +29556,11 @@ local function GetEnemyFarmCFrame(
             )
 
 
-        return CFrame.lookAt(
+        return CFrame.fromMatrix(
             Position,
-            Aim,
-            StableRoll
+            Vector3.xAxis,
+            Vector3.zAxis,
+            -Vector3.yAxis
         )
     end
 
@@ -31854,6 +32046,28 @@ local function ApplyFarmMovement(
         )
     then
 
+        local HorizontalCharacter =
+            GetCharacter()
+
+        local HorizontalHumanoid =
+            HorizontalCharacter
+            and HorizontalCharacter:FindFirstChildOfClass("Humanoid")
+            or nil
+
+        if not GENV.__AZ_FARM_EXT.HorizontalHoldActive then
+            GENV.__AZ_FARM_EXT.HorizontalAutoRotateWas =
+                HorizontalHumanoid
+                and HorizontalHumanoid.AutoRotate
+                or nil
+        end
+
+        GENV.__AZ_FARM_EXT.HorizontalHoldActive = true
+
+        if HorizontalHumanoid then
+            HorizontalHumanoid.AutoRotate = false
+        end
+
+
         local HoldDistance =
             (
                 Root.Position
@@ -31902,11 +32116,15 @@ local function ApplyFarmMovement(
             end
 
 
-            Root.CFrame =
-                Root.CFrame:Lerp(
-                    DesiredFarmCFrame,
+            local SmoothPosition =
+                Root.Position:Lerp(
+                    DesiredFarmCFrame.Position,
                     HoldAlpha
                 )
+
+            Root.CFrame =
+                CFrame.new(SmoothPosition)
+                * DesiredFarmCFrame.Rotation
         end
 
 
@@ -31922,6 +32140,28 @@ local function ApplyFarmMovement(
 
 
         return
+    end
+
+
+    -- Restore normal Roblox rotation as soon as Above/Below no longer owns
+    -- the enemy hold. This also prevents the setting from leaking into manual
+    -- movement after Auto Farm is turned off or changes position mode.
+    if GENV.__AZ_FARM_EXT.HorizontalHoldActive then
+        local RestoreCharacter = GetCharacter()
+        local RestoreHumanoid =
+            RestoreCharacter
+            and RestoreCharacter:FindFirstChildOfClass("Humanoid")
+            or nil
+
+        if RestoreHumanoid
+            and GENV.__AZ_FARM_EXT.HorizontalAutoRotateWas ~= nil
+        then
+            RestoreHumanoid.AutoRotate =
+                GENV.__AZ_FARM_EXT.HorizontalAutoRotateWas
+        end
+
+        GENV.__AZ_FARM_EXT.HorizontalHoldActive = false
+        GENV.__AZ_FARM_EXT.HorizontalAutoRotateWas = nil
     end
 
 
