@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + SHADOW GATE RAID
+--// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SHADOW GATE RAID
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -276,6 +276,10 @@ local Settings = {
 
     -- Story / Endless movement + rubble progression.
     AutoRaidFarm = false,
+
+    -- Sung Jinwoo: automatically raise eligible defeated enemies when the
+    -- Shadow Gate Arise prompt appears. This never takes movement ownership.
+    AutoArise = false,
 
     AutoPickupLoot = false,
 
@@ -1959,6 +1963,7 @@ end)()
             Saved = {
                 AutoFarm = Legacy.AutoFarm,
                 AutoRaidFarm = Legacy.AutoRaidFarm,
+                AutoArise = Legacy.AutoArise,
                 AutoPickupLoot = Legacy.AutoPickupLoot,
                 FarmDistance = Legacy.FarmDistance,
                 AutoM1 = Legacy.AutoM1,
@@ -1991,6 +1996,11 @@ end)()
             type(Saved.AutoRaidFarm) == "boolean"
             and Saved.AutoRaidFarm
             or Settings.AutoRaidFarm,
+
+        AutoArise =
+            type(Saved.AutoArise) == "boolean"
+            and Saved.AutoArise
+            or Settings.AutoArise,
 
         AutoPickupLoot =
             type(Saved.AutoPickupLoot) == "boolean"
@@ -2110,6 +2120,9 @@ end)()
 
         Settings.AutoRaidFarm =
             User.AutoRaidFarm == true
+
+        Settings.AutoArise =
+            User.AutoArise == true
 
         Settings.AutoPickupLoot =
             User.AutoPickupLoot == true
@@ -4371,6 +4384,39 @@ FarmTab:CreateToggle({
 
 FarmTab:CreateToggle({
 
+    name = "Auto Arise (Sung Jinwoo)",
+    flag = "AutoArise",
+
+    description = "Automatically raises eligible defeated enemies as Sung Jinwoo without leaving the farm/dodge position.",
+
+    value = Settings.AutoArise == true,
+
+    callback = function(Value)
+        Settings.AutoArise =
+            Value == true
+
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference(
+                "AutoArise",
+                Value == true
+            )
+        end
+
+        if type(GENV.__AZ_FARM_RESCUE_RUNTIME) == "table" then
+            GENV.__AZ_FARM_RESCUE_RUNTIME.AriseState =
+                Value and "Waiting" or "Off"
+        end
+
+        print(
+            "[Anime Zero] Auto Arise:",
+            Value == true
+        )
+    end,
+})
+
+
+FarmTab:CreateToggle({
+
     name = "Auto Pickup Loot",
     flag = "AutoPickupLoot",
 
@@ -4819,6 +4865,11 @@ FarmTab:CreateToggle({
         NextUltimate = 0,
         NextBlock = 0,
         NextLoot = 0,
+        NextArise = 0,
+        AriseState = "Idle",
+        AriseLastPrompt = nil,
+        AriseLastAt = 0,
+        AriseBusy = false,
         NextEndAction = 0,
         BlockSent = false,
         LastDebug = 0,
@@ -7302,6 +7353,154 @@ FarmTab:CreateToggle({
         end
 
 
+        Rescue.RunArise = function()
+            if not Settings.AutoArise then
+                Rescue.AriseState = "Off"
+                return
+            end
+
+            if not Alive2() then
+                Rescue.AriseState = "NotAlive"
+                return
+            end
+
+            if os.clock() < (Rescue.NextArise or 0)
+                or Rescue.AriseBusy
+            then
+                return
+            end
+
+            Rescue.NextArise = os.clock() + 0.10
+
+            -- Arise belongs to Sung Jinwoo. Checking the live player store
+            -- prevents us from firing somebody else's prompts after switching.
+            local Store = GetPlayerStore2()
+            local CharacterName = nil
+
+            if Store and Store.state and Store.state.character then
+                pcall(function()
+                    CharacterName = ReadLeaf(Store.state.character)
+                end)
+            end
+
+            if CharacterName ~= "sung_jinwoo" then
+                Rescue.AriseState = "Need Sung Jinwoo"
+                return
+            end
+
+            local ShadowFolder = workspace:FindFirstChild("AriseShadows")
+
+            if not ShadowFolder then
+                Rescue.AriseState = "Waiting"
+                return
+            end
+
+            local Raised = tonumber(LocalPlayerObject:GetAttribute("AriseShadows")) or 0
+            local Slots = tonumber(LocalPlayerObject:GetAttribute("AriseSlots")) or 0
+
+            if Slots > 0 and Raised >= Slots then
+                Rescue.AriseState = "Full " .. tostring(Raised) .. "/" .. tostring(Slots)
+                return
+            end
+
+            local BestPrompt = nil
+            local BestPart = nil
+            local BestExpires = math.huge
+            local BestDistance = math.huge
+            local Root = GetRoot2()
+            local ServerNow = workspace:GetServerTimeNow()
+
+            for _, Spot in ipairs(ShadowFolder:GetChildren()) do
+                if Spot:IsA("BasePart")
+                    and Spot:GetAttribute("RaisedBy") == nil
+                then
+                    local Prompt = Spot:FindFirstChildOfClass("ProximityPrompt")
+
+                    if Prompt and Prompt.Enabled ~= false then
+                        local ExpiresAt = tonumber(Spot:GetAttribute("ExpiresAt")) or math.huge
+                        local Distance = Root and (Root.Position - Spot.Position).Magnitude or math.huge
+
+                        -- Prefer the shadow that will expire first; distance
+                        -- breaks ties. The executor prompt trigger lets us do
+                        -- this without stealing movement from farm or dodge.
+                        if ExpiresAt < BestExpires
+                            or (ExpiresAt == BestExpires and Distance < BestDistance)
+                        then
+                            BestPrompt = Prompt
+                            BestPart = Spot
+                            BestExpires = ExpiresAt
+                            BestDistance = Distance
+                        end
+                    end
+                end
+            end
+
+            if not BestPrompt or not BestPart then
+                Rescue.AriseState = "Waiting"
+                return
+            end
+
+            if BestExpires ~= math.huge and BestExpires <= ServerNow then
+                Rescue.AriseState = "Expired"
+                return
+            end
+
+            local Now = os.clock()
+
+            if Rescue.AriseLastPrompt == BestPrompt
+                and Now - (Rescue.AriseLastAt or 0) < 0.85
+            then
+                Rescue.AriseState = "Raising"
+                return
+            end
+
+            Rescue.AriseLastPrompt = BestPrompt
+            Rescue.AriseLastAt = Now
+            Rescue.AriseBusy = true
+            Rescue.AriseState = "Raising " .. tostring(BestPrompt.ObjectText ~= "" and BestPrompt.ObjectText or BestPart.Name)
+
+            local Fired = false
+
+            if type(fireproximityprompt) == "function" then
+                Fired = pcall(function()
+                    fireproximityprompt(BestPrompt)
+                end)
+            end
+
+            -- Fallback for executors where fireproximityprompt is unavailable.
+            -- Only use Roblox's normal hold path when already in activation
+            -- range so Auto Arise never teleports away from the fight.
+            if not Fired and Root then
+                local MaxDistance = tonumber(BestPrompt.MaxActivationDistance) or 10
+
+                if (Root.Position - BestPart.Position).Magnitude <= MaxDistance + 1 then
+                    Fired = pcall(function()
+                        BestPrompt:InputHoldBegin()
+
+                        task.delay(
+                            math.max(tonumber(BestPrompt.HoldDuration) or 0, 0) + 0.05,
+                            function()
+                                pcall(function()
+                                    BestPrompt:InputHoldEnd()
+                                end)
+                            end
+                        )
+                    end)
+                end
+            end
+
+            if not Fired then
+                Rescue.AriseState = "PromptUnsupported"
+            end
+
+            task.delay(0.12, function()
+                if Rescue.Active then
+                    Rescue.AriseBusy = false
+                end
+            end)
+        end
+
+
         local function RunLoot2()
             Rescue.LootState = "Idle"
 
@@ -7603,6 +7802,8 @@ FarmTab:CreateToggle({
                 local SuccessCombat, CombatError =
                     pcall(RunCombat2)
 
+                pcall(Rescue.RunArise)
+
                 local SuccessLoot, LootError =
                     pcall(RunLoot2)
 
@@ -7645,6 +7846,8 @@ FarmTab:CreateToggle({
                         Rescue.RaidGuardedBoss == true,
                         "dodge=",
                         Rescue.RaidDodgeState,
+                        "arise=",
+                        Rescue.AriseState,
                         "exit=",
                         workspace:GetAttribute("RaidExitOpen") == true,
                         "loot=",
