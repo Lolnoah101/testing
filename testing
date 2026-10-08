@@ -4870,6 +4870,15 @@ FarmTab:CreateToggle({
         AriseLastPrompt = nil,
         AriseLastAt = 0,
         AriseBusy = false,
+
+        -- Prompt-first Arise handoff. When an enemy dies, the shadow part can
+        -- replicate a frame before its ProximityPrompt. Keep farm movement at
+        -- the defeated enemy for a very short bounded window so the prompt can
+        -- appear and be fired before Auto Farm jumps to the next target.
+        ArisePendingPart = nil,
+        ArisePendingSince = 0,
+        AriseMovementHoldUntil = 0,
+        AriseAttempts = 0,
         NextEndAction = 0,
         BlockSent = false,
         LastDebug = 0,
@@ -6990,6 +6999,17 @@ FarmTab:CreateToggle({
                 end
             end
 
+            -- Arise gets a tiny prompt-first movement handoff after AOE safety.
+            -- If a defeated enemy just became raisable, stay beside it for a
+            -- few frames so its ProximityPrompt can replicate and confirm before
+            -- Auto Farm teleports to the next target. Dodge safety still wins.
+            if Rescue.ShouldHoldForArise(Root) then
+                Rescue.RaidState = "Arise Prompt"
+                Root.AssemblyLinearVelocity = Vector3.zero
+                Root.AssemblyAngularVelocity = Vector3.zero
+                return
+            end
+
             -- Raid routing handles no-enemy periods by staying inside the live
             -- World.Areas volume, then uses the elevator when RaidExitOpen opens.
             if IsRaid
@@ -7353,9 +7373,37 @@ FarmTab:CreateToggle({
         end
 
 
+        Rescue.ShouldHoldForArise = function(Root)
+            if not Settings.AutoArise
+                or not Root
+                or os.clock() >= (Rescue.AriseMovementHoldUntil or 0)
+            then
+                return false
+            end
+
+            local Part = Rescue.ArisePendingPart
+
+            if not Part
+                or not Part.Parent
+                or Part:GetAttribute("RaisedBy") ~= nil
+            then
+                Rescue.ArisePendingPart = nil
+                Rescue.AriseMovementHoldUntil = 0
+                return false
+            end
+
+            -- Never let Arise freeze the farm after we've already left the
+            -- corpse. The hold exists only to stop the immediate next-target
+            -- teleport while the prompt is still replicating/being confirmed.
+            return (Root.Position - Part.Position).Magnitude <= 24
+        end
+
+
         Rescue.RunArise = function()
             if not Settings.AutoArise then
                 Rescue.AriseState = "Off"
+                Rescue.ArisePendingPart = nil
+                Rescue.AriseMovementHoldUntil = 0
                 return
             end
 
@@ -7370,7 +7418,10 @@ FarmTab:CreateToggle({
                 return
             end
 
-            Rescue.NextArise = os.clock() + 0.10
+            -- Run faster than the movement handoff. This is intentionally a
+            -- short polling interval: a shadow prompt can appear between the
+            -- enemy dying and Auto Farm selecting the next enemy.
+            Rescue.NextArise = os.clock() + 0.035
 
             -- Arise belongs to Sung Jinwoo. Checking the live player store
             -- prevents us from firing somebody else's prompts after switching.
@@ -7385,6 +7436,8 @@ FarmTab:CreateToggle({
 
             if CharacterName ~= "sung_jinwoo" then
                 Rescue.AriseState = "Need Sung Jinwoo"
+                Rescue.ArisePendingPart = nil
+                Rescue.AriseMovementHoldUntil = 0
                 return
             end
 
@@ -7392,6 +7445,8 @@ FarmTab:CreateToggle({
 
             if not ShadowFolder then
                 Rescue.AriseState = "Waiting"
+                Rescue.ArisePendingPart = nil
+                Rescue.AriseMovementHoldUntil = 0
                 return
             end
 
@@ -7400,6 +7455,8 @@ FarmTab:CreateToggle({
 
             if Slots > 0 and Raised >= Slots then
                 Rescue.AriseState = "Full " .. tostring(Raised) .. "/" .. tostring(Slots)
+                Rescue.ArisePendingPart = nil
+                Rescue.AriseMovementHoldUntil = 0
                 return
             end
 
@@ -7409,20 +7466,22 @@ FarmTab:CreateToggle({
             local BestDistance = math.huge
             local Root = GetRoot2()
             local ServerNow = workspace:GetServerTimeNow()
+            local Now = os.clock()
+            local SawUnpromptedNearby = nil
+            local SawUnpromptedDistance = math.huge
 
             for _, Spot in ipairs(ShadowFolder:GetChildren()) do
                 if Spot:IsA("BasePart")
                     and Spot:GetAttribute("RaisedBy") == nil
                 then
+                    local ExpiresAt = tonumber(Spot:GetAttribute("ExpiresAt")) or math.huge
+                    local Distance = Root and (Root.Position - Spot.Position).Magnitude or math.huge
                     local Prompt = Spot:FindFirstChildOfClass("ProximityPrompt")
 
                     if Prompt and Prompt.Enabled ~= false then
-                        local ExpiresAt = tonumber(Spot:GetAttribute("ExpiresAt")) or math.huge
-                        local Distance = Root and (Root.Position - Spot.Position).Magnitude or math.huge
-
                         -- Prefer the shadow that will expire first; distance
                         -- breaks ties. The executor prompt trigger lets us do
-                        -- this without stealing movement from farm or dodge.
+                        -- this without permanently stealing farm movement.
                         if ExpiresAt < BestExpires
                             or (ExpiresAt == BestExpires and Distance < BestDistance)
                         then
@@ -7431,12 +7490,39 @@ FarmTab:CreateToggle({
                             BestExpires = ExpiresAt
                             BestDistance = Distance
                         end
+                    elseif Distance < SawUnpromptedDistance then
+                        -- The part often arrives just before the prompt. Remember
+                        -- the nearby corpse so movement can wait a couple frames.
+                        SawUnpromptedNearby = Spot
+                        SawUnpromptedDistance = Distance
                     end
                 end
             end
 
+            if not BestPart and SawUnpromptedNearby then
+                if Rescue.ArisePendingPart ~= SawUnpromptedNearby then
+                    Rescue.ArisePendingPart = SawUnpromptedNearby
+                    Rescue.ArisePendingSince = Now
+                    Rescue.AriseAttempts = 0
+                end
+
+                if SawUnpromptedDistance <= 24
+                    and Now - (Rescue.ArisePendingSince or Now) <= 0.38
+                then
+                    Rescue.AriseMovementHoldUntil =
+                        math.max(Rescue.AriseMovementHoldUntil or 0, Now + 0.08)
+                    Rescue.AriseState = "Waiting Prompt"
+                else
+                    Rescue.AriseState = "Waiting"
+                end
+
+                return
+            end
+
             if not BestPrompt or not BestPart then
                 Rescue.AriseState = "Waiting"
+                Rescue.ArisePendingPart = nil
+                Rescue.AriseMovementHoldUntil = 0
                 return
             end
 
@@ -7445,19 +7531,41 @@ FarmTab:CreateToggle({
                 return
             end
 
-            local Now = os.clock()
+            if Rescue.ArisePendingPart ~= BestPart then
+                Rescue.ArisePendingPart = BestPart
+                Rescue.ArisePendingSince = Now
+                Rescue.AriseAttempts = 0
+            end
 
-            if Rescue.AriseLastPrompt == BestPrompt
-                and Now - (Rescue.AriseLastAt or 0) < 0.85
+            -- If we're still beside the defeated enemy, give the prompt a
+            -- tiny confirmation window before farm movement chooses a new target.
+            -- This is capped from first sight so a broken prompt can never trap us.
+            if BestDistance <= 24
+                and Now - (Rescue.ArisePendingSince or Now) <= 0.48
             then
-                Rescue.AriseState = "Raising"
+                Rescue.AriseMovementHoldUntil =
+                    math.max(Rescue.AriseMovementHoldUntil or 0, Now + 0.10)
+            end
+
+            -- A pcall success only means the executor accepted the trigger; it
+            -- does NOT prove the server raised the shadow. Retry quickly until
+            -- RaisedBy changes instead of waiting the old 0.85 seconds.
+            if Rescue.AriseLastPrompt == BestPrompt
+                and Now - (Rescue.AriseLastAt or 0) < 0.075
+            then
+                Rescue.AriseState = "Confirming"
                 return
             end
 
             Rescue.AriseLastPrompt = BestPrompt
             Rescue.AriseLastAt = Now
             Rescue.AriseBusy = true
-            Rescue.AriseState = "Raising " .. tostring(BestPrompt.ObjectText ~= "" and BestPrompt.ObjectText or BestPart.Name)
+            Rescue.AriseAttempts = (Rescue.AriseAttempts or 0) + 1
+            Rescue.AriseState =
+                "Raising "
+                .. tostring(BestPrompt.ObjectText ~= "" and BestPrompt.ObjectText or BestPart.Name)
+                .. " #"
+                .. tostring(Rescue.AriseAttempts)
 
             local Fired = false
 
@@ -7468,8 +7576,7 @@ FarmTab:CreateToggle({
             end
 
             -- Fallback for executors where fireproximityprompt is unavailable.
-            -- Only use Roblox's normal hold path when already in activation
-            -- range so Auto Arise never teleports away from the fight.
+            -- Use Roblox's normal hold path only while we're already close.
             if not Fired and Root then
                 local MaxDistance = tonumber(BestPrompt.MaxActivationDistance) or 10
 
@@ -7478,7 +7585,7 @@ FarmTab:CreateToggle({
                         BestPrompt:InputHoldBegin()
 
                         task.delay(
-                            math.max(tonumber(BestPrompt.HoldDuration) or 0, 0) + 0.05,
+                            math.max(tonumber(BestPrompt.HoldDuration) or 0, 0) + 0.03,
                             function()
                                 pcall(function()
                                     BestPrompt:InputHoldEnd()
@@ -7493,12 +7600,15 @@ FarmTab:CreateToggle({
                 Rescue.AriseState = "PromptUnsupported"
             end
 
-            task.delay(0.12, function()
+            -- Clear busy almost immediately so an unconfirmed prompt gets more
+            -- than one chance before Auto Farm leaves the corpse.
+            task.delay(0.035, function()
                 if Rescue.Active then
                     Rescue.AriseBusy = false
                 end
             end)
         end
+
 
 
         local function RunLoot2()
@@ -7796,13 +7906,16 @@ FarmTab:CreateToggle({
 
                 GENV.__AZ_FARM_ENGINE_ACTIVE = true
 
+                -- Arise runs BEFORE movement so a just-spawned corpse prompt is
+                -- claimed before Auto Farm selects/teleports to the next enemy.
+                local SuccessArise, AriseError =
+                    pcall(Rescue.RunArise)
+
                 local SuccessMove, MoveError =
                     pcall(MoveFarm2, DeltaTime)
 
                 local SuccessCombat, CombatError =
                     pcall(RunCombat2)
-
-                pcall(Rescue.RunArise)
 
                 local SuccessLoot, LootError =
                     pcall(RunLoot2)
@@ -7855,8 +7968,12 @@ FarmTab:CreateToggle({
                         "retry=",
                         Rescue.EndActionState,
                         "ok=",
-                        SuccessMove and SuccessCombat and SuccessLoot and SuccessEndAction
+                        SuccessArise and SuccessMove and SuccessCombat and SuccessLoot and SuccessEndAction
                     )
+
+                    if not SuccessArise then
+                        warn("[Anime Zero][Auto Arise]", AriseError)
+                    end
 
                     if not SuccessMove then
                         warn("[Anime Zero][Rescue] movement:", MoveError)
