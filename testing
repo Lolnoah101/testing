@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + RAID DODGE PRIORITY + SHADOW GATE RAID
+--// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + SHADOW GATE RAID
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -4855,6 +4855,10 @@ FarmTab:CreateToggle({
         RaidDodgeGoal = nil,
         RaidDodgeHoldUntil = 0,
         RaidDodgeReason = "Idle",
+        -- Once the player has actually reached a safe dodge point, selected
+        -- skills/ultimate may continue firing from there. M1 stays suppressed
+        -- because its movement can drag us directly back into the telegraph.
+        RaidDodgeCombatReady = false,
 
         -- Above/Below must own character rotation while active. Position is
         -- smoothed separately, but orientation is applied exactly so Roblox's
@@ -6428,6 +6432,7 @@ FarmTab:CreateToggle({
                 Rescue.RaidDodgeState = "Idle"
                 Rescue.RaidDodgeActive = false
                 Rescue.RaidDodgeGoal = nil
+                Rescue.RaidDodgeCombatReady = false
                 return nil
             end
 
@@ -6448,22 +6453,26 @@ FarmTab:CreateToggle({
                     )
             end
 
-            -- Once a dodge starts, keep the safe point as exclusive movement
-            -- ownership while the telegraph exists. A short clear hold absorbs
-            -- one-frame indicator flicker before Auto Farm is allowed back in.
+            -- Fast re-engage: as soon as the boss farm point is no longer
+            -- covered by a live threat, give movement back to Auto Raid Farm in
+            -- THIS heartbeat. We no longer wait for unrelated AOEs elsewhere
+            -- in the room, and there is no long post-AOE clear hold.
             if Rescue.RaidDodgeActive then
-                if #Threats == 0 then
-                    if Rescue.RaidDodgeGoal
-                        and Now < (Rescue.RaidDodgeHoldUntil or 0)
-                    then
-                        Rescue.RaidDodgeState = "ClearHold"
-                        return Rescue.RaidDodgeGoal
-                    end
+                local CurrentSafe =
+                    Rescue.PositionSafeFromThreats(
+                        Root.Position,
+                        Threats
+                    )
 
+                if #Threats == 0
+                    or (not FarmDanger and CurrentSafe)
+                then
                     Rescue.RaidDodgeActive = false
                     Rescue.RaidDodgeGoal = nil
+                    Rescue.RaidDodgeHoldUntil = 0
+                    Rescue.RaidDodgeCombatReady = false
                     Rescue.RaidDodgeReason = "Cleared"
-                    Rescue.RaidDodgeState = "Safe"
+                    Rescue.RaidDodgeState = "Reengage"
                     return nil
                 end
 
@@ -6477,7 +6486,6 @@ FarmTab:CreateToggle({
                         Threats
                     )
                 then
-                    Rescue.RaidDodgeHoldUntil = Now + 0.55
                     Rescue.RaidDodgeState =
                         "Locked " .. tostring(Rescue.RaidDodgeReason)
                     return Rescue.RaidDodgeGoal
@@ -6567,7 +6575,8 @@ FarmTab:CreateToggle({
                         Rescue.RaidDodgeGoal = Goal
                         Rescue.RaidDodgeReason = Reason
                         Rescue.RaidDodgeState = Reason
-                        Rescue.RaidDodgeHoldUntil = Now + 0.75
+                        Rescue.RaidDodgeHoldUntil = 0
+                        Rescue.RaidDodgeCombatReady = false
                         Rescue.LastDodgeAt = Now
 
                         return Goal
@@ -6593,7 +6602,8 @@ FarmTab:CreateToggle({
                 Rescue.RaidDodgeGoal = CenterGoal
                 Rescue.RaidDodgeReason = "CenterFallback"
                 Rescue.RaidDodgeState = "CenterFallback"
-                Rescue.RaidDodgeHoldUntil = Now + 0.75
+                Rescue.RaidDodgeHoldUntil = 0
+                Rescue.RaidDodgeCombatReady = false
                 Rescue.LastDodgeAt = Now
                 return CenterGoal
             end
@@ -6833,6 +6843,7 @@ FarmTab:CreateToggle({
             if not FarmEnabled or not Alive2() then
                 Rescue.RaidDodgeActive = false
                 Rescue.RaidDodgeGoal = nil
+                Rescue.RaidDodgeCombatReady = false
                 return
             end
 
@@ -6907,6 +6918,17 @@ FarmTab:CreateToggle({
 
                     Root.AssemblyLinearVelocity = Vector3.zero
                     Root.AssemblyAngularVelocity = Vector3.zero
+
+                    -- Movement runs before combat every heartbeat. As soon as
+                    -- we have reached the safe point, allow ranged/remote skills
+                    -- and ultimate to continue while the AOE is still active.
+                    -- Auto M1 remains paused so its lunge cannot pull us back in.
+                    local _, StillInDanger =
+                        Rescue.CollectRaidThreats(Root.Position)
+
+                    Rescue.RaidDodgeCombatReady =
+                        not StillInDanger
+                        and (Root.Position - DodgeGoal.Position).Magnitude <= 3.5
 
                     Rescue.RaidState =
                         "Dodge "
@@ -7139,12 +7161,17 @@ FarmTab:CreateToggle({
                 return
             end
 
-            -- Skills/M1s can contain their own movement and pull the character
-            -- back toward the boss. While a Raid AOE dodge lock is active,
-            -- movement safety wins completely; combat resumes automatically
-            -- after the telegraph clears.
-            if GENV.__AZ_IS_RAID_MODE()
+            -- During an active Raid dodge, movement still owns the character,
+            -- but once we are actually standing at the safe dodge point we may
+            -- keep using selected skills/ultimate from there. M1 is suppressed
+            -- until the boss farm point is safe again because M1 movement can
+            -- drag the character straight back into the AOE.
+            local DodgeSkillOnly =
+                GENV.__AZ_IS_RAID_MODE()
                 and Rescue.RaidDodgeActive
+
+            if DodgeSkillOnly
+                and not Rescue.RaidDodgeCombatReady
             then
                 return
             end
@@ -7178,6 +7205,7 @@ FarmTab:CreateToggle({
             end
 
             if Settings.AutoM1
+                and not DodgeSkillOnly
                 and Now >= Rescue.NextM1
                 and CharacterPackets2.performM1
             then
@@ -7225,6 +7253,10 @@ FarmTab:CreateToggle({
                 FireSkill2(4)
             end
 
+
+            if DodgeSkillOnly then
+                return
+            end
 
             if Settings.AutoBlock
                 and CharacterPackets2.performBlock
