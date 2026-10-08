@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + STABLE HORIZONTAL HOLD
+--// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + STABLE HORIZONTAL HOLD + SHADOW GATE RAID
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -22,6 +22,16 @@ local __AZ_SOURCE = [======[
 --//============================================================
 
 local GENV = getgenv()
+
+
+--// Any current/future mode whose internal key ends in "raid" is handled by
+--// the dedicated Raid farm runtime instead of Story/Endless progression.
+GENV.__AZ_IS_RAID_MODE = function(Mode)
+    Mode = Mode or workspace:GetAttribute("Mode")
+
+    return type(Mode) == "string"
+        and string.sub(string.lower(Mode), -4) == "raid"
+end
 
 
 --//============================================================
@@ -250,6 +260,8 @@ local Settings = {
     SelectedEndlessDifficulty = "Easy",
 
     AutoJoinEndless = false,
+
+    SelectedRaidMap = "Spirit's Bathtub",
 
     AutoJoinRaid = false,
 
@@ -3186,6 +3198,9 @@ end
                 SelectedEndlessDifficulty =
                     Single(Legacy.LobbyEndlessDifficulty),
                 AutoJoinEndless = Legacy.AutoJoinEndless,
+                SelectedRaidMap =
+                    Single(Legacy.LobbyRaidMap)
+                    or Single(Legacy.SelectedRaidMap),
                 AutoJoinRaid = Legacy.AutoJoinRaid,
                 EndlessLeaveWave = Legacy.EndlessWaveToLeave,
                 AutoLeaveEndlessAtWave =
@@ -3282,6 +3297,18 @@ end
             and Saved.AutoJoinEndless
             or Settings.AutoJoinEndless,
 
+        SelectedRaidMap =
+            Saved.SelectedRaidMap == "BathTub"
+                and "Spirit's Bathtub"
+            or Saved.SelectedRaidMap == "ShadowGate"
+                and "Shadow Gate"
+            or (
+                Saved.SelectedRaidMap == "Spirit's Bathtub"
+                or Saved.SelectedRaidMap == "Shadow Gate"
+            )
+                and Saved.SelectedRaidMap
+            or Settings.SelectedRaidMap,
+
         AutoJoinRaid =
             type(Saved.AutoJoinRaid) == "boolean"
             and Saved.AutoJoinRaid
@@ -3346,6 +3373,9 @@ end
 
         Settings.AutoJoinEndless =
             User.AutoJoinEndless == true
+
+        Settings.SelectedRaidMap =
+            User.SelectedRaidMap
 
         Settings.AutoJoinRaid =
             User.AutoJoinRaid == true
@@ -4158,6 +4188,41 @@ LobbyTab:CreateSection({
 })
 
 
+LobbyTab:CreateDropdown({
+
+    name = "Raid Map",
+    flag = "LobbyRaidMap",
+
+    options = {
+        "Spirit's Bathtub",
+        "Shadow Gate",
+    },
+
+    value = Settings.SelectedRaidMap,
+
+    callback = function(Value)
+
+        local Selection =
+            GetSingleSelection(Value)
+
+        if Selection then
+
+            Settings.SelectedRaidMap =
+                Selection
+
+            if type(Settings.SetLobbyUserPreference) == "function" then
+                Settings.SetLobbyUserPreference(
+                    "SelectedRaidMap",
+                    Selection
+                )
+            end
+
+            ResetLobbyState()
+        end
+    end,
+})
+
+
 LobbyTab:CreateToggle({
 
     name = "Auto Join Raid",
@@ -4244,7 +4309,7 @@ FarmTab:CreateToggle({
 
         if not Value then
 
-            if workspace:GetAttribute("Mode") ~= "spiritedawayraid" then
+            if not GENV.__AZ_IS_RAID_MODE() then
                 ReleaseFarmMovement()
             end
 
@@ -4268,7 +4333,7 @@ FarmTab:CreateToggle({
     name = "Auto Raid Farm",
     flag = "AutoRaidFarm",
 
-    description = "Spirited Away Raid only. Uses center holds, immunity logic, AOE dodge, and elevator routing.",
+    description = "Raid farm for Spirit's Bathtub + Shadow Gate. Handles objectives, immunity, AOE dodge, and routing.",
 
     value = Settings.AutoRaidFarm,
 
@@ -5148,7 +5213,7 @@ FarmTab:CreateToggle({
             Rescue.NormalRubbleDistance = math.huge
 
             if not Root
-                or workspace:GetAttribute("Mode") == "spiritedawayraid"
+                or GENV.__AZ_IS_RAID_MODE()
             then
                 return nil
             end
@@ -5275,7 +5340,7 @@ FarmTab:CreateToggle({
 
         Rescue.GetNormalAreaGoal = function(Root)
             if not Root
-                or workspace:GetAttribute("Mode") == "spiritedawayraid"
+                or GENV.__AZ_IS_RAID_MODE()
             then
                 return nil
             end
@@ -5351,7 +5416,7 @@ FarmTab:CreateToggle({
         Rescue.RunNormalProgressionAssist = function(DeltaTime)
             Rescue.NormalState = "Idle"
 
-            if workspace:GetAttribute("Mode") == "spiritedawayraid"
+            if GENV.__AZ_IS_RAID_MODE()
                 or not Settings.AutoFarm
                 or not Alive2()
             then
@@ -5621,7 +5686,7 @@ FarmTab:CreateToggle({
                     task.delay(0.18, function()
                         if Rescue.Active
                             and Settings.AutoFarm
-                            and workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+                            and not GENV.__AZ_IS_RAID_MODE()
                             and Rescue.NormalReentryToken == Token
                         then
                             local CurrentRoot = GetRoot2()
@@ -5688,11 +5753,9 @@ FarmTab:CreateToggle({
 
                     VisibleCount = VisibleCount + 1
 
-                    local IsNoFace =
-                        Name == "spiritedkaonashi"
-                        or Name == "spiritedkaonashi2"
-
-                    if Guarded and IsNoFace then
+                    if Guarded
+                        and GENV.__AZ_IS_RAID_MODE()
+                    then
                         GuardedBoss = true
                     end
 
@@ -5732,9 +5795,26 @@ FarmTab:CreateToggle({
                 if not Info.Guarded then
                     local Score = Info.Distance
 
-                    -- During the final boss phase the clone is a valid damage
-                    -- target and should never lose priority to the immune boss.
-                    if Rescue.RaidGuardedBoss
+                    local Mode =
+                        workspace:GetAttribute("Mode")
+
+                    -- Shadow Gate oath phases are timed. Oath Knights are the
+                    -- objective that removes Igris's protection, so they must
+                    -- beat ordinary adds in target priority.
+                    if Mode == "sololevelingraid"
+                        and Info.Name == "soloOathKnight"
+                    then
+                        Score = Score - 700
+                    end
+
+                    -- Shadow Igris is the next most important add during the
+                    -- boss phase. Keep the old No-Face clone priority too for
+                    -- compatibility with older Spirited Away servers.
+                    if Mode == "sololevelingraid"
+                        and Info.Name == "soloIgrisShadow"
+                    then
+                        Score = Score - 350
+                    elseif Rescue.RaidGuardedBoss
                         and Info.Name == "spiritedkaonashiclone"
                     then
                         Score = Score - 250
@@ -5881,7 +5961,7 @@ FarmTab:CreateToggle({
 
 
         --//========================================================
-        --// SPIRITED AWAY RAID ROUTE - AREA BASED
+        --// RAID ROUTE - AREA BASED
         --//
         --// The raid does NOT need individual EnemySpawns to be visited.
         --// Each live segment exposes a large activation volume at:
@@ -6275,7 +6355,7 @@ FarmTab:CreateToggle({
 
         Rescue.GetRaidDodgeGoal = function(Root, Area)
             if Settings.AutoDodgeRaidAOE == false
-                or workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+                or not GENV.__AZ_IS_RAID_MODE()
                 or not Root
                 or not Area
             then
@@ -6437,9 +6517,7 @@ FarmTab:CreateToggle({
 
 
         Rescue.HandleRaidRoute = function(Root, EnemyRoot)
-            if workspace:GetAttribute("Mode")
-                ~= "spiritedawayraid"
-            then
+            if not GENV.__AZ_IS_RAID_MODE() then
                 Rescue.RaidState = "NotRaid"
                 return false
             end
@@ -6600,7 +6678,7 @@ FarmTab:CreateToggle({
 
         local function MoveFarm2(DeltaTime)
             local IsRaid =
-                workspace:GetAttribute("Mode") == "spiritedawayraid"
+                GENV.__AZ_IS_RAID_MODE()
 
             local FarmEnabled =
                 (IsRaid and Settings.AutoRaidFarm == true)
@@ -6634,7 +6712,7 @@ FarmTab:CreateToggle({
             -- AOE safety has first movement priority while the raid is active.
             -- It consumes the exact enemySpikes telegraph packet plus the
             -- game's own aoeIndicator parts for other telegraphed boss slams.
-            if workspace:GetAttribute("Mode") == "spiritedawayraid"
+            if IsRaid
                 and workspace:GetAttribute("RaidExitOpen") ~= true
             then
                 local _, RaidArea =
@@ -6876,7 +6954,7 @@ FarmTab:CreateToggle({
             local Now = os.clock()
 
             if not EnemyRoot then
-                if workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+                if not GENV.__AZ_IS_RAID_MODE()
                     and Settings.AutoFarm
                     and Settings.AutoM1
                     and Root
@@ -7263,9 +7341,9 @@ FarmTab:CreateToggle({
                 -- movement. The rescue runtime only assists the exact pieces
                 -- that can strand Story/Endless after an update: active rubble
                 -- and entering/recovering the current area when no enemy exists.
-                -- Inside Spirited Away Raid, the rescue runtime owns movement.
+                -- Inside Raid modes, the rescue runtime owns movement.
                 if GENV.__AZ_FARM_FULL_ENGINE_ACTIVE == true
-                    and workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+                    and not GENV.__AZ_IS_RAID_MODE()
                 then
                     GENV.__AZ_FARM_ENGINE_ACTIVE = true
 
@@ -7796,6 +7874,18 @@ end)()
         ["113"] = "Ghost",
 
         ["114"] = "Staff of Homa",
+
+        ["115"] = "Shadow Essence",
+
+        ["116"] = "Igris' Crest",
+
+        ["117"] = "Zero Calories Flour",
+
+        ["118"] = "Zero Calories Doughnuts",
+
+        ["119"] = "Shadow's Cloak",
+
+        ["120"] = "Monarch's Blessing",
     }
 
 
@@ -8890,6 +8980,7 @@ end)()
 
                 local Names = {
                     spiritedawayraid = "Raid",
+                    sololevelingraid = "Raid",
                     infinite = "Endless",
                     hxh = "Story",
                     sakamoto = "Sakamoto",
@@ -8907,6 +8998,7 @@ end)()
                 local Names = {
                     hxh = "HxH",
                     spiritedawayraid = "Spirit's Bathtub",
+                    sololevelingraid = "Shadow Gate",
                     infinite = "ZZZ World",
                 }
 
@@ -9241,6 +9333,7 @@ end)()
                     Wins = 0,
                     Kills = 0,
                     Deaths = 0,
+                    Damage = 0,
                 }
 
 
@@ -9369,6 +9462,10 @@ end)()
                     Stats.Wins = tonumber(ReadLeaf(MatchStats.wins)) or 0
                     Stats.Kills = tonumber(ReadLeaf(MatchStats.kills)) or 0
                     Stats.Deaths = tonumber(ReadLeaf(MatchStats.deaths)) or 0
+
+                    if MatchStats.damage then
+                        Stats.Damage = tonumber(ReadLeaf(MatchStats.damage)) or 0
+                    end
                 end
 
 
@@ -9382,6 +9479,8 @@ end)()
                     Status = "Test",
                     Kills = 0,
                     Damage = 0,
+                    BossDamage = 0,
+                    PartyBonus = 0,
                     Waves = 0,
                     Currency = "money",
                     Earned = 0,
@@ -9405,6 +9504,17 @@ end)()
                 Snapshot.Status = Clean(ReadLeaf(Participant.status) or "Complete")
                 Snapshot.Kills = tonumber(ReadLeaf(Participant.kills)) or 0
                 Snapshot.Damage = tonumber(ReadLeaf(Participant.damage)) or 0
+
+                if Participant.bossDamage then
+                    Snapshot.BossDamage =
+                        tonumber(ReadLeaf(Participant.bossDamage)) or 0
+                end
+
+                if Participant.partyBonus then
+                    Snapshot.PartyBonus =
+                        tonumber(ReadLeaf(Participant.partyBonus)) or 0
+                end
+
                 Snapshot.Waves = tonumber(ReadLeaf(Participant.wavesCleared)) or 0
                 Snapshot.Currency = Clean(ReadLeaf(Participant.currency) or "money")
                 Snapshot.Earned = tonumber(ReadLeaf(Participant.earned)) or 0
@@ -9557,6 +9667,7 @@ end)()
                     "Time Taken: " .. TimeText(Reward.Elapsed),
                     "Kills: " .. NumberText(Reward.Kills),
                     "Waves: " .. NumberText(Reward.Waves),
+                    "Boss DMG: " .. NumberText(Reward.BossDamage),
                 }
 
                 local UserLines = {
@@ -9583,6 +9694,13 @@ end)()
                     "Gems: +" .. NumberText(Reward.Gems),
                     "Trait Rerolls: +" .. NumberText(Reward.Crystals),
                 }
+
+                if Reward.PartyBonus > 0 then
+                    table.insert(
+                        RewardLines,
+                        "Party Bonus: +" .. NumberText(Reward.PartyBonus)
+                    )
+                end
 
 
                 if IsTest and not Participant then
@@ -19188,6 +19306,7 @@ end)()
             id = "141",
             character = "hutao",
             raidCharacter = true,
+            raidMap = "Spirit's Bathtub",
             difficulty = "Nightmare",
             mode = "Raid",
             progressKey = "title.141",
@@ -19480,6 +19599,7 @@ end)()
             SelectedMapDifficulty = Settings.SelectedMapDifficulty,
             AutoJoinMap = Settings.AutoJoinMap,
             AutoJoinEndless = Settings.AutoJoinEndless,
+            SelectedRaidMap = Settings.SelectedRaidMap,
             AutoJoinRaid = Settings.AutoJoinRaid,
             SelectedEndlessMap = Settings.SelectedEndlessMap,
             SelectedEndlessDifficulty = Settings.SelectedEndlessDifficulty,
@@ -19675,8 +19795,13 @@ end)()
 
         elseif Mode == "Raid" then
 
+            Settings.SelectedRaidMap =
+                Profile.raidMap or "Spirit's Bathtub"
+
             ProfileKey =
-                "Raid|BathTub|Nightmare"
+                "Raid|"
+                .. tostring(Settings.SelectedRaidMap)
+                .. "|Nightmare"
 
             Settings.AutoJoinMap = false
             Settings.AutoJoinEndless = false
@@ -20633,6 +20758,18 @@ end)()
         ["113"] = "Ghost",
 
         ["114"] = "Staff of Homa",
+
+        ["115"] = "Shadow Essence",
+
+        ["116"] = "Igris' Crest",
+
+        ["117"] = "Zero Calories Flour",
+
+        ["118"] = "Zero Calories Doughnuts",
+
+        ["119"] = "Shadow's Cloak",
+
+        ["120"] = "Monarch's Blessing",
     }
 
     local Recipes = {}
@@ -21014,6 +21151,7 @@ end)()
             SelectedMapDifficulty = Settings.SelectedMapDifficulty,
             AutoJoinMap = Settings.AutoJoinMap,
             AutoJoinEndless = Settings.AutoJoinEndless,
+            SelectedRaidMap = Settings.SelectedRaidMap,
             AutoJoinRaid = Settings.AutoJoinRaid,
             SelectedEndlessMap = Settings.SelectedEndlessMap,
             SelectedEndlessDifficulty = Settings.SelectedEndlessDifficulty,
@@ -22199,6 +22337,8 @@ end)()
         "shanks",
         "miyabi",
         "hutao",
+        "sung_jinwoo",
+        "katakuri",
     }
 
 
@@ -22215,6 +22355,8 @@ end)()
         shanks = "Divine Emperor",
         miyabi = "Cataclysm",
         hutao = "Paramita Pyre",
+        sung_jinwoo = "Shadow Monarch",
+        katakuri = "Mochi Commander",
     }
 
 
@@ -26304,7 +26446,14 @@ local function CreateLobbyQueue(
         local RaidMap =
             FindLobbyMap(
                 "Raid",
-                "BathTub"
+                Settings.SelectedRaidMap
+                    or "Spirit's Bathtub"
+            )
+            or FindLobbyMap(
+                "Raid",
+                Settings.SelectedRaidMap == "Shadow Gate"
+                    and "ShadowGate"
+                    or "BathTub"
             )
             or FindLobbyMap(
                 "Raid",
@@ -29241,8 +29390,9 @@ end
 --//============================================================
 --// CURRENT MAP
 --//
---// The updated game can report hxh, sakamoto, tutorial, infinite, or
---// spiritedawayraid. This lookup intentionally stays config-driven so
+--// The updated game can report hxh, sakamoto, tutorial, infinite,
+--// spiritedawayraid, or sololevelingraid. This lookup intentionally stays
+--// config-driven so
 --// raid maps do not fall back to HxH-specific rubble assumptions.
 --//============================================================
 
@@ -33028,7 +33178,7 @@ end
 
 GENV.__AZ_FARM_EXT.HandleRaidExit = function()
 
-    if workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+    if not GENV.__AZ_IS_RAID_MODE()
         or workspace:GetAttribute("RaidExitOpen") ~= true
     then
         return false
@@ -33297,7 +33447,7 @@ end
 
 local function UpdateAutoFarm()
 
-    if workspace:GetAttribute("Mode") == "spiritedawayraid" then
+    if GENV.__AZ_IS_RAID_MODE() then
         DesiredFarmCFrame = nil
         SetFarmMode("Raid Uses Auto Raid Farm")
         return
@@ -33472,7 +33622,7 @@ local function RunCombatHeartbeat()
     if Settings.AutoM1 then
 
         if Settings.AutoFarm
-            and workspace:GetAttribute("Mode") ~= "spiritedawayraid"
+            and not GENV.__AZ_IS_RAID_MODE()
         then
 
             if CurrentFarmMode == "Rubble"
@@ -33753,9 +33903,9 @@ GENV.__AZ_FARM_EXT.BindFarmHeartbeat = function()
                     GENV.__AZ_FARM_ENGINE_ACTIVE = true
 
 
-                    -- The dedicated rescue runtime owns Spirited Away Raid.
+                    -- The dedicated rescue runtime owns all Raid modes.
                     -- Do not let the legacy movement/target logic fight it.
-                    if workspace:GetAttribute("Mode") == "spiritedawayraid"
+                    if GENV.__AZ_IS_RAID_MODE()
                         and GENV.__AZ_FARM_RESCUE_ACTIVE == true
                     then
                         pcall(function()
