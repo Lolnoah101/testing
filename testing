@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + SHADOW GATE RAID
+--// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + SHADOW GATE RAID
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -560,6 +560,108 @@ end)()
 
 
 --//============================================================
+--// REMOTE AUTO EXEC
+--//
+--// Auto Execute now fetches the user's GitHub source on every teleport.
+--// This means updating the GitHub file changes the next teleported session
+--// without having to manually re-execute the new full script first.
+--// A local cached copy remains only as a fallback if GitHub/HttpGet fails.
+--//============================================================
+
+GENV.__AZ_REMOTE_AUTOEXEC_URL =
+    "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
+
+GENV.__AZ_REMOTE_AUTOEXEC_ARMED = false
+
+Settings.ArmRemoteAutoExecute =
+    function()
+
+        if not Settings.AutoExecuteOnTeleport then
+            GENV.__AZ_REMOTE_AUTOEXEC_ARMED = false
+            return false
+        end
+
+        if GENV.__AZ_REMOTE_AUTOEXEC_ARMED == true then
+            return true
+        end
+
+        local Queue =
+            queue_on_teleport
+            or queueonteleport
+
+        if type(Queue) ~= "function" then
+            return false
+        end
+
+        local Queued = [[
+task.wait(1)
+
+local enabled = "AnimeZero/autoexecute_enabled.txt"
+local shouldRun = true
+
+if readfile and isfile and isfile(enabled) then
+    local ok, value = pcall(readfile, enabled)
+    if ok then
+        shouldRun = tostring(value) == "1"
+    end
+end
+
+if not shouldRun then
+    return
+end
+
+local remote = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
+local ranRemote = false
+
+local ok, code = pcall(function()
+    return game:HttpGet(remote)
+end)
+
+if ok and type(code) == "string" and code ~= "" then
+    local fn = loadstring(code)
+    if fn then
+        ranRemote = pcall(fn)
+    end
+end
+
+if ranRemote then
+    return
+end
+
+-- Fallback: last successfully executed full script cached on-device.
+local source = "AnimeZero/AnimeZero_AutoExec.lua"
+if readfile and isfile and isfile(source) then
+    local fallback = readfile(source)
+    if fallback and fallback ~= "" then
+        local fn = loadstring(fallback)
+        if fn then
+            pcall(fn)
+        end
+    end
+end
+]]
+
+        local Success =
+            pcall(Queue, Queued)
+
+        if Success then
+            GENV.__AZ_REMOTE_AUTOEXEC_ARMED = true
+        end
+
+        return Success
+    end
+
+
+-- Re-arm automatically every time this script starts in a new place. This is
+-- important because queue_on_teleport is normally consumed by the teleport.
+if Settings.AutoExecuteOnTeleport then
+    task.defer(function()
+        pcall(Settings.ArmRemoteAutoExecute)
+    end)
+end
+
+
+--//============================================================
 --// AUTO RECONNECT V2
 --//
 --// More defensive mobile reconnect flow:
@@ -686,22 +788,42 @@ end)()
             queue_on_teleport
             or queueonteleport
 
-        if type(Queue) ~= "function"
-            or type(readfile) ~= "function"
-            or type(isfile) ~= "function"
-            or not isfile("AnimeZero/AnimeZero_AutoExec.lua")
-        then
+        if type(Queue) ~= "function" then
             return false
         end
 
+        -- Reconnect should also pull the newest GitHub build. Unlike the normal
+        -- Auto Execute toggle, this does not check the enabled flag because a
+        -- reconnect-triggered teleport must restore the running automation.
         local Queued = [[
 task.wait(1)
+
+local remote = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
+local ranRemote = false
+
+local ok, code = pcall(function()
+    return game:HttpGet(remote)
+end)
+
+if ok and type(code) == "string" and code ~= "" then
+    local fn = loadstring(code)
+    if fn then
+        ranRemote = pcall(fn)
+    end
+end
+
+if ranRemote then
+    return
+end
+
 local source = "AnimeZero/AnimeZero_AutoExec.lua"
 if readfile and isfile and isfile(source) then
-    local code = readfile(source)
-    if code and code ~= "" then
-        local fn = loadstring(code)
-        if fn then fn() end
+    local fallback = readfile(source)
+    if fallback and fallback ~= "" then
+        local fn = loadstring(fallback)
+        if fn then
+            pcall(fn)
+        end
     end
 end
 ]]
@@ -4890,11 +5012,13 @@ FarmTab:CreateToggle({
         RetryAwaitingStart = false,
         RetryAwaitingSince = 0,
         RetryReadyNudged = false,
+        RetryStuckLeaveAt = 0,
 
         -- Also watch generic wave-0 waiting so injecting this fixed script while
         -- already stuck on Get Ready can recover without needing another result.
         PreRunWaitingSince = 0,
         PreRunReadyNudged = false,
+        PreRunStuckLeaveAt = 0,
 
         BlockSent = false,
         LastDebug = 0,
@@ -7777,8 +7901,10 @@ FarmTab:CreateToggle({
                 Rescue.RetryAwaitingStart = false
                 Rescue.RetryAwaitingSince = 0
                 Rescue.RetryReadyNudged = false
+                Rescue.RetryStuckLeaveAt = 0
                 Rescue.PreRunWaitingSince = 0
                 Rescue.PreRunReadyNudged = false
+                Rescue.PreRunStuckLeaveAt = 0
                 return
             end
 
@@ -7829,10 +7955,12 @@ FarmTab:CreateToggle({
                 Rescue.RetryAwaitingStart = false
                 Rescue.RetryAwaitingSince = 0
                 Rescue.RetryReadyNudged = false
+                Rescue.RetryStuckLeaveAt = 0
                 Rescue.RetryResultSeenKey = nil
                 Rescue.RetryResultSeenAt = 0
                 Rescue.PreRunWaitingSince = 0
                 Rescue.PreRunReadyNudged = false
+                Rescue.PreRunStuckLeaveAt = 0
                 Rescue.EndActionState = "RunActive"
                 return
             end
@@ -7852,7 +7980,6 @@ FarmTab:CreateToggle({
 
                 if Waited >= 4.0
                     and not Rescue.RetryReadyNudged
-                    and not HasResultMarker
                     and StartedAt == nil
                 then
                     Rescue.RetryReadyNudged = true
@@ -7877,6 +8004,77 @@ FarmTab:CreateToggle({
                         tostring(ReadyFired),
                         "| booted:",
                         tostring(BootedFired)
+                    )
+                end
+
+                -- If Retry was accepted but the new run is still stuck on
+                -- Get Ready / wave 0, abandon that broken run and return to the
+                -- lobby. Arm the matching Auto Join mode first so the lobby
+                -- immediately creates the dungeon again.
+                local Wave = tonumber(ReadRunValue2("wave")) or 0
+                local TravelStatus = ReadLeaf(Participant.travelStatus)
+
+                if Waited >= 8.0
+                    and StartedAt == nil
+                    and Wave == 0
+                    and TravelStatus == "idle"
+                    and Now - (Rescue.RetryStuckLeaveAt or 0) >= 2.0
+                then
+                    Rescue.RetryStuckLeaveAt = Now
+
+                    local CurrentMode =
+                        tostring(workspace:GetAttribute("Mode") or "")
+
+                    if type(GENV.__AZ_IS_RAID_MODE) == "function"
+                        and GENV.__AZ_IS_RAID_MODE(CurrentMode)
+                    then
+                        Settings.AutoJoinRaid = true
+                        Settings.AutoJoinMap = false
+                        Settings.AutoJoinEndless = false
+
+                        if type(Settings.SetLobbyUserPreference) == "function" then
+                            pcall(Settings.SetLobbyUserPreference, "AutoJoinRaid", true)
+                            pcall(Settings.SetLobbyUserPreference, "AutoJoinMap", false)
+                            pcall(Settings.SetLobbyUserPreference, "AutoJoinEndless", false)
+                        end
+                    else
+                        Settings.AutoJoinMap = true
+                        Settings.AutoJoinRaid = false
+                        Settings.AutoJoinEndless = false
+
+                        if type(Settings.SetLobbyUserPreference) == "function" then
+                            pcall(Settings.SetLobbyUserPreference, "AutoJoinMap", true)
+                            pcall(Settings.SetLobbyUserPreference, "AutoJoinRaid", false)
+                            pcall(Settings.SetLobbyUserPreference, "AutoJoinEndless", false)
+                        end
+                    end
+
+                    pcall(function()
+                        if type(Settings.PersistLobbyPreferences) == "function" then
+                            Settings.PersistLobbyPreferences()
+                        end
+
+                        if type(Settings.PersistEndActionSettings) == "function" then
+                            Settings.PersistEndActionSettings()
+                        end
+
+                        if type(Settings.ArmRemoteAutoExecute) == "function" then
+                            Settings.ArmRemoteAutoExecute()
+                        end
+                    end)
+
+                    local Left = pcall(function()
+                        Rescue.RunPackets.endAction:fire(3)
+                    end)
+
+                    Rescue.EndActionState =
+                        Left
+                        and "StuckLeavingLobby"
+                        or "StuckLeaveRetry"
+
+                    print(
+                        "[Anime Zero] Auto Retry | Get Ready stuck | leaving to lobby for clean requeue | sent:",
+                        tostring(Left)
                     )
                 end
 
@@ -7944,9 +8142,74 @@ FarmTab:CreateToggle({
                             tostring(BootedFired)
                         )
                     end
+
+                    -- Also recover if this updated script is injected while the
+                    -- client is already stuck on Get Ready. Give a little more
+                    -- time than the post-Retry path so a normal first load on a
+                    -- slower phone is not mistaken for a broken run.
+                    local TravelStatus = ReadLeaf(Participant.travelStatus)
+
+                    if Waited >= 10.0
+                        and TravelStatus == "idle"
+                        and Now - (Rescue.PreRunStuckLeaveAt or 0) >= 2.0
+                    then
+                        Rescue.PreRunStuckLeaveAt = Now
+
+                        local CurrentMode =
+                            tostring(workspace:GetAttribute("Mode") or "")
+
+                        if type(GENV.__AZ_IS_RAID_MODE) == "function"
+                            and GENV.__AZ_IS_RAID_MODE(CurrentMode)
+                        then
+                            Settings.AutoJoinRaid = true
+                            Settings.AutoJoinMap = false
+                            Settings.AutoJoinEndless = false
+
+                            if type(Settings.SetLobbyUserPreference) == "function" then
+                                pcall(Settings.SetLobbyUserPreference, "AutoJoinRaid", true)
+                                pcall(Settings.SetLobbyUserPreference, "AutoJoinMap", false)
+                                pcall(Settings.SetLobbyUserPreference, "AutoJoinEndless", false)
+                            end
+                        else
+                            Settings.AutoJoinMap = true
+                            Settings.AutoJoinRaid = false
+                            Settings.AutoJoinEndless = false
+
+                            if type(Settings.SetLobbyUserPreference) == "function" then
+                                pcall(Settings.SetLobbyUserPreference, "AutoJoinMap", true)
+                                pcall(Settings.SetLobbyUserPreference, "AutoJoinRaid", false)
+                                pcall(Settings.SetLobbyUserPreference, "AutoJoinEndless", false)
+                            end
+                        end
+
+                        pcall(function()
+                            if type(Settings.PersistLobbyPreferences) == "function" then
+                                Settings.PersistLobbyPreferences()
+                            end
+
+                            if type(Settings.ArmRemoteAutoExecute) == "function" then
+                                Settings.ArmRemoteAutoExecute()
+                            end
+                        end)
+
+                        local Left = pcall(function()
+                            Rescue.RunPackets.endAction:fire(3)
+                        end)
+
+                        Rescue.EndActionState =
+                            Left
+                            and "PreRunStuckLeavingLobby"
+                            or "PreRunStuckLeaveRetry"
+
+                        print(
+                            "[Anime Zero] Get Ready watchdog | stuck | leaving to lobby for clean requeue | sent:",
+                            tostring(Left)
+                        )
+                    end
                 else
                     Rescue.PreRunWaitingSince = 0
                     Rescue.PreRunReadyNudged = false
+                    Rescue.PreRunStuckLeaveAt = 0
                     Rescue.EndActionState = "WaitingResult"
                 end
 
@@ -7990,7 +8253,7 @@ FarmTab:CreateToggle({
                 return
             end
 
-            if Now - (Rescue.RetryResultSeenAt or Now) < 0.55 then
+            if Now - (Rescue.RetryResultSeenAt or Now) < 1.00 then
                 Rescue.EndActionState = "ResultSettling"
                 return
             end
@@ -8016,6 +8279,7 @@ FarmTab:CreateToggle({
                 Rescue.RetryAwaitingStart = true
                 Rescue.RetryAwaitingSince = Now
                 Rescue.RetryReadyNudged = false
+                Rescue.RetryStuckLeaveAt = 0
                 Rescue.EndActionState = "RetryAccepted"
                 return
             end
@@ -8044,6 +8308,7 @@ FarmTab:CreateToggle({
                 Rescue.RetryAwaitingStart = true
                 Rescue.RetryAwaitingSince = Now
                 Rescue.RetryReadyNudged = false
+                Rescue.RetryStuckLeaveAt = 0
                 Rescue.NextEndAction = Now + 2.00
                 Rescue.EndActionState = "RetrySentWaitingStart"
 
@@ -13706,60 +13971,37 @@ end)()
 
 
                 if not Settings.AutoExecuteOnTeleport then
+                    GENV.__AZ_REMOTE_AUTOEXEC_ARMED = false
                     return
                 end
 
 
-                local Queue =
-                    queue_on_teleport
-                    or queueonteleport
+                local Armed = false
+
+                if type(Settings.ArmRemoteAutoExecute) == "function" then
+                    local Ok, Result =
+                        pcall(Settings.ArmRemoteAutoExecute)
+
+                    Armed =
+                        Ok
+                        and Result == true
+                end
 
 
-                if type(Queue) ~= "function"
-                    or type(readfile) ~= "function"
-                    or type(isfile) ~= "function"
-                    or not isfile(
-                        "AnimeZero/AnimeZero_AutoExec.lua"
-                    )
-                then
-
+                if not Armed then
                     Window:Notify({
                         title = "Auto Execute",
-                        content = "Your executor needs queue_on_teleport plus file read/write support for this option.",
+                        content = "Your executor needs queue_on_teleport. The GitHub loader could not be armed.",
                         duration = 6,
                     })
 
-
                     return
                 end
 
 
-                Queue(
-                    [[
-local enabled = "AnimeZero/autoexecute_enabled.txt"
-local source = "AnimeZero/AnimeZero_AutoExec.lua"
-
-if readfile
-    and isfile
-    and isfile(enabled)
-    and readfile(enabled) == "1"
-    and isfile(source)
-then
-    local code = readfile(source)
-
-    if code
-        and code ~= ""
-    then
-        loadstring(code)()
-    end
-end
-]]
-                )
-
-
                 Window:Toast({
-                    title = "Auto Execute armed",
-                    subtitle = "The script will reload after the next teleport.",
+                    title = "Remote Auto Execute armed",
+                    subtitle = "Each teleport will fetch the newest GitHub version first.",
                     position = "Top",
                 })
             end,
