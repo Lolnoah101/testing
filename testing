@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SHADOW GATE RAID
+--// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + SHADOW GATE RAID
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -4880,6 +4880,22 @@ FarmTab:CreateToggle({
         AriseMovementHoldUntil = 0,
         AriseAttempts = 0,
         NextEndAction = 0,
+
+        -- Auto Retry ownership / race protection. Retry is sent exactly once
+        -- for each completed result, then this runtime waits for the next run
+        -- to actually become active before any future Retry can be considered.
+        RetryResultSeenKey = nil,
+        RetryResultSeenAt = 0,
+        RetryHandledKey = nil,
+        RetryAwaitingStart = false,
+        RetryAwaitingSince = 0,
+        RetryReadyNudged = false,
+
+        -- Also watch generic wave-0 waiting so injecting this fixed script while
+        -- already stuck on Get Ready can recover without needing another result.
+        PreRunWaitingSince = 0,
+        PreRunReadyNudged = false,
+
         BlockSent = false,
         LastDebug = 0,
         LootState = "Idle",
@@ -7734,9 +7750,18 @@ FarmTab:CreateToggle({
         end
 
 
-        -- Reliable end-action fallback for the updated run place. This runs
-        -- independently of the legacy Story automation engine, so Raid retry
-        -- still works when the rescue runtime is the active farm controller.
+        -- Reliable end-action owner for the updated run place. Auto Retry is
+        -- intentionally owned by this runtime only. The older Story loop is
+        -- left as a fallback only when this runtime is unavailable.
+        --
+        -- Important: the game briefly returns to a waiting / wave-0 state when
+        -- Retry begins. Sending another Retry during that transition can strand
+        -- the run on "Get Ready". We therefore:
+        --   1) wait for a stable result marker,
+        --   2) send Retry once,
+        --   3) lock Retry until the next run is genuinely active, and
+        --   4) re-send the game's normal ready/boot handshake once if startup
+        --      is still waiting several seconds later.
         Rescue.RunEndAction = function()
             if not Settings.AutoRetry
                 or workspace:GetAttribute("Mode") == "infinite"
@@ -7747,15 +7772,17 @@ FarmTab:CreateToggle({
                 or not RunStore2.store.state
             then
                 Rescue.EndActionState = "Idle"
+                Rescue.RetryResultSeenKey = nil
+                Rescue.RetryResultSeenAt = 0
+                Rescue.RetryAwaitingStart = false
+                Rescue.RetryAwaitingSince = 0
+                Rescue.RetryReadyNudged = false
+                Rescue.PreRunWaitingSince = 0
+                Rescue.PreRunReadyNudged = false
                 return
             end
 
             local Now = os.clock()
-
-            if Now < Rescue.NextEndAction then
-                return
-            end
-
             local State = RunStore2.store.state
             local UserId = tostring(LocalPlayerObject.UserId)
             local Participant = nil
@@ -7770,11 +7797,7 @@ FarmTab:CreateToggle({
             end
 
             local Status = ReadLeaf(Participant.status)
-
-            if Status == "active" then
-                Rescue.EndActionState = "RunActive"
-                return
-            end
+            local StartedAt = ReadRunValue2("startedAt")
 
             local ParticipantFinishedAt =
                 ReadLeaf(Participant.finishedAt)
@@ -7785,17 +7808,153 @@ FarmTab:CreateToggle({
             local ResultEndsAt =
                 ReadRunValue2("resultEndsAt")
 
-            -- Do not vote during a pre-run/waiting state that merely happens to
-            -- use a non-active participant status. At least one result marker
-            -- must exist before we send the Retry vote.
-            if ParticipantFinishedAt == nil
-                and RunFinishedAt == nil
-                and ResultEndsAt == nil
+            local HasResultMarker =
+                ParticipantFinishedAt ~= nil
+                or RunFinishedAt ~= nil
+                or ResultEndsAt ~= nil
+
+            -- A real active run is the only thing that releases the post-Retry
+            -- startup lock. This prevents a transient waiting state from being
+            -- mistaken for another completed run.
+            if Status == "active"
+                and StartedAt ~= nil
             then
-                Rescue.EndActionState =
-                    "WaitingResult"
+                if Rescue.RetryAwaitingStart then
+                    print(
+                        "[Anime Zero] Auto Retry | new run confirmed active | startedAt:",
+                        tostring(StartedAt)
+                    )
+                end
+
+                Rescue.RetryAwaitingStart = false
+                Rescue.RetryAwaitingSince = 0
+                Rescue.RetryReadyNudged = false
+                Rescue.RetryResultSeenKey = nil
+                Rescue.RetryResultSeenAt = 0
+                Rescue.PreRunWaitingSince = 0
+                Rescue.PreRunReadyNudged = false
+                Rescue.EndActionState = "RunActive"
                 return
             end
+
+            -- Once Retry has been sent, NEVER send another Retry while the new
+            -- run is still starting. If the server remains on Get Ready for a
+            -- few seconds, replay the same two readiness events the game's boot
+            -- LocalScript normally fires. This is one-shot and does not touch
+            -- farm movement, difficulty, or queue settings.
+            if Rescue.RetryAwaitingStart then
+                local Waited =
+                    Now - (Rescue.RetryAwaitingSince or Now)
+
+                Rescue.EndActionState =
+                    "WaitingRunStart "
+                    .. string.format("%.1fs", Waited)
+
+                if Waited >= 4.0
+                    and not Rescue.RetryReadyNudged
+                    and not HasResultMarker
+                    and StartedAt == nil
+                then
+                    Rescue.RetryReadyNudged = true
+
+                    local ReadyFired = false
+                    local BootedFired = false
+
+                    if Rescue.RunPackets.clientReady then
+                        ReadyFired = pcall(function()
+                            Rescue.RunPackets.clientReady:fire()
+                        end)
+                    end
+
+                    if Rescue.RunPackets.clientBooted then
+                        BootedFired = pcall(function()
+                            Rescue.RunPackets.clientBooted:fire()
+                        end)
+                    end
+
+                    print(
+                        "[Anime Zero] Auto Retry | startup ready nudge | ready:",
+                        tostring(ReadyFired),
+                        "| booted:",
+                        tostring(BootedFired)
+                    )
+                end
+
+                return
+            end
+
+            -- If status has already flipped active but old result markers are
+            -- still draining, treat it as a transition and never vote again.
+            if Status == "active"
+                and HasResultMarker
+            then
+                Rescue.EndActionState = "RunActiveTransition"
+                return
+            end
+
+            -- Never vote from a generic pre-run waiting state. A completed run
+            -- must expose at least one real result marker first. While wave 0 is
+            -- waiting, run a one-shot readiness watchdog as a recovery for the
+            -- exact "Get Ready / 00:00 / 0 enemies" state.
+            if not HasResultMarker then
+                Rescue.RetryResultSeenKey = nil
+                Rescue.RetryResultSeenAt = 0
+
+                local Wave = tonumber(ReadRunValue2("wave")) or 0
+
+                if StartedAt == nil
+                    and Wave == 0
+                then
+                    if (Rescue.PreRunWaitingSince or 0) <= 0 then
+                        Rescue.PreRunWaitingSince = Now
+                        Rescue.PreRunReadyNudged = false
+                    end
+
+                    local Waited =
+                        Now - (Rescue.PreRunWaitingSince or Now)
+
+                    Rescue.EndActionState =
+                        "PreRunWaiting "
+                        .. string.format("%.1fs", Waited)
+
+                    if Waited >= 5.0
+                        and not Rescue.PreRunReadyNudged
+                    then
+                        Rescue.PreRunReadyNudged = true
+
+                        local ReadyFired = false
+                        local BootedFired = false
+
+                        if Rescue.RunPackets.clientReady then
+                            ReadyFired = pcall(function()
+                                Rescue.RunPackets.clientReady:fire()
+                            end)
+                        end
+
+                        if Rescue.RunPackets.clientBooted then
+                            BootedFired = pcall(function()
+                                Rescue.RunPackets.clientBooted:fire()
+                            end)
+                        end
+
+                        print(
+                            "[Anime Zero] Get Ready watchdog | ready:",
+                            tostring(ReadyFired),
+                            "| booted:",
+                            tostring(BootedFired)
+                        )
+                    end
+                else
+                    Rescue.PreRunWaitingSince = 0
+                    Rescue.PreRunReadyNudged = false
+                    Rescue.EndActionState = "WaitingResult"
+                end
+
+                return
+            end
+
+            Rescue.PreRunWaitingSince = 0
+            Rescue.PreRunReadyNudged = false
 
             local TravelStatus =
                 ReadLeaf(Participant.travelStatus)
@@ -7804,6 +7963,39 @@ FarmTab:CreateToggle({
                 Rescue.EndActionState =
                     "Travel "
                     .. tostring(TravelStatus)
+                return
+            end
+
+            local ResultKey =
+                tostring(ParticipantFinishedAt or "-")
+                .. "|"
+                .. tostring(RunFinishedAt or "-")
+                .. "|"
+                .. tostring(ResultEndsAt or "-")
+
+            -- Result timestamps are unique per completed run. Once this exact
+            -- result has been handled, never act on it again even if resultVotes
+            -- gets cleared while the server is resetting the run.
+            if Rescue.RetryHandledKey == ResultKey then
+                Rescue.EndActionState = "RetryAlreadyHandled"
+                return
+            end
+
+            -- Give the result state a short settling window. This avoids firing
+            -- Retry on the same replication beat that the match is finalised.
+            if Rescue.RetryResultSeenKey ~= ResultKey then
+                Rescue.RetryResultSeenKey = ResultKey
+                Rescue.RetryResultSeenAt = Now
+                Rescue.EndActionState = "ResultSettling"
+                return
+            end
+
+            if Now - (Rescue.RetryResultSeenAt or Now) < 0.55 then
+                Rescue.EndActionState = "ResultSettling"
+                return
+            end
+
+            if Now < Rescue.NextEndAction then
                 return
             end
 
@@ -7816,14 +8008,22 @@ FarmTab:CreateToggle({
                 OwnVote = ReadLeaf(VoteLeaf)
             end)
 
+            -- If another part of the client already registered Retry for this
+            -- result, adopt it and enter the same startup lock instead of firing
+            -- a duplicate request.
             if tonumber(OwnVote) == 1 then
+                Rescue.RetryHandledKey = ResultKey
+                Rescue.RetryAwaitingStart = true
+                Rescue.RetryAwaitingSince = Now
+                Rescue.RetryReadyNudged = false
                 Rescue.EndActionState = "RetryAccepted"
-                Rescue.NextEndAction = Now + 0.75
                 return
             end
 
             if type(GENV.__AZ_WEBHOOK_BEFORE_END_ACTION) == "function" then
-                local GuardOK, Ready = pcall(GENV.__AZ_WEBHOOK_BEFORE_END_ACTION)
+                local GuardOK, Ready =
+                    pcall(GENV.__AZ_WEBHOOK_BEFORE_END_ACTION)
+
                 if GuardOK and Ready == false then
                     Rescue.EndActionState = "WebhookPending"
                     Rescue.NextEndAction = Now + 0.30
@@ -7831,29 +8031,38 @@ FarmTab:CreateToggle({
                 end
             end
 
-            Rescue.NextEndAction = Now + 1.00
-            Rescue.EndActionState = "RetrySent"
-
+            -- One result = one Retry request. Mark it handled immediately after
+            -- the local network fire succeeds so a fast server reset cannot make
+            -- us submit the same action a second time.
             local Fired, FireError =
                 pcall(function()
                     Rescue.RunPackets.endAction:fire(1)
                 end)
 
             if Fired then
+                Rescue.RetryHandledKey = ResultKey
+                Rescue.RetryAwaitingStart = true
+                Rescue.RetryAwaitingSince = Now
+                Rescue.RetryReadyNudged = false
+                Rescue.NextEndAction = Now + 2.00
+                Rescue.EndActionState = "RetrySentWaitingStart"
+
                 print(
-                    "[Anime Zero] Auto Retry | rescue vote sent | mode:",
+                    "[Anime Zero] Auto Retry | sent once | mode:",
                     tostring(workspace:GetAttribute("Mode")),
                     "| status:",
                     tostring(Status)
                 )
             else
                 Rescue.EndActionState = "RetryError"
+                Rescue.NextEndAction = Now + 1.00
                 warn(
                     "[Anime Zero][Auto Retry]",
                     tostring(FireError)
                 )
             end
         end
+
 
 
         Rescue.Ready = true
@@ -27870,7 +28079,33 @@ local RunStore =
 
             elseif Settings.AutoRetry then
 
-                Action = 1
+                -- The rescue runtime owns Retry because it understands the
+                -- updated result -> waiting -> active lifecycle. Keeping the old
+                -- loop from also firing endAction(1) prevents duplicate Retry
+                -- votes during the wave-0 / Get Ready transition. If rescue did
+                -- not initialize, this remains a guarded fallback.
+                local RescueRuntime =
+                    GENV.__AZ_FARM_RESCUE_RUNTIME
+
+                local RescueOwnsRetry =
+                    type(RescueRuntime) == "table"
+                    and RescueRuntime.Active == true
+                    and RescueRuntime.Ready == true
+
+                if not RescueOwnsRetry then
+                    local HasFinishedMarker = false
+
+                    pcall(function()
+                        HasFinishedMarker =
+                            Participant.finishedAt:get() ~= nil
+                            or RunStore.state.finishedAt:get() ~= nil
+                            or RunStore.state.resultEndsAt:get() ~= nil
+                    end)
+
+                    if HasFinishedMarker then
+                        Action = 1
+                    end
+                end
             end
 
 
