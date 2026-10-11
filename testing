@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// 2026-10-11: SMOOTH LOCKED-COIN LOOT + TRIALS LIFT + RUBBLE PRIORITY
+--// 2026-10-11: BELOW SURFACE STANDBY + LOCKED LOOT TELEPORT + TRIALS LIFT
 --// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + 2026-10-11 GAME UPDATE
 --//
 --// FIXED:
@@ -2447,6 +2447,131 @@ then
 end
 
 GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
+
+-- BELOW WAIT / LOOT TELEPORT SHARED MOVEMENT
+-- Shared by the normal farm controller and the rescue/Trials controller.
+-- The location is a raycast-confirmed WALKABLE surface, never a fixed Y height.
+GENV.__AZ_FARM_EXT.GetBelowSurfaceGoal = function(Root, EnemyPosition, AreaToken)
+    if not Root or not Root.Parent then
+        return nil
+    end
+
+    local Ext = GENV.__AZ_FARM_EXT
+    local World = workspace:FindFirstChild("World")
+    local Token = tostring(AreaToken or "?")
+        .. ":" .. tostring(workspace:GetAttribute("Floor") or "?")
+
+    if Ext.BelowStandbyWorld ~= World
+        or Ext.BelowStandbyArea ~= Token
+        or Ext.BelowStandbyCharacter ~= Root.Parent
+    then
+        Ext.BelowStandbyWorld = World
+        Ext.BelowStandbyArea = Token
+        Ext.BelowStandbyCharacter = Root.Parent
+        Ext.BelowStandbyCFrame = nil
+        Ext.BelowStandbyEnemyPosition = nil
+        Ext.BelowStandbyTeleportToken = nil
+    end
+
+    if typeof(EnemyPosition) == "Vector3" then
+        Ext.BelowStandbyEnemyPosition = EnemyPosition
+    end
+
+    if typeof(Ext.BelowStandbyCFrame) == "CFrame" then
+        return Ext.BelowStandbyCFrame
+    end
+
+    local Sample = Ext.BelowStandbyEnemyPosition or Root.Position
+    local Ignore = { Root.Parent }
+    local Enemies = workspace:FindFirstChild("enemies")
+    if Enemies then
+        table.insert(Ignore, Enemies)
+    end
+    if World then
+        for _, Name in ipairs({"Enemies", "Mobs", "Drops", "RenderedDrops"}) do
+            local Folder = World:FindFirstChild(Name)
+            if Folder then
+                table.insert(Ignore, Folder)
+            end
+        end
+    end
+
+    local Params = RaycastParams.new()
+    Params.FilterType = Enum.RaycastFilterType.Exclude
+    Params.IgnoreWater = true
+
+    -- Probe near the enemy's floor height, not arbitrary global world Y=0.
+    -- Retry lower and higher probes for maps with raised platforms.
+    for _, Above in ipairs({12, 32, 70}) do
+        local Filter = table.clone(Ignore)
+        for _ = 1, 8 do
+            Params.FilterDescendantsInstances = Filter
+            local Origin = Sample + Vector3.new(0, Above, 0)
+            local Hit = workspace:Raycast(
+                Origin,
+                Vector3.new(0, -(Above + 45), 0),
+                Params
+            )
+            if not Hit then
+                break
+            end
+            local Part = Hit.Instance
+            local Walkable = Hit.Normal.Y >= 0.72
+                and (Part:IsA("Terrain") or (Part:IsA("BasePart") and Part.CanCollide))
+            if Walkable then
+                local Humanoid = Root.Parent:FindFirstChildOfClass("Humanoid")
+                local Height = math.clamp(
+                    (Humanoid and Humanoid.HipHeight or 2) + Root.Size.Y * 0.5,
+                    2.5, 8
+                )
+                Ext.BelowStandbyCFrame = CFrame.new(Hit.Position + Vector3.new(0, Height, 0))
+                return Ext.BelowStandbyCFrame
+            end
+            table.insert(Filter, Part)
+        end
+    end
+
+    -- No confirmed surface: don't place the player in mid-air.
+    return nil
+end
+
+-- A single instant move for each locked coin. Retargeting the same ID in
+-- successive frames never causes another teleport or target oscillation.
+GENV.__AZ_FARM_EXT.TeleportToLootOnce = function(Root, Goal)
+    local Ext = GENV.__AZ_FARM_EXT
+    local Token = Ext.LootTargetToken
+    if not Root or typeof(Goal) ~= "CFrame" or Token == nil then
+        return false
+    end
+    if (Root.Position - Goal.Position).Magnitude <= 10 then
+        return true
+    end
+    if Ext.LootLastTeleportToken == Token then
+        return false
+    end
+
+    Ext.LootLastTeleportToken = Token
+    Root.CFrame = CFrame.new(Goal.Position) * Root.CFrame.Rotation
+    Root.AssemblyLinearVelocity = Vector3.zero
+    Root.AssemblyAngularVelocity = Vector3.zero
+    Ext.LootStatus = "Teleported to " .. tostring(Ext.LootTargetId) .. " (confirming)"
+    return true
+end
+
+GENV.__AZ_BELOW_STATUS = function()
+    local Ext = GENV.__AZ_FARM_EXT
+    local Status = {
+        position = Settings.FarmPosition,
+        farmMode = CurrentFarmMode,
+        area = Ext.BelowStandbyArea,
+        groundedStandby = Ext.BelowStandbyCFrame ~= nil,
+        standbyPosition = Ext.BelowStandbyCFrame and Ext.BelowStandbyCFrame.Position,
+    }
+    for Key, Value in pairs(Status) do
+        print("[Anime Zero][Below]", Key, "=", tostring(Value))
+    end
+    return Status
+end
 
 -- Move to the actual rubble blocker surface, NOT a distant damage-bar marker.
 -- Both farm controllers use the same positioning helper, preventing oscillation.
@@ -6489,6 +6614,13 @@ FarmTab:CreateToggle({
 
                 local RootPosition = EnemyRoot.Position
 
+                if Settings.FarmPosition == "Below" then
+                    GENV.__AZ_FARM_EXT.GetBelowSurfaceGoal(
+                        GetRoot2(), RootPosition, ReadRunValue2("area")
+                    )
+                    GENV.__AZ_FARM_EXT.BelowStandbyTeleportToken = nil
+                end
+
                 if Settings.FarmPosition == "Above" then
                     local Aim =
                         RootPosition
@@ -7238,25 +7370,10 @@ FarmTab:CreateToggle({
                                 and type(Ext.GetLootTargetCFrame) == "function"
                                 and Ext.GetLootTargetCFrame()
                             if typeof(LootGoal) == "CFrame" then
-                                -- Exit loot sweep uses the same smooth approach
-                                -- as normal farming; never hard-snap to a coin.
-                                local SweepNow = os.clock()
-                                local LastSweep = Rescue.TrialsLootLastStepAt
-                                    or (SweepNow - 1/30)
-                                Rescue.TrialsLootLastStepAt = SweepNow
-                                local StepDt = math.clamp(
-                                    SweepNow - LastSweep, 1/120, 0.06
-                                )
-                                local Distance = (Root.Position - LootGoal.Position).Magnitude
-                                local Step = math.min(110 * StepDt, math.max(0, Distance - 8))
-                                if Distance > 0.01 and Step > 0 then
-                                    Root.CFrame = CFrame.new(
-                                        Root.Position:Lerp(LootGoal.Position, Step / Distance)
-                                    ) * Root.CFrame.Rotation
-                                    Root.AssemblyLinearVelocity = Vector3.zero
-                                    Root.AssemblyAngularVelocity = Vector3.zero
-                                end
-                                Rescue.RaidState = "Trials Exit Smooth Loot Sweep"
+                                -- Same one-teleport-per-drop logic as normal
+                                -- farming; then wait for pickup/store removal.
+                                GENV.__AZ_FARM_EXT.TeleportToLootOnce(Root, LootGoal)
+                                Rescue.RaidState = "Trials Exit Locked Loot Teleport"
                                 return true
                             elseif Elapsed < 1.85 then
                                 Rescue.RaidState = "Waiting For Fresh Drop"
@@ -7493,9 +7610,8 @@ FarmTab:CreateToggle({
                     or Settings.FarmPosition == "Below"
                 )
 
-            Rescue.SetHorizontalHoldActive(WantsHorizontalHold)
-
             if not FarmEnabled or not Alive2() then
+                Rescue.SetHorizontalHoldActive(false)
                 Rescue.RaidDodgeActive = false
                 Rescue.RaidDodgeGoal = nil
                 Rescue.RaidDodgeCombatReady = false
@@ -7504,6 +7620,11 @@ FarmTab:CreateToggle({
 
             local _, EnemyRoot =
                 NearestEnemy2()
+
+            Rescue.SetHorizontalHoldActive(
+                WantsHorizontalHold and EnemyRoot ~= nil
+                and not GENV.__AZ_IS_FLOOR_EXIT_READY()
+            )
 
             local Root =
                 GetRoot2()
@@ -7651,16 +7772,8 @@ FarmTab:CreateToggle({
                     and Ext.GetLootTargetCFrame()
                     or nil
                 if Goal then
-                    local Distance = (Root.Position - Goal.Position).Magnitude
-                    local Step = math.min(110 * DeltaTime, math.max(0, Distance - 8))
-                    if Distance > 0.01 and Step > 0 then
-                        Root.CFrame = CFrame.new(
-                            Root.Position:Lerp(Goal.Position, Step / Distance)
-                        ) * Root.CFrame.Rotation
-                        Root.AssemblyLinearVelocity = Vector3.zero
-                        Root.AssemblyAngularVelocity = Vector3.zero
-                    end
-                    Rescue.RaidState = "Smooth loot travel"
+                    GENV.__AZ_FARM_EXT.TeleportToLootOnce(Root, Goal)
+                    Rescue.RaidState = "Locked loot teleport / pickup confirmation"
                     return
                 end
             end
@@ -7677,6 +7790,24 @@ FarmTab:CreateToggle({
             end
 
             if not EnemyRoot then
+                if not IsRaid and Settings.FarmPosition == "Below"
+                    and not GENV.__AZ_IS_FLOOR_EXIT_READY()
+                then
+                    local Ext = GENV.__AZ_FARM_EXT
+                    local Standby = Ext.GetBelowSurfaceGoal(
+                        Root, nil, ReadRunValue2("area")
+                    )
+                    if Standby then
+                        local Token = tostring(Ext.BelowStandbyWorld)
+                            .. ":" .. tostring(Ext.BelowStandbyArea)
+                        if Ext.BelowStandbyTeleportToken ~= Token then
+                            Ext.BelowStandbyTeleportToken = Token
+                            Root.CFrame = Standby
+                            Root.AssemblyLinearVelocity = Vector3.zero
+                            Root.AssemblyAngularVelocity = Vector3.zero
+                        end
+                    end
+                end
                 return
             end
 
@@ -8794,6 +8925,7 @@ FarmTab:CreateToggle({
                     if CurrentFarmMode ~= "Rubble"
                         and CurrentFarmMode ~= "Waiting For Rubble To Drop"
                         and CurrentFarmMode ~= "Loot"
+                        and CurrentFarmMode ~= "Below Standby"
                     then
                         AssistOK, AssistError = pcall(
                             Rescue.RunNormalProgressionAssist,
@@ -29452,6 +29584,8 @@ end)()
             table.clear(DropAttempts)
             table.clear(DropIgnoreUntil)
             Ext.LootStatus = "Disabled"
+            Ext.LootTargetToken = nil
+            Ext.LootLastTeleportToken = nil
             return
         end
 
@@ -29565,6 +29699,7 @@ end)()
 
         local Distance = (Root.Position - LockedPosition).Magnitude
         Ext.LootTargetId = LockedDropId
+        Ext.LootTargetToken = tostring(LockedDropId) .. ":" .. tostring(LockedDropSince)
         Ext.LootDistance = Distance
 
         if Distance <= DROP_PICKUP_RANGE then
@@ -31131,6 +31266,11 @@ local function GetEnemyFarmCFrame(
         return nil
     end
 
+    if Settings.FarmPosition == "Below" then
+        GENV.__AZ_FARM_EXT.GetBelowSurfaceGoal(
+            GetRoot(), Visual.RootPosition, GetRunValue("area")
+        )
+    end
 
     local Distance =
         Settings.FarmDistance
@@ -33347,6 +33487,8 @@ local function ApplyFarmMovement(
         MovementEnabled
         and Settings.FarmMethod
             == "Tween"
+        and CurrentFarmMode ~= "Loot"
+        and CurrentFarmMode ~= "Below Standby"
         and DesiredFarmCFrame
             ~= nil
 
@@ -33766,25 +33908,24 @@ local function ApplyFarmMovement(
     end
 
 
-    -- Coins use a smooth approach regardless of the Teleport/Tween choice.
-    -- Stop well inside the pickup range; no 60 FPS snapping to the same coin.
-    if CurrentFarmMode == "Loot" then
-        local Distance = (
-            Root.Position - DesiredFarmCFrame.Position
-        ).Magnitude
-        local Step = math.min(
-            110 * DeltaTime,
-            math.max(0, Distance - 8)
-        )
-        if Distance > 0.01 and Step > 0 then
-            local NewPosition = Root.Position:Lerp(
-                DesiredFarmCFrame.Position,
-                Step / Distance
-            )
-            Root.CFrame = CFrame.new(NewPosition) * Root.CFrame.Rotation
+    -- After defeating the last enemy, stand upright on the detected map
+    -- floor. No repeated CFrame hold: Roblox gravity handles the standing.
+    if CurrentFarmMode == "Below Standby" then
+        local Ext = GENV.__AZ_FARM_EXT
+        local Token = tostring(Ext.BelowStandbyWorld) .. ":" .. tostring(Ext.BelowStandbyArea)
+        if Ext.BelowStandbyTeleportToken ~= Token then
+            Ext.BelowStandbyTeleportToken = Token
+            Root.CFrame = CFrame.new(DesiredFarmCFrame.Position) * CFrame.Angles(0, math.rad(Root.Orientation.Y), 0)
             Root.AssemblyLinearVelocity = Vector3.zero
             Root.AssemblyAngularVelocity = Vector3.zero
         end
+        return
+    end
+
+    -- Loot ignores Farm Method: one instant move per locked drop, with
+    -- confirmation/cooldown managed by RunAutoPickupLoot.
+    if CurrentFarmMode == "Loot" then
+        GENV.__AZ_FARM_EXT.TeleportToLootOnce(Root, DesiredFarmCFrame)
         return
     end
 
@@ -35201,6 +35342,7 @@ local function HandleNormalFarm()
             )
 
 
+        GENV.__AZ_FARM_EXT.BelowStandbyTeleportToken = nil
         SetFarmMode(
             "Enemy"
         )
@@ -35507,6 +35649,22 @@ local function UpdateAutoFarm()
 
 
     HandleNormalFarm()
+
+    if Settings.FarmPosition == "Below"
+        and Settings.AutoFarm
+        and DesiredFarmCFrame == nil
+        and (CurrentFarmMode == "Waiting"
+            or CurrentFarmMode == "Waiting For Next Area")
+        and not GENV.__AZ_IS_FLOOR_EXIT_READY()
+    then
+        local Standby = GENV.__AZ_FARM_EXT.GetBelowSurfaceGoal(
+            GetRoot(), nil, GetRunValue("area")
+        )
+        if Standby then
+            DesiredFarmCFrame = Standby
+            SetFarmMode("Below Standby")
+        end
+    end
 end
 
 
@@ -35937,7 +36095,7 @@ task.spawn(function()
     GENV.__AZ_FARM_FULL_ENGINE_ACTIVE = false
     GENV.__AZ_FARM_ENGINE_ACTIVE =
         GENV.__AZ_FARM_RESCUE_ACTIVE == true
-end)()
+end)
 
 
 --//============================================================
