@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + SHADOW GATE RAID
+--// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + 2026-10-11 GAME UPDATE
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -193,6 +193,14 @@ end
 
 GENV.__AZ_RUNTIME = nil
 
+-- Close the prior Gen2 window before a new execution so old toggle
+-- callbacks cannot compete with the newly created controls.
+if GENV.__AZ_ACTIVE_WINDOW then
+    pcall(function()
+        GENV.__AZ_ACTIVE_WINDOW:Unload()
+    end)
+    GENV.__AZ_ACTIVE_WINDOW = nil
+end
 
 for _, Name in ipairs({
     "__ANIME_ZERO_SESSION",
@@ -246,6 +254,8 @@ local Settings = {
 
     AutoNext = false,
 
+    -- Story and Trials can use the game's native Next result vote.
+
     LeaveAfterMatches = 5,
 
     AutoLeaveAfterMatches = false,
@@ -264,6 +274,11 @@ local Settings = {
     SelectedRaidMap = "Spirit's Bathtub",
 
     AutoJoinRaid = false,
+
+    -- Trials now uses floor progression in the queue payload.
+    SelectedTrialsRoom = 1,
+    AutoJoinTrials = false,
+    AutoStartVote = false,
 
     EndlessLeaveWave = 10,
 
@@ -2108,26 +2123,27 @@ end)()
         or {}
 
 
+    -- A saved false is a real user preference. Never use the
+    -- `condition and saved or fallback` idiom for booleans.
+    local function ReadSavedBool(Name, Fallback)
+        if type(Saved[Name]) == "boolean" then
+            return Saved[Name]
+        end
+        return Fallback == true
+    end
+
     local User = {
         AutoFarm =
-            type(Saved.AutoFarm) == "boolean"
-            and Saved.AutoFarm
-            or Settings.AutoFarm,
+            ReadSavedBool("AutoFarm", Settings.AutoFarm),
 
         AutoRaidFarm =
-            type(Saved.AutoRaidFarm) == "boolean"
-            and Saved.AutoRaidFarm
-            or Settings.AutoRaidFarm,
+            ReadSavedBool("AutoRaidFarm", Settings.AutoRaidFarm),
 
         AutoArise =
-            type(Saved.AutoArise) == "boolean"
-            and Saved.AutoArise
-            or Settings.AutoArise,
+            ReadSavedBool("AutoArise", Settings.AutoArise),
 
         AutoPickupLoot =
-            type(Saved.AutoPickupLoot) == "boolean"
-            and Saved.AutoPickupLoot
-            or Settings.AutoPickupLoot,
+            ReadSavedBool("AutoPickupLoot", Settings.AutoPickupLoot),
 
         FarmDistance =
             math.clamp(
@@ -2139,9 +2155,7 @@ end)()
             ),
 
         AutoM1 =
-            type(Saved.AutoM1) == "boolean"
-            and Saved.AutoM1
-            or Settings.AutoM1,
+            ReadSavedBool("AutoM1", Settings.AutoM1),
 
         FarmPosition =
             (
@@ -2170,9 +2184,7 @@ end)()
             ),
 
         AutoSkills =
-            type(Saved.AutoSkills) == "boolean"
-            and Saved.AutoSkills
-            or Settings.AutoSkills,
+            ReadSavedBool("AutoSkills", Settings.AutoSkills),
 
         SelectedSkills = {
             ["Skill 1"] = true,
@@ -2181,14 +2193,10 @@ end)()
         },
 
         AutoUltimate =
-            type(Saved.AutoUltimate) == "boolean"
-            and Saved.AutoUltimate
-            or Settings.AutoUltimate,
+            ReadSavedBool("AutoUltimate", Settings.AutoUltimate),
 
         AutoBlock =
-            type(Saved.AutoBlock) == "boolean"
-            and Saved.AutoBlock
-            or Settings.AutoBlock,
+            ReadSavedBool("AutoBlock", Settings.AutoBlock),
 
         BlockMode =
             (
@@ -2333,6 +2341,10 @@ end)()
             User[Name] =
                 Copy(Value)
 
+            -- Update only the changed preference. Applying *all* saved
+            -- preferences here wiped mode choices made by automation workers
+            -- whenever any unrelated UI value changed.
+            Settings[Name] = Copy(Value)
             Persist()
 
             return true
@@ -3086,6 +3098,7 @@ local Window =
         },
     })
 
+GENV.__AZ_ACTIVE_WINDOW = Window
 
 -- Sidebar grouping keeps the main automation tabs easy to scan.
 
@@ -3337,6 +3350,9 @@ end
                     Single(Legacy.LobbyRaidMap)
                     or Single(Legacy.SelectedRaidMap),
                 AutoJoinRaid = Legacy.AutoJoinRaid,
+                AutoJoinTrials = Legacy.AutoJoinTrials,
+                SelectedTrialsRoom = Legacy.SelectedTrialsRoom,
+                AutoStartVote = Legacy.AutoStartVote,
                 EndlessLeaveWave = Legacy.EndlessWaveToLeave,
                 AutoLeaveEndlessAtWave =
                     Legacy.AutoLeaveEndlessAtWave,
@@ -3350,6 +3366,15 @@ end
         and Saved
         or {}
 
+
+    -- A saved false is a real user preference. Never use the
+    -- `condition and saved or fallback` idiom for booleans.
+    local function ReadSavedBool(Name, Fallback)
+        if type(Saved[Name]) == "boolean" then
+            return Saved[Name]
+        end
+        return Fallback == true
+    end
 
     local User = {
         SelectedMap =
@@ -3377,24 +3402,17 @@ end
             or Settings.SelectedMapDifficulty,
 
         AutoJoinMap =
-            type(Saved.AutoJoinMap) == "boolean"
-            and Saved.AutoJoinMap
-            or Settings.AutoJoinMap,
+            ReadSavedBool("AutoJoinMap", Settings.AutoJoinMap),
 
         AutoRetry =
-            type(Saved.AutoRetry) == "boolean"
-            and Saved.AutoRetry
-            or Settings.AutoRetry,
+            ReadSavedBool("AutoRetry", Settings.AutoRetry),
 
         AutoLeave =
-            type(Saved.AutoLeave) == "boolean"
-            and Saved.AutoLeave
-            or Settings.AutoLeave,
+            ReadSavedBool("AutoLeave", Settings.AutoLeave),
 
         AutoNext =
-            type(Saved.AutoNext) == "boolean"
-            and Saved.AutoNext
-            or Settings.AutoNext,
+            ReadSavedBool("AutoNext", Settings.AutoNext),
+
 
         LeaveAfterMatches =
             math.clamp(
@@ -3408,9 +3426,7 @@ end
             ),
 
         AutoLeaveAfterMatches =
-            type(Saved.AutoLeaveAfterMatches) == "boolean"
-            and Saved.AutoLeaveAfterMatches
-            or Settings.AutoLeaveAfterMatches,
+            ReadSavedBool("AutoLeaveAfterMatches", Settings.AutoLeaveAfterMatches),
 
         SelectedEndlessMap =
             type(Saved.SelectedEndlessMap) == "string"
@@ -3428,9 +3444,7 @@ end
             or Settings.SelectedEndlessDifficulty,
 
         AutoJoinEndless =
-            type(Saved.AutoJoinEndless) == "boolean"
-            and Saved.AutoJoinEndless
-            or Settings.AutoJoinEndless,
+            ReadSavedBool("AutoJoinEndless", Settings.AutoJoinEndless),
 
         SelectedRaidMap =
             Saved.SelectedRaidMap == "BathTub"
@@ -3445,9 +3459,16 @@ end
             or Settings.SelectedRaidMap,
 
         AutoJoinRaid =
-            type(Saved.AutoJoinRaid) == "boolean"
-            and Saved.AutoJoinRaid
-            or Settings.AutoJoinRaid,
+            ReadSavedBool("AutoJoinRaid", Settings.AutoJoinRaid),
+
+        SelectedTrialsRoom =
+            math.clamp(math.floor(tonumber(Saved.SelectedTrialsRoom) or 1), 1, 65535),
+
+        AutoJoinTrials =
+            ReadSavedBool("AutoJoinTrials", Settings.AutoJoinTrials),
+
+        AutoStartVote =
+            ReadSavedBool("AutoStartVote", Settings.AutoStartVote),
 
         EndlessLeaveWave =
             math.clamp(
@@ -3461,9 +3482,7 @@ end
             ),
 
         AutoLeaveEndlessAtWave =
-            type(Saved.AutoLeaveEndlessAtWave) == "boolean"
-            and Saved.AutoLeaveEndlessAtWave
-            or Settings.AutoLeaveEndlessAtWave,
+            ReadSavedBool("AutoLeaveEndlessAtWave", Settings.AutoLeaveEndlessAtWave),
     }
 
 
@@ -3494,6 +3513,7 @@ end
         Settings.AutoNext =
             User.AutoNext == true
 
+
         Settings.LeaveAfterMatches =
             User.LeaveAfterMatches
 
@@ -3514,6 +3534,15 @@ end
 
         Settings.AutoJoinRaid =
             User.AutoJoinRaid == true
+
+        Settings.SelectedTrialsRoom =
+            User.SelectedTrialsRoom
+
+        Settings.AutoJoinTrials =
+            User.AutoJoinTrials == true
+
+        Settings.AutoStartVote =
+            User.AutoStartVote == true
 
         Settings.EndlessLeaveWave =
             User.EndlessLeaveWave
@@ -3575,6 +3604,9 @@ end
             User[Name] =
                 Copy(Value)
 
+            -- Keep this single choice live without resetting other running
+            -- farm settings changed temporarily by automation controllers.
+            Settings[Name] = Copy(Value)
             Persist()
 
             return true
@@ -3939,7 +3971,7 @@ LobbyTab:CreateToggle({
     NextToggle =
         LobbyTab:CreateToggle({
 
-            name = "Auto Next",
+            name = "Auto Next (Story / Trials)",
             flag = "AutoNext",
 
             value =
@@ -4070,6 +4102,8 @@ LobbyTab:CreateToggle({
         Next = NextToggle,
         LeaveAfter = LeaveAfterToggle,
     }
+
+
 end)()
 
 
@@ -4414,6 +4448,98 @@ LobbyTab:CreateToggle({
     end,
 })
 
+
+--//============================================================
+--// TRIALS: floor numbering (native Next Floor handles progression)
+--//============================================================
+LobbyTab:CreateDivider({spacing = 16})
+LobbyTab:CreateSection({name = "Trials (2026 Update)"})
+
+LobbyTab:CreateInput({
+    name = "Trials Starting Floor",
+    flag = "TrialsRoom",
+    placeholder = "Starting floor (must be unlocked)",
+    numeric = true,
+    clearOnFocus = false,
+    value = tostring(Settings.SelectedTrialsRoom),
+    callback = function(Value)
+        local Room = tonumber(Value)
+        if not Room then return end
+        Settings.SelectedTrialsRoom = math.clamp(math.floor(Room), 1, 65535)
+        if type(Settings.SetLobbyUserPreference) == "function" then
+            Settings.SetLobbyUserPreference("SelectedTrialsRoom", Settings.SelectedTrialsRoom)
+        end
+        ResetLobbyState()
+    end,
+})
+
+LobbyTab:CreateToggle({
+    name = "Auto Join Trials",
+    flag = "AutoJoinTrials",
+    description = "Queue the specified unlocked Trials floor. Use Auto Next for subsequent floors.",
+    value = Settings.AutoJoinTrials,
+    callback = function(Value)
+        local On = Value == true
+        Settings.AutoJoinTrials = On
+        if On then
+            Settings.AutoJoinMap = false
+            Settings.AutoJoinEndless = false
+            Settings.AutoJoinRaid = false
+            pcall(function() Window:Set("AutoJoinMap", false) end)
+            pcall(function() Window:Set("AutoJoinEndless", false) end)
+            pcall(function() Window:Set("AutoJoinRaid", false) end)
+        end
+        if type(Settings.SetLobbyUserPreference) == "function" then
+            Settings.SetLobbyUserPreference("AutoJoinTrials", On)
+            if On then
+                for _, Name in ipairs({"AutoJoinMap", "AutoJoinEndless", "AutoJoinRaid"}) do
+                    Settings.SetLobbyUserPreference(Name, false)
+                end
+            end
+        end
+        ResetLobbyState()
+        print("[Anime Zero] Auto Join Trials:", On)
+    end,
+})
+
+LobbyTab:CreateToggle({
+    name = "Auto Start Vote",
+    flag = "AutoStartVote",
+    description = "Vote ready if the game's Start Vote countdown is present. Works in run places.",
+    value = Settings.AutoStartVote,
+    callback = function(Value)
+        Settings.AutoStartVote = Value == true
+        if type(Settings.SetLobbyUserPreference) == "function" then
+            Settings.SetLobbyUserPreference("AutoStartVote", Value == true)
+        end
+    end,
+})
+
+--// One-click diagnostics: does not start or alter a queue.
+LobbyTab:CreateButton({
+    name = "Print Auto Join Diagnostics",
+    callback = function()
+        local Probe = GENV.__AZ_AUTOJOIN_STATUS
+        if type(Probe) ~= "function" then
+            warn("[Anime Zero][Join] Queue runtime not initialized")
+            return
+        end
+        local OK, Result = pcall(Probe)
+        if not OK then
+            warn("[Anime Zero][Join] Diagnostics error:", Result)
+            return
+        end
+        print("[Anime Zero][Join] --- DIAGNOSTICS ---")
+        for Name, Value in pairs(Result) do
+            print("[Anime Zero][Join]", Name, "=", tostring(Value))
+        end
+        Window:Toast({
+            title = "Auto Join diagnostics",
+            subtitle = "Details printed to the Roblox/Delta console",
+            position = "Top",
+        })
+    end,
+})
 
 --//============================================================
 --// FARM UI
@@ -6900,9 +7026,17 @@ FarmTab:CreateToggle({
             if ExitOpen and Exit then
                 Rescue.RaidState = "Elevator"
 
-                local GoalPosition =
-                    Exit.Position
-                    + Vector3.new(0, 0, 5)
+                local PromptParent = ExitPrompt and ExitPrompt.Parent
+                local PromptPosition = Exit.Position
+                if PromptParent and PromptParent:IsA("Attachment") then
+                    PromptPosition = PromptParent.WorldPosition
+                elseif PromptParent and PromptParent:IsA("BasePart") then
+                    PromptPosition = PromptParent.Position
+                end
+                -- Move to the center of the actual elevator trigger/prompt.
+                -- The previous fixed +Z offset could land outside the new
+                -- segment's activation volume when its orientation changed.
+                local GoalPosition = PromptPosition + Vector3.new(0, 2.5, 0)
 
                 if (
                     Root.Position
@@ -6912,14 +7046,14 @@ FarmTab:CreateToggle({
                     Root.CFrame =
                         CFrame.lookAt(
                             GoalPosition,
-                            Exit.Position
+                            PromptPosition
                         )
                 end
 
                 if ExitPrompt
                     and (
                         Root.Position
-                        - Exit.Position
+                        - PromptPosition
                     ).Magnitude
                         <= math.max(
                             tonumber(
@@ -6987,7 +7121,22 @@ FarmTab:CreateToggle({
             end
 
             if Rescue.IsInsideRaidArea(Root, Area) then
-                Rescue.RaidState = "AreaReady"
+                -- After a cleared wave the server waits for players to occupy
+                -- the activation center, not merely any edge of the area.
+                -- Do not take movement from a live attackable target.
+                if not EnemyRoot
+                    and ReadRunValue2("finishedAt") == nil
+                then
+                    local Center = Rescue.GetRaidAreaGoal(Root, Area)
+                    if Center and (Root.Position - Center.Position).Magnitude > 2.5 then
+                        Root.CFrame = Center
+                        Rescue.RaidState = "Area Center / Next Wave"
+                    else
+                        Rescue.RaidState = "Area Center Ready"
+                    end
+                else
+                    Rescue.RaidState = "AreaReady"
+                end
                 return true
             end
 
@@ -10010,6 +10159,7 @@ end)()
                     infinite = "Endless",
                     hxh = "Story",
                     sakamoto = "Sakamoto",
+                    trials = "Trials",
                     tutorial = "Tutorial",
                 }
 
@@ -10026,6 +10176,7 @@ end)()
                     spiritedawayraid = "Spirit's Bathtub",
                     sololevelingraid = "Shadow Gate",
                     infinite = "ZZZ World",
+                    trials = "Trials",
                 }
 
 
@@ -14732,10 +14883,14 @@ end)()
                 GENV.__AZ_RUNTIME = nil
 
 
-                -- Rayfield Gen2's documented full interface cleanup.
+                -- Gen2 exposes Unload on the window, not Destroy on
+                -- the library; use the documented cleanup call.
                 pcall(function()
-                    Rayfield:Destroy()
+                    Window:Unload()
                 end)
+                if GENV.__AZ_ACTIVE_WINDOW == Window then
+                    GENV.__AZ_ACTIVE_WINDOW = nil
+                end
             end,
         })
 
@@ -15209,6 +15364,9 @@ end)()
                 LobbyEndlessDifficulty = true,
                 AutoJoinEndless = true,
                 AutoJoinRaid = true,
+                AutoJoinTrials = true,
+                TrialsRoom = true,
+                AutoStartVote = true,
                 EndlessWaveToLeave = true,
                 AutoLeaveEndlessAtWave = true,
 
@@ -16876,6 +17034,11 @@ end)()
 
                         requestId =
                             Id,
+
+                        -- New RollCharacter schema requires this flag.
+                        -- false preserves the pre-update roll behaviour.
+                        instant =
+                            false,
                     })
             end)
 
@@ -22980,6 +23143,9 @@ end)()
         "SelectedMapDifficulty",
         "AutoJoinMap",
         "AutoJoinRaid",
+        "AutoJoinTrials",
+        "SelectedTrialsRoom",
+        "AutoStartVote",
 
         "SelectedEndlessMap",
         "SelectedEndlessDifficulty",
@@ -23342,6 +23508,10 @@ end)()
         "hutao",
         "sung_jinwoo",
         "katakuri",
+        "frieren",
+        "rin",
+        "astra_yao",
+        "ye_shunguang",
     }
 
 
@@ -23360,6 +23530,10 @@ end)()
         hutao = "Paramita Pyre",
         sung_jinwoo = "Shadow Monarch",
         katakuri = "Mochi Commander",
+        frieren = "Silver Calamity",
+        rin = "Inferno Prince",
+        astra_yao = "Astral Blossom",
+        ye_shunguang = "Ye-0",
     }
 
 
@@ -26825,68 +26999,61 @@ local LobbyReady = false
 
 
 if LobbyFolder then
+    local Enums = LobbyFolder:FindFirstChild("enums")
+    local Stores = LobbyFolder:FindFirstChild("stores")
 
-    local Success,
-        ErrorMessage =
-        pcall(function()
-
-            LobbyPackets =
-                require(
-                    LobbyFolder
-                        :WaitForChild(
-                            "packets"
-                        )
-                )
-
-
-            QueueStatusEnum =
-                require(
-                    LobbyFolder
-                        :WaitForChild(
-                            "enums"
-                        )
-                        :WaitForChild(
-                            "ququeStatusEnum"
-                        )
-                )
-
-
-            GamemodeSelectEnum =
-                require(
-                    LobbyFolder
-                        :WaitForChild(
-                            "enums"
-                        )
-                        :WaitForChild(
-                            "gamemodeSelectEnum"
-                        )
-                )
-
-
-            QueueRoomStore =
-                require(
-                    LobbyFolder
-                        :WaitForChild(
-                            "stores"
-                        )
-                        :WaitForChild(
-                            "ququeRoomStore"
-                        )
-                )
-
-
-            LobbyReady =
-                true
-        end)
-
-
-    if not Success then
-
-        warn(
-            "[Anime Zero] Lobby Error:",
-            ErrorMessage
+    local function SafeRequire(Parent, ModuleName, Timeout)
+        local Module = Parent and (
+            Parent:FindFirstChild(ModuleName)
+            or (Timeout and Parent:WaitForChild(ModuleName, Timeout))
         )
+        if not Module then
+            return nil, "Missing " .. tostring(ModuleName)
+        end
+        local OK, Result = pcall(require, Module)
+        if OK then
+            return Result
+        end
+        return nil, tostring(Result)
     end
+
+    local PacketError, StatusError, RoomError
+    LobbyPackets, PacketError = SafeRequire(LobbyFolder, "packets", 12)
+    QueueStatusEnum, StatusError = SafeRequire(Enums, "ququeStatusEnum", 4)
+    QueueRoomStore, RoomError = SafeRequire(Stores, "ququeRoomStore", 4)
+    GamemodeSelectEnum = select(1, SafeRequire(Enums, "gamemodeSelectEnum"))
+
+    -- The native CreateQuque request only depends on packets. The room
+    -- status store is an optimization for selecting an idle physical room;
+    -- it must not disable the ENTIRE queue worker if replication is late.
+    LobbyReady = LobbyPackets ~= nil
+        and LobbyPackets.createQuque ~= nil
+        and LobbyPackets.toggleQuqueWindow ~= nil
+
+    if not LobbyReady then
+        warn("[Anime Zero][Lobby] Queue packets unavailable:", tostring(PacketError))
+    end
+    if not QueueStatusEnum then
+        warn("[Anime Zero][Lobby] Room status enum not loaded:", tostring(StatusError))
+    end
+    if not QueueRoomStore then
+        warn("[Anime Zero][Lobby] Room store unavailable; using physical rooms:", tostring(RoomError))
+    end
+    if not GamemodeSelectEnum then
+        warn("[Anime Zero][Lobby] Map catalog unavailable; using known map fallbacks")
+    end
+end
+
+-- Diagnostic status; safe to call even when starting in a dungeon.
+GENV.__AZ_LOBBY_MODULE_STATUS = function()
+    return {
+        ready = LobbyReady,
+        lobby = LobbyFolder ~= nil,
+        packets = LobbyPackets ~= nil,
+        statusEnum = QueueStatusEnum ~= nil,
+        roomStore = QueueRoomStore ~= nil,
+        mapCatalog = GamemodeSelectEnum ~= nil,
+    }
 end
 
 
@@ -26910,46 +27077,52 @@ local DifficultyIds = {
 --// FIND MAP
 --//============================================================
 
-local function FindLobbyMap(
-    GamemodeId,
-    MapName
-)
-
-    if not GamemodeSelectEnum then
-        return nil
+local function FindLobbyMap(GamemodeId, MapName)
+    -- The optional catalog may replicate after the essential queue modules.
+    if not GamemodeSelectEnum and LobbyFolder then
+        local EnumFolder = LobbyFolder:FindFirstChild("enums")
+        local Module = EnumFolder and EnumFolder:FindFirstChild("gamemodeSelectEnum")
+        if Module then
+            local OK, Result = pcall(require, Module)
+            if OK then GamemodeSelectEnum = Result end
+        end
     end
-
-
-    local Gamemode =
-        GamemodeSelectEnum
-            .Gamemode[
-                GamemodeId
-            ]
-
-
-    if not Gamemode
-        or not Gamemode.Maps
-    then
-
-        return nil
-    end
-
-
-    for _, Map
-        in ipairs(
-            Gamemode.Maps
-        )
-    do
-
-        if Map.DisplayName == MapName
-            or Map.Id == MapName
-        then
-
-            return Map
+    local Catalog = GamemodeSelectEnum
+    if Catalog and Catalog.Gamemode then
+        local Mode = Catalog.Gamemode[GamemodeId]
+        if Mode and Mode.Maps then
+            for _, Map in ipairs(Mode.Maps) do
+                if Map.DisplayName == MapName or Map.Id == MapName then
+                    return Map
+                end
+            end
         end
     end
 
-
+    -- Fallback for place exports that omit gamemodeSelectEnum. IDs are
+    -- present in current title/achievement/analytics/material-drop configs.
+    local Fallback = {
+        Story = {
+            {Id = "hxh", DisplayName = "Hxh", Chapters = {1, 2, 3}},
+        },
+        Infinite = {
+            {Id = "infinite", DisplayName = "ZZZ World"},
+        },
+        Raid = {
+            {Id = "spiritedawayraid", DisplayName = "Spirit's Bathtub"},
+            {Id = "sololevelingraid", DisplayName = "Shadow Gate"},
+            {Id = "spiritedawayraid", DisplayName = "BathTub"},
+            {Id = "sololevelingraid", DisplayName = "ShadowGate"},
+        },
+        Trials = {
+            {Id = "trials", DisplayName = "Trials", Floors = true},
+        },
+    }
+    for _, Map in ipairs(Fallback[GamemodeId] or {}) do
+        if Map.Id == MapName or Map.DisplayName == MapName then
+            return Map
+        end
+    end
     return nil
 end
 
@@ -27109,6 +27282,7 @@ local function FindIdleQueueRoom()
 
     local FallbackNumber = nil
     local FallbackRoom = nil
+    local KnownStatuses = 0
 
 
     for _, Room
@@ -27152,24 +27326,28 @@ local function FindIdleQueueRoom()
                     )
 
 
-                if QueueStatusEnum
-                    and Status
-                        == QueueStatusEnum.room.idle
-                then
+                if Status ~= nil then
+                    KnownStatuses += 1
+                end
 
-                    return RoomNumber,
-                        Room
+                if QueueStatusEnum
+                    and Status == QueueStatusEnum.room.idle
+                then
+                    return RoomNumber, Room
                 end
             end
         end
     end
 
 
-    -- If Dime room status has not replicated yet,
-    -- entering a physical room lets the server decide.
+    -- If no room stores are replicated, let the server choose on entry.
+    -- When all statuses are available and busy, don't repeatedly invade
+    -- someone else's occupied queue room.
+    if KnownStatuses > 0 then
+        return nil, nil
+    end
 
-    return FallbackNumber,
-        FallbackRoom
+    return FallbackNumber, FallbackRoom
 end
 
 
@@ -27178,24 +27356,16 @@ end
 --//============================================================
 
 local function IsLobbyQueued()
-
-    if not QueueStatusEnum then
-
-        return LobbyClientStatus
-            == "inQuque"
-
-            or LobbyClientStatus
-                == "teleporting"
+    -- IMPORTANT: QueueRoom can become non-nil when the server identifies the
+    -- physical room being entered. That is NOT the same thing as an actual
+    -- match queue. Blocking on it prevented CreateQuque from ever firing.
+    if LocalPlayer:GetAttribute("MatchSearching") == true then
+        return true
     end
 
-
-    return LobbyClientStatus
-            == QueueStatusEnum.client.inQuque
-
-        or LobbyClientStatus
-            == QueueStatusEnum.client.teleporting
+    return LobbyClientStatus == "inQuque"
+        or LobbyClientStatus == "teleporting"
 end
-
 
 --//============================================================
 --// MOVE INTO JOIN HITBOX
@@ -27236,42 +27406,61 @@ local function MoveIntoQueueRoom(
     end
 
 
-    -- Preserve character orientation.
-    -- Only move position.
+    -- The place dump sets JoinHitbox.CanTouch=false, so a fresh
+    -- enter/re-enter is safer than relying on Roblox .Touched events.
+    local Rotation = Root.CFrame - Root.Position
+    local AlreadyInside = (
+        Hitbox.CFrame:PointToObjectSpace(Root.Position)
+    )
+    local Reenter = (
+        PendingLobbyRoom == RoomNumber
+        and math.abs(AlreadyInside.X) <= Hitbox.Size.X * 0.5
+        and math.abs(AlreadyInside.Y) <= Hitbox.Size.Y * 0.5
+        and math.abs(AlreadyInside.Z) <= Hitbox.Size.Z * 0.5
+    )
 
-    local Rotation =
-        Root.CFrame
-        - Root.Position
+    PendingLobbyRoom = RoomNumber
+    LastLobbyRoomMove = os.clock()
 
+    local function PlaceAt(Position)
+        local LiveRoot = GetRoot()
+        if LiveRoot and SessionAlive() then
+            LiveRoot.AssemblyLinearVelocity = Vector3.zero
+            LiveRoot.AssemblyAngularVelocity = Vector3.zero
+            LiveRoot.CFrame = CFrame.new(Position) * Rotation
+        end
+    end
 
-    Root.AssemblyLinearVelocity =
-        Vector3.zero
-
-
-    Root.AssemblyAngularVelocity =
-        Vector3.zero
-
-
-    Root.CFrame =
-        CFrame.new(
-            Hitbox.Position
-        )
-        * Rotation
-
-
-    PendingLobbyRoom =
-        RoomNumber
-
-
-    LastLobbyRoomMove =
-        os.clock()
-
+    if Reenter then
+        -- Teleporting directly *inside* a zone can fail to produce the
+        -- server-side enter transition. Move outside, let replication
+        -- settle, then walk into the room like the normal game client.
+        local Outside = Hitbox.Position +
+            Hitbox.CFrame.LookVector * (Hitbox.Size.Z * 0.5 + 3)
+        PlaceAt(Outside)
+        task.delay(0.45, function()
+            if SessionAlive()
+                and PendingLobbyRoom == RoomNumber
+                and not IsLobbyQueued()
+            then
+                local Human = GetHumanoid()
+                if Human and Human.Health > 0 then
+                    Human:MoveTo(Hitbox.Position)
+                else
+                    PlaceAt(Hitbox.Position)
+                end
+            end
+        end)
+    else
+        PlaceAt(Hitbox.Position)
+    end
 
     print(
         "[Anime Zero] Entering Queue Room:",
-        RoomNumber
+        RoomNumber,
+        "| re-enter:",
+        Reenter
     )
-
 
     return true
 end
@@ -27332,6 +27521,11 @@ local function BuildStoryPayload(
         chapter =
             Act,
 
+        -- 2026-10-11 game update: CreateQuque now requires a u16 floor
+        -- on every payload, even non-floor modes.
+        floor =
+            0,
+
         difficulty =
             DifficultyIds[
                 Settings.SelectedMapDifficulty
@@ -27385,6 +27579,9 @@ local function BuildEndlessPayload(
             Map.Id,
 
         chapter =
+            0,
+
+        floor =
             0,
 
         difficulty =
@@ -27444,6 +27641,21 @@ local function CreateLobbyQueue(
                 RoomNumber
             )
 
+    elseif Mode == "Trials" then
+        local TrialMap = FindLobbyMap("Trials", "Trials")
+        if TrialMap then
+            Payload = {
+                gamemode = "Trials",
+                map = TrialMap.Id,
+                chapter = 0,
+                floor = math.clamp(math.floor(tonumber(Settings.SelectedTrialsRoom) or 1), 1, 65535),
+                difficulty = 1,
+                maxPlayers = 1,
+                friendsOnly = false,
+                roomNumber = RoomNumber,
+            }
+        end
+
     elseif Mode == "Raid" then
 
         local RaidMap =
@@ -27470,6 +27682,7 @@ local function CreateLobbyQueue(
                 gamemode = "Raid",
                 map = RaidMap.Id,
                 chapter = 0,
+                floor = 0,
                 difficulty = 4,
                 maxPlayers = 1,
                 friendsOnly = false,
@@ -27578,6 +27791,11 @@ if LobbyReady then
 
                 if Data.open then
 
+                    -- Only accept an actual numeric server-approved room.
+                    if type(Data.roomNumber) ~= "number" then
+                        return
+                    end
+
                     LobbyOpenRoom =
                         Data.roomNumber
 
@@ -27661,8 +27879,252 @@ end
 
 
 --//============================================================
+--// CORE UI FLAG BRIDGE
+--//
+--// Rayfield Gen2 keeps the live control values in Window.Flags. The game
+--// update/reload path can occasionally leave a visual toggle changed while
+--// the script's Settings table is still holding the previous value. The
+--// farm/queue engines read Settings, so that looks exactly like "the toggle
+--// does nothing" even though the UI moved.
+--//
+--// This bridge watches the actual Rayfield flags and only reacts when a flag
+--// really changes. It does NOT continuously overwrite Settings, so internal
+--// automation can still temporarily change Settings without fighting the UI.
+--//============================================================
+
+;(function()
+
+    if type(GENV.__AZ_CORE_UI_BRIDGE) == "table" then
+        GENV.__AZ_CORE_UI_BRIDGE.Active = false
+    end
+
+    local Bridge = {
+        Active = true,
+        Last = {},
+        LastChangeAt = 0,
+    }
+
+    GENV.__AZ_CORE_UI_BRIDGE = Bridge
+
+    local Specs = {
+        AutoJoinMap = { setting = "AutoJoinMap", group = "lobby" },
+        AutoJoinEndless = { setting = "AutoJoinEndless", group = "lobby" },
+        AutoJoinRaid = { setting = "AutoJoinRaid", group = "lobby" },
+        AutoJoinTrials = { setting = "AutoJoinTrials", group = "lobby" },
+        AutoStartVote = { setting = "AutoStartVote", group = "lobby" },
+        AutoRetry = { setting = "AutoRetry", group = "lobby" },
+        AutoLeave = { setting = "AutoLeave", group = "lobby" },
+        AutoNext = { setting = "AutoNext", group = "lobby" },
+        AutoLeaveAfterMatches = { setting = "AutoLeaveAfterMatches", group = "lobby" },
+        AutoLeaveEndlessAtWave = { setting = "AutoLeaveEndlessAtWave", group = "lobby" },
+
+        AutoFarm = { setting = "AutoFarm", group = "farm" },
+        AutoRaidFarm = { setting = "AutoRaidFarm", group = "farm" },
+        AutoArise = { setting = "AutoArise", group = "farm" },
+        AutoPickupLoot = { setting = "AutoPickupLoot", group = "farm" },
+        AutoM1 = { setting = "AutoM1", group = "farm" },
+        AutoSkills = { setting = "AutoSkills", group = "farm" },
+        AutoUltimate = { setting = "AutoUltimate", group = "farm" },
+        AutoBlock = { setting = "AutoBlock", group = "farm" },
+    }
+
+    local function SetOtherFlag(Flag, Value)
+        local Spec = Specs[Flag]
+        if Spec and Spec.group == "lobby"
+            and type(Settings.SetLobbyUserPreference) == "function"
+        then
+            pcall(Settings.SetLobbyUserPreference, Spec.setting, Value == true)
+        end
+        pcall(function()
+            if Window
+                and type(Window.Set) == "function"
+            then
+                Window:Set(Flag, Value)
+            end
+        end)
+    end
+
+    local function ApplyFlag(Flag, Spec, Value, Initial)
+        Value = Value == true
+        Settings[Spec.setting] = Value
+
+        if Spec.group == "lobby" then
+            if type(Settings.SetLobbyUserPreference) == "function" then
+                pcall(Settings.SetLobbyUserPreference, Spec.setting, Value)
+            end
+        elseif Spec.group == "farm" then
+            if type(Settings.SetFarmUserPreference) == "function" then
+                pcall(Settings.SetFarmUserPreference, Spec.setting, Value)
+            end
+        end
+
+        if Flag == "AutoJoinMap" and Value then
+            Settings.AutoJoinEndless = false
+            Settings.AutoJoinRaid = false
+            Settings.AutoJoinTrials = false
+            SetOtherFlag("AutoJoinEndless", false)
+            SetOtherFlag("AutoJoinRaid", false)
+            SetOtherFlag("AutoJoinTrials", false)
+            pcall(ResetLobbyState)
+
+        elseif Flag == "AutoJoinEndless" and Value then
+            Settings.AutoJoinMap = false
+            Settings.AutoJoinRaid = false
+            Settings.AutoJoinTrials = false
+            SetOtherFlag("AutoJoinMap", false)
+            SetOtherFlag("AutoJoinRaid", false)
+            SetOtherFlag("AutoJoinTrials", false)
+            pcall(ResetLobbyState)
+
+        elseif Flag == "AutoJoinRaid" and Value then
+            Settings.AutoJoinMap = false
+            Settings.AutoJoinEndless = false
+            Settings.AutoJoinTrials = false
+            SetOtherFlag("AutoJoinMap", false)
+            SetOtherFlag("AutoJoinEndless", false)
+            SetOtherFlag("AutoJoinTrials", false)
+            pcall(ResetLobbyState)
+
+        elseif Flag == "AutoJoinTrials" and Value then
+            Settings.AutoJoinMap = false
+            Settings.AutoJoinEndless = false
+            Settings.AutoJoinRaid = false
+            SetOtherFlag("AutoJoinMap", false)
+            SetOtherFlag("AutoJoinEndless", false)
+            SetOtherFlag("AutoJoinRaid", false)
+            pcall(ResetLobbyState)
+
+        elseif Flag == "AutoRetry" and Value then
+            Settings.AutoLeave = false
+            Settings.AutoNext = false
+            SetOtherFlag("AutoLeave", false)
+            SetOtherFlag("AutoNext", false)
+
+        elseif Flag == "AutoLeave" and Value then
+            Settings.AutoRetry = false
+            Settings.AutoNext = false
+            SetOtherFlag("AutoRetry", false)
+            SetOtherFlag("AutoNext", false)
+
+        elseif Flag == "AutoNext" and Value then
+            Settings.AutoRetry = false
+            Settings.AutoLeave = false
+            SetOtherFlag("AutoRetry", false)
+            SetOtherFlag("AutoLeave", false)
+
+        elseif Flag == "AutoFarm" and not Value then
+            if not GENV.__AZ_IS_RAID_MODE() then
+                pcall(ReleaseFarmMovement)
+            end
+
+        elseif Flag == "AutoM1" and Value then
+            NextM1RequestAt = 0
+
+        elseif Flag == "AutoArise" then
+            if type(GENV.__AZ_FARM_RESCUE_RUNTIME) == "table" then
+                GENV.__AZ_FARM_RESCUE_RUNTIME.AriseState =
+                    Value and "Waiting" or "Off"
+            end
+        end
+
+        if not Initial then
+            Bridge.LastChangeAt = os.clock()
+            print(
+                "[Anime Zero][UI Bridge]",
+                tostring(Flag),
+                "=",
+                tostring(Value),
+                "| runtime=",
+                tostring(Settings[Spec.setting] == true)
+            )
+        end
+    end
+
+    task.spawn(function()
+        -- Let Rayfield finish its own autoLoad first.
+        task.wait(1.0)
+
+        while Bridge.Active
+            and GENV.__AZ_CORE_UI_BRIDGE == Bridge
+        do
+            for Flag, Spec in pairs(Specs) do
+                local Success, Value = pcall(function()
+                    return Window.Flags[Flag]
+                end)
+
+                if Success and type(Value) == "boolean" then
+                    local Previous = Bridge.Last[Flag]
+
+                    if Previous == nil then
+                        -- Avoid manufacturing a toggle press when an old
+                        -- Rayfield config doesn't match cross-place settings.
+                        -- Live callbacks handle real user presses.
+                        Bridge.Last[Flag] = Value
+
+                    elseif Previous ~= Value then
+                        Bridge.Last[Flag] = Value
+                        ApplyFlag(Flag, Spec, Value, false)
+                    end
+                end
+            end
+
+            task.wait(0.08)
+        end
+    end)
+end)()
+
+
+--//============================================================
 --// AUTO JOIN LOOP
 --//============================================================
+
+GENV.__AZ_LOBBY_ENGINE_DEBUG = {
+    started = LobbyReady,
+    tick = 0,
+    reason = LobbyReady and "Ready" or "Queue packets missing",
+    lastMode = "None",
+    lastAction = "None",
+    lastUpdate = os.clock(),
+}
+
+GENV.__AZ_AUTOJOIN_STATUS = function()
+    local FreeRoomNumber = FindIdleQueueRoom()
+    local RoomsFolder = GetQueueRoomsFolder()
+    local Debug = GENV.__AZ_LOBBY_ENGINE_DEBUG or {}
+    return {
+        place = GENV.__AZ_BOOT_PLACE,
+        sessionAlive = SessionAlive(),
+        engineStarted = Debug.started,
+        engineTick = Debug.tick,
+        engineReason = Debug.reason,
+        engineMode = Debug.lastMode,
+        engineAction = Debug.lastAction,
+        engineSecondsSinceUpdate = os.clock() - (Debug.lastUpdate or os.clock()),
+        queueRoomCount = RoomsFolder and #RoomsFolder:GetChildren() or 0,
+        createAttempts = LobbyCreateAttempts,
+        secondsSinceRoomMove = os.clock() - LastLobbyRoomMove,
+        secondsSinceCreate = os.clock() - LastLobbyCreate,
+        uiStory = (Window.Flags and Window.Flags.AutoJoinMap),
+        uiEndless = (Window.Flags and Window.Flags.AutoJoinEndless),
+        uiRaid = (Window.Flags and Window.Flags.AutoJoinRaid),
+        uiTrials = (Window.Flags and Window.Flags.AutoJoinTrials),
+        ready = LobbyReady,
+        story = Settings.AutoJoinMap == true,
+        endless = Settings.AutoJoinEndless == true,
+        raid = Settings.AutoJoinRaid == true,
+        trials = Settings.AutoJoinTrials == true,
+        trialsRoom = Settings.SelectedTrialsRoom,
+        selectedMap = Settings.SelectedMap,
+        selectedRaidMap = Settings.SelectedRaidMap,
+        openRoom = LobbyOpenRoom,
+        freeRoom = FreeRoomNumber,
+        status = LobbyClientStatus,
+        playerQueueRoom = LocalPlayer:GetAttribute("QueueRoom"),
+        matchSearching = LocalPlayer:GetAttribute("MatchSearching"),
+        characterRoot = GetRoot() ~= nil,
+        packets = LobbyPackets ~= nil,
+    }
+end
 
 local LOBBY_ROOM_RETRY =
     1.15
@@ -27677,29 +28139,57 @@ if LobbyReady then
     task.spawn(function()
 
         while SessionAlive() do
+            local Debug = GENV.__AZ_LOBBY_ENGINE_DEBUG
+            if Debug then
+                Debug.tick = Debug.tick + 1
+                Debug.lastUpdate = os.clock()
+            end
 
             local RequestedMode =
                 nil
 
 
-            if Settings.AutoJoinMap then
+            -- Settings is the source of truth for the queue worker.
+            -- The Rayfield callback/bridge writes manual changes into Settings.
+            -- Other automations intentionally set Settings without toggling
+            -- the visual UI. Overriding Settings with Window.Flags here meant
+            -- that those auto-join requests could NEVER start.
+            local AutoJoinMapNow = Settings.AutoJoinMap == true
+            local AutoJoinEndlessNow = Settings.AutoJoinEndless == true
+            local AutoJoinRaidNow = Settings.AutoJoinRaid == true
+            local AutoJoinTrialsNow = Settings.AutoJoinTrials == true
+
+            if AutoJoinMapNow then
 
                 RequestedMode =
                     "Story"
 
 
-            elseif Settings.AutoJoinEndless then
+            elseif AutoJoinEndlessNow then
 
                 RequestedMode =
                     "Infinite"
 
 
-            elseif Settings.AutoJoinRaid then
+            elseif AutoJoinRaidNow then
 
                 RequestedMode =
                     "Raid"
+
+            elseif AutoJoinTrialsNow then
+
+                RequestedMode =
+                    "Trials"
             end
 
+
+            if Debug then
+                Debug.lastMode = RequestedMode or "None"
+                Debug.reason = not RequestedMode and "All auto-join settings OFF"
+                    or (IsLobbyQueued() and "Already in a queue")
+                    or (LobbyOpenRoom and "Server room window open")
+                    or "Seeking physical room"
+            end
 
             if not RequestedMode then
 
@@ -27734,6 +28224,7 @@ if LobbyReady then
                         ) >= LOBBY_CREATE_RETRY
                     then
 
+                        if Debug then Debug.lastAction = "CreateQuque request" end
                         CreateLobbyQueue(
                             RequestedMode,
                             LobbyOpenRoom
@@ -27760,6 +28251,7 @@ if LobbyReady then
                         and Room
                     then
 
+                        if Debug then Debug.lastAction = "Enter room " .. tostring(RoomNumber) end
                         MoveIntoQueueRoom(
                             RoomNumber,
                             Room
@@ -27767,13 +28259,42 @@ if LobbyReady then
 
                     else
 
-                        warn(
-                            "[Anime Zero] No queue room available."
-                        )
+                        if not GENV.__AZ_NO_QUEUE_LOG_AT
+                            or Now - GENV.__AZ_NO_QUEUE_LOG_AT >= 10
+                        then
+                            GENV.__AZ_NO_QUEUE_LOG_AT = Now
+                            if Debug then Debug.lastAction = "No available physical room" end
+                            warn("[Anime Zero] No idle queue room available.")
+                        end
                     end
                 end
             end
 
+
+            if RequestedMode then
+                GENV.__AZ_LOBBY_DEBUG_AT =
+                    GENV.__AZ_LOBBY_DEBUG_AT or 0
+
+                if os.clock() - GENV.__AZ_LOBBY_DEBUG_AT >= 2 then
+                    GENV.__AZ_LOBBY_DEBUG_AT = os.clock()
+
+                    local RoomsFolder = GetQueueRoomsFolder()
+                    print(
+                        "[Anime Zero][Lobby] mode=",
+                        RequestedMode,
+                        "| root=",
+                        GetRoot() ~= nil,
+                        "| rooms=",
+                        RoomsFolder and #RoomsFolder:GetChildren() or 0,
+                        "| openRoom=",
+                        tostring(LobbyOpenRoom),
+                        "| status=",
+                        tostring(LobbyClientStatus),
+                        "| queued=",
+                        IsLobbyQueued()
+                    )
+                end
+            end
 
             task.wait(
                 0.10
@@ -27783,7 +28304,13 @@ if LobbyReady then
 
 
     print(
-        "[Anime Zero] Lobby engine ready."
+        "[Anime Zero] Lobby engine ready.",
+        "| createQuque:",
+        LobbyPackets.createQuque ~= nil,
+        "| toggleQuqueWindow:",
+        LobbyPackets.toggleQuqueWindow ~= nil,
+        "| roomStore:",
+        QueueRoomStore ~= nil
     )
 
 else
@@ -28094,6 +28621,26 @@ local RunStore =
     end
 
 
+    -- New startVote packet is a server event; only send during an active
+    -- published StartVote countdown, at most once per 2 seconds.
+    task.spawn(function()
+        local NextVoteAt = 0
+        while SessionAlive() do
+            local VoteEnds = workspace:GetAttribute("StartVoteEndsAt")
+            if Settings.AutoStartVote == true
+                and RunPackets.startVote
+                and type(VoteEnds) == "number"
+                and workspace:GetServerTimeNow() < VoteEnds
+                and LocalPlayer:GetAttribute("StartVoted") ~= true
+                and os.clock() >= NextVoteAt
+            then
+                NextVoteAt = os.clock() + 2
+                pcall(function() RunPackets.startVote:fire() end)
+            end
+            task.wait(0.3)
+        end
+    end)
+
     local UserId =
         tostring(
             LocalPlayer.UserId
@@ -28293,6 +28840,9 @@ local RunStore =
             local LimitTriggered =
                 false
 
+
+            -- Trials now has a native "Next Floor" result action.
+            -- Do not use the retired leave-to-lobby handoff.
 
             if Settings.AutoLeave then
 
@@ -30412,7 +30962,7 @@ end
 --// CURRENT MAP
 --//
 --// The updated game can report hxh, sakamoto, tutorial, infinite,
---// spiritedawayraid, or sololevelingraid. This lookup intentionally stays
+--// spiritedawayraid, sololevelingraid, or trials. This lookup intentionally stays
 --// config-driven so
 --// raid maps do not fall back to HxH-specific rubble assumptions.
 --//============================================================
