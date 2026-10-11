@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// 2026-10-11: FARM PRIORITY + CLOSE RUBBLE HIT + RAID ELEVATOR CENTER FIX
+--// 2026-10-11: SMOOTH LOCKED-COIN LOOT + TRIALS LIFT + RUBBLE PRIORITY
 --// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + 2026-10-11 GAME UPDATE
 --//
 --// FIXED:
@@ -32,6 +32,25 @@ GENV.__AZ_IS_RAID_MODE = function(Mode)
 
     return type(Mode) == "string"
         and string.sub(string.lower(Mode), -4) == "raid"
+end
+
+-- Trials uses Mode="trials", NOT a mode ending in "raid".
+-- Its lift is workspace.World.Markers.Lift, and its prompt is normally
+-- named ProximityPrompt (ActionText="Ascend"), not ExitPrompt.
+GENV.__AZ_IS_TRIALS_MODE = function()
+    local Mode = workspace:GetAttribute("Mode")
+    return type(Mode) == "string" and string.lower(Mode) == "trials"
+end
+
+GENV.__AZ_IS_FLOOR_EXIT_READY = function()
+    if workspace:GetAttribute("RaidExitOpen") == true then
+        return true
+    end
+    local World = workspace:FindFirstChild("World")
+    local Markers = World and World:FindFirstChild("Markers")
+    local Lift = Markers and Markers:FindFirstChild("Lift")
+    local Prompt = Lift and Lift:FindFirstChildWhichIsA("ProximityPrompt", true)
+    return Prompt ~= nil and Prompt.Enabled == true
 end
 
 
@@ -5213,6 +5232,8 @@ FarmTab:CreateToggle({
         RaidLastAreaAt = 0,
         RaidLastPromptAt = 0,
         RaidLastWorld = nil,
+        TrialsExitWorld = nil,
+        TrialsExitSeenAt = 0,
         RaidAreaPart = nil,
         RaidState = "Idle",
 
@@ -6456,16 +6477,25 @@ FarmTab:CreateToggle({
             end
 
             local Markers = World:FindFirstChild("Markers")
+            -- The updated 2026-10-11 dungeon dump names the center pad Lift.
+            -- Resolve Lift first in Trials to avoid grabbing distant old exit
+            -- markers carried over from another segment.
             local Exit = Markers and (
-                Markers:FindFirstChild("Exit")
+                (GENV.__AZ_IS_TRIALS_MODE() and Markers:FindFirstChild("Lift"))
+                or Markers:FindFirstChild("Exit")
                 or Markers:FindFirstChild("Elevator")
+                or Markers:FindFirstChild("Lift")
             )
-            local ExitPrompt = Exit and Exit:FindFirstChild("ExitPrompt", true)
+            local ExitPrompt = Exit and (
+                Exit:FindFirstChild("ExitPrompt", true)
+                or Exit:FindFirstChildWhichIsA("ProximityPrompt", true)
+            )
 
-            -- The updated map may nest ExitPrompt under the pad, rather than
-            -- directly under the marker. Fall back to searching the World.
+            -- Lift's real prompt is often simply named "ProximityPrompt".
             if not ExitPrompt then
                 ExitPrompt = World:FindFirstChild("ExitPrompt", true)
+                    or (Markers and Markers:FindFirstChild("Lift")
+                        and Markers.Lift:FindFirstChildWhichIsA("ProximityPrompt", true))
             end
             if ExitPrompt and not ExitPrompt:IsA("ProximityPrompt") then
                 ExitPrompt = nil
@@ -7047,8 +7077,9 @@ FarmTab:CreateToggle({
 
 
         Rescue.HandleRaidRoute = function(Root, EnemyRoot)
-            if not GENV.__AZ_IS_RAID_MODE() then
-                Rescue.RaidState = "NotRaid"
+            local IsTrials = GENV.__AZ_IS_TRIALS_MODE()
+            if not GENV.__AZ_IS_RAID_MODE() and not IsTrials then
+                Rescue.RaidState = "NotRaidOrTrials"
                 return false
             end
 
@@ -7071,17 +7102,80 @@ FarmTab:CreateToggle({
             end
 
             local ExitOpen =
-                workspace:GetAttribute("RaidExitOpen")
-                    == true
+                GENV.__AZ_IS_FLOOR_EXIT_READY()
                 or (
                     ExitPrompt
                     and ExitPrompt.Enabled == true
                 )
 
+            -- Trials must ONLY use the exit section below. During combat
+            -- its original Story/Trials farm controller still owns movement.
+            if IsTrials and not ExitOpen then
+                Rescue.RaidState = "TrialsCombat"
+                return false
+            end
+
             -- Exit state is authoritative. Ignore stale enemies and prioritize
             -- the center elevator platform as soon as RaidExitOpen is signaled.
             if ExitOpen then
                 Rescue.RaidState = "Elevator"
+
+                -- Give newly spawned drops a small, bounded collection window
+                -- before ascending Trials floors. The old global loot policy
+                -- prevented travel entirely whenever Auto Farm was enabled.
+                if IsTrials then
+                    if Rescue.TrialsExitWorld ~= World then
+                        Rescue.TrialsExitWorld = World
+                        Rescue.TrialsExitSeenAt = os.clock()
+                    end
+                    if Rescue.TrialsExitSeenAt == 0 then
+                        Rescue.TrialsExitSeenAt = os.clock()
+                    end
+                    local Elapsed = os.clock() - Rescue.TrialsExitSeenAt
+                    if Settings.AutoPickupLoot and Elapsed < 2.75 then
+                        local HasDrops = false
+                        if DropStore2 and DropStore2.store then
+                            pcall(function()
+                                local Drops = DropStore2.store.state:getAll()
+                                HasDrops = type(Drops) == "table" and next(Drops) ~= nil
+                            end)
+                        end
+                        if HasDrops then
+                            local Ext = GENV.__AZ_FARM_EXT
+                            local LootGoal = Ext
+                                and type(Ext.GetLootTargetCFrame) == "function"
+                                and Ext.GetLootTargetCFrame()
+                            if typeof(LootGoal) == "CFrame" then
+                                -- Exit loot sweep uses the same smooth approach
+                                -- as normal farming; never hard-snap to a coin.
+                                local SweepNow = os.clock()
+                                local LastSweep = Rescue.TrialsLootLastStepAt
+                                    or (SweepNow - 1/30)
+                                Rescue.TrialsLootLastStepAt = SweepNow
+                                local StepDt = math.clamp(
+                                    SweepNow - LastSweep, 1/120, 0.06
+                                )
+                                local Distance = (Root.Position - LootGoal.Position).Magnitude
+                                local Step = math.min(110 * StepDt, math.max(0, Distance - 8))
+                                if Distance > 0.01 and Step > 0 then
+                                    Root.CFrame = CFrame.new(
+                                        Root.Position:Lerp(LootGoal.Position, Step / Distance)
+                                    ) * Root.CFrame.Rotation
+                                    Root.AssemblyLinearVelocity = Vector3.zero
+                                    Root.AssemblyAngularVelocity = Vector3.zero
+                                end
+                                Rescue.RaidState = "Trials Exit Smooth Loot Sweep"
+                                return true
+                            elseif Elapsed < 1.85 then
+                                Rescue.RaidState = "Waiting For Fresh Drop"
+                                return true
+                            end
+                        end
+                    end
+                else
+                    Rescue.TrialsExitWorld = nil
+                    Rescue.TrialsExitSeenAt = 0
+                end
 
                 local PromptParent = ExitPrompt and ExitPrompt.Parent
                 local PromptPosition = nil
@@ -7111,11 +7205,17 @@ FarmTab:CreateToggle({
                 end
 
                 if Destination then
-                    -- Keep the current floor height while centering on the pad;
-                    -- marker heights can be high above/below the walkable top.
+                    -- Preserve floor height for nearby players, but if the
+                    -- farm previously hovered far above the floor, reposition
+                    -- to a few studs above the real Lift marker so the prompt
+                    -- is actually inside its activation radius.
+                    local GoalY = Root.Position.Y
+                    if math.abs(GoalY - Destination.Y) > 8 then
+                        GoalY = Destination.Y + 3
+                    end
                     local GoalPosition = Vector3.new(
                         Destination.X,
-                        Root.Position.Y,
+                        GoalY,
                         Destination.Z
                     )
                     if (Root.Position - GoalPosition).Magnitude > 1.8 then
@@ -7265,7 +7365,20 @@ FarmTab:CreateToggle({
                 exitMarkerFound = Exit ~= nil,
                 exitPromptFound = ExitPrompt ~= nil,
                 exitPromptEnabled = ExitPrompt and ExitPrompt.Enabled or false,
+                exitName = Exit and Exit.Name or "none",
+                trialsMode = GENV.__AZ_IS_TRIALS_MODE(),
+                floorExitReady = GENV.__AZ_IS_FLOOR_EXIT_READY(),
                 rootFound = Root ~= nil,
+                promptDistance = Root and ExitPrompt and ExitPrompt.Parent
+                    and (function()
+                        local P = ExitPrompt.Parent
+                        if P:IsA("Attachment") then
+                            return (Root.Position - P.WorldPosition).Magnitude
+                        elseif P:IsA("BasePart") then
+                            return (Root.Position - P.Position).Magnitude
+                        end
+                        return -1
+                    end)() or -1,
             }
             for Key, Value in pairs(Status) do
                 print("[Anime Zero][Elevator]", Key, "=", tostring(Value))
@@ -7311,6 +7424,17 @@ FarmTab:CreateToggle({
                 EnemyRoot
                 and DesiredEnemyCFrame2(EnemyRoot)
                 or nil
+
+            -- Trials elevator has absolute movement priority. Waiting for
+            -- enemy count to be zero can fail because stale enemies survive
+            -- for a few client frames after the end-of-room banner.
+            if GENV.__AZ_IS_TRIALS_MODE()
+                and GENV.__AZ_IS_FLOOR_EXIT_READY()
+            then
+                if Rescue.HandleRaidRoute(Root, nil) then
+                    return
+                end
+            end
 
             if not IsRaid then
                 Rescue.RaidState = "Inactive"
@@ -7407,6 +7531,46 @@ FarmTab:CreateToggle({
                 Root.AssemblyLinearVelocity = Vector3.zero
                 Root.AssemblyAngularVelocity = Vector3.zero
                 return
+            end
+
+            -- Trials' original controller owns normal loot movement. Never
+            -- let the separate raid rescue heartbeat move us to another point
+            -- while a locked drop is being approached.
+            if not IsRaid
+                and Settings.AutoPickupLoot
+                and CurrentFarmMode == "Loot"
+            then
+                Rescue.RaidState = "Smooth loot (normal controller)"
+                return
+            end
+
+            -- During an empty raid wave, let the common locked-drop controller
+            -- supply a target. This is SMOOTH motion, not repeated CFrame snaps.
+            -- Combat, dodge, arise and exit/lift checks above still win.
+            if IsRaid
+                and Settings.AutoPickupLoot
+                and not EnemyRoot
+                and (tonumber(ReadRunValue2("remaining")) or 0) <= 0
+                and not GENV.__AZ_IS_FLOOR_EXIT_READY()
+            then
+                local Ext = GENV.__AZ_FARM_EXT
+                local Goal = Ext
+                    and type(Ext.GetLootTargetCFrame) == "function"
+                    and Ext.GetLootTargetCFrame()
+                    or nil
+                if Goal then
+                    local Distance = (Root.Position - Goal.Position).Magnitude
+                    local Step = math.min(110 * DeltaTime, math.max(0, Distance - 8))
+                    if Distance > 0.01 and Step > 0 then
+                        Root.CFrame = CFrame.new(
+                            Root.Position:Lerp(Goal.Position, Step / Distance)
+                        ) * Root.CFrame.Rotation
+                        Root.AssemblyLinearVelocity = Vector3.zero
+                        Root.AssemblyAngularVelocity = Vector3.zero
+                    end
+                    Rescue.RaidState = "Smooth loot travel"
+                    return
+                end
             end
 
             -- Raid routing handles no-enemy periods by staying inside the live
@@ -8010,88 +8174,19 @@ FarmTab:CreateToggle({
 
 
 
+        -- Loot pickup and the target lock live in the common dropStore
+        -- controller. This raid handler is diagnostic-only: a second caller
+        -- firing recoverDrop/moving Root was fighting the smooth loot route.
         local function RunLoot2()
-            Rescue.LootState = "Idle"
-
-            if not Settings.AutoPickupLoot
-                or not DropStore2
-                or not DropStore2.store
-                or not RewardPackets2
-                or not RewardPackets2.recoverDrop
-            then
+            local Ext = GENV.__AZ_FARM_EXT
+            if not Settings.AutoPickupLoot then
+                Rescue.LootState = "Disabled"
                 return
             end
 
-            if os.clock() < Rescue.NextLoot then
-                return
-            end
-
-            Rescue.NextLoot = os.clock() + 0.16
-
-            local Root = GetRoot2()
-
-            if not Root then
-                return
-            end
-
-            local Success, Drops = pcall(function()
-                return DropStore2.store.state:getAll()
-            end)
-
-            if not Success or type(Drops) ~= "table" then
-                Rescue.LootState = "StoreUnavailable"
-                return
-            end
-
-            local BestId = nil
-            local BestPosition = nil
-            local BestDistance = math.huge
-            local DropCount = 0
-
-            for Id, DropState in pairs(Drops) do
-                local Position = nil
-                pcall(function()
-                    Position = ReadLeaf(DropState.position)
-                end)
-
-                if typeof(Position) == "Vector3" then
-                    DropCount = DropCount + 1
-                    local Distance = (Root.Position - Position).Magnitude
-                    if Distance < BestDistance then
-                        BestDistance = Distance
-                        BestId = Id
-                        BestPosition = Position
-                    end
-                end
-            end
-
-            if BestId == nil or not BestPosition then
-                Rescue.LootState = "NoDrops"
-                return
-            end
-
-            Rescue.LootState = "Nearby " .. tostring(DropCount) .. " drops"
-
-            -- Never pull the avatar away from a live enemy, rubble, activation
-            -- center, raid elevator, or dodge. Recover only reachable loot.
-            if BestDistance <= 12 then
-                Rescue.LootState = "Recover " .. tostring(BestId)
-                pcall(function()
-                    RewardPackets2.recoverDrop:fire(BestId)
-                end)
-                return
-            end
-
-            local AnyFarmActive = Settings.AutoFarm or Settings.AutoRaidFarm
-            if AnyFarmActive or workspace:GetAttribute("RaidExitOpen") == true then
-                Rescue.LootState = "Deferred (farm/transition active)"
-                return
-            end
-
-            -- Standalone Auto Pickup still travels to distant drops when
-            -- neither farming controller owns movement.
-            Root.CFrame = CFrame.new(BestPosition + Vector3.new(0, 2.5, 0))
-            Rescue.LootState = "Standalone pickup " .. tostring(BestId)
+            Rescue.LootState =
+                Ext and Ext.LootStatus
+                or "Waiting for drop scanner"
         end
 
 
@@ -8573,6 +8668,24 @@ FarmTab:CreateToggle({
                 local SuccessEndAction, EndActionError =
                     pcall(Rescue.RunEndAction)
 
+                -- Trials lift must work even when the normal full engine is
+                -- active. Its movement is a narrow exception to legacy ownership.
+                if GENV.__AZ_IS_TRIALS_MODE()
+                    and GENV.__AZ_IS_FLOOR_EXIT_READY()
+                    and Settings.AutoFarm
+                then
+                    local OK, Err = pcall(function()
+                        local Root = GetRoot2()
+                        if Root then
+                            Rescue.HandleRaidRoute(Root, nil)
+                        end
+                    end)
+                    if not OK then
+                        warn("[Anime Zero][Trials Lift]", tostring(Err))
+                    end
+                    return
+                end
+
                 -- Outside Raid, the full legacy engine still owns enemy
                 -- movement. The rescue runtime only assists the exact pieces
                 -- that can strand Story/Endless after an update: active rubble
@@ -8588,6 +8701,7 @@ FarmTab:CreateToggle({
                     local AssistOK, AssistError = true, nil
                     if CurrentFarmMode ~= "Rubble"
                         and CurrentFarmMode ~= "Waiting For Rubble To Drop"
+                        and CurrentFarmMode ~= "Loot"
                     then
                         AssistOK, AssistError = pcall(
                             Rescue.RunNormalProgressionAssist,
@@ -29181,224 +29295,218 @@ end)()
     end
 
 
-    -- First-seen/attempt times avoid hammering the same drop every frame.
+    -- Stable loot acquisition: select ONE drop, approach it smoothly to the
+    -- real pickup range, then wait for server/store removal before switching.
+    -- Unconfirmed/stale drops are temporarily skipped to prevent oscillation.
     local SeenDrops = {}
     local LastDropAttempt = {}
+    local DropAttempts = {}
+    local DropIgnoreUntil = {}
+    local LockedDropId = nil
+    local LockedDropSince = 0
 
     local DROP_PICKUP_RANGE = 12
-    local DROP_SETTLE_TIME = 1.60
-    local DROP_RETRY_TIME = 0.75
+    local DROP_SETTLE_TIME = 1.20
+    local DROP_RETRY_TIME = 1.00
+    local DROP_MAX_ATTEMPTS = 2
+    local DROP_REVISIT_DELAY = 12
+    local DROP_TRAVEL_TIMEOUT = 8
 
     local LastInfiniteLeaveAt = 0
 
-
-    local function ReadDropPosition(
-        DropState
-    )
-
-        if not DropState
-            or not DropState.position
-        then
+    local function ReadDropPosition(DropState)
+        if not DropState or not DropState.position then
             return nil
         end
-
-
-        local Success,
-            Position =
-            pcall(function()
-
-                return DropState
-                    .position
-                    :get()
-            end)
-
-
-        if Success then
+        local Success, Position = pcall(function()
+            return DropState.position:get()
+        end)
+        if Success and typeof(Position) == "Vector3" then
             return Position
         end
-
-
         return nil
     end
 
-
     local function RunAutoPickupLoot()
+        local Ext = GENV.__AZ_FARM_EXT
+        Ext.LootTargetCFrame = nil
+        Ext.LootTargetId = nil
+        Ext.LootDistance = nil
 
-        local Ext =
-            GENV.__AZ_FARM_EXT
+        if not Settings.AutoPickupLoot then
+            LockedDropId = nil
+            LockedDropSince = 0
+            table.clear(SeenDrops)
+            table.clear(LastDropAttempt)
+            table.clear(DropAttempts)
+            table.clear(DropIgnoreUntil)
+            Ext.LootStatus = "Disabled"
+            return
+        end
 
-
-        if not Settings.AutoPickupLoot
-            or not DropStoreModule
+        if not DropStoreModule
             or not DropStoreModule.store
             or not RewardPackets
             or not RewardPackets.recoverDrop
         then
-
-            Ext.LootTargetCFrame =
-                nil
-
-
-            if not Settings.AutoPickupLoot then
-                table.clear(SeenDrops)
-                table.clear(LastDropAttempt)
-            end
-
+            Ext.LootStatus = "Drop store/recover packet unavailable"
             return
         end
 
-
-        local Character =
-            LocalPlayer.Character
-
-
-        local Root =
-            Character
-            and Character:FindFirstChild(
-                "HumanoidRootPart"
-            )
-
-
+        local Character = LocalPlayer.Character
+        local Root = Character
+            and Character:FindFirstChild("HumanoidRootPart")
         if not Root then
-
-            Ext.LootTargetCFrame =
-                nil
-
+            Ext.LootStatus = "Waiting for character"
             return
         end
 
-
-        local Success,
-            Drops =
-            pcall(function()
-
-                return DropStoreModule
-                    .store
-                    .state
-                    :getAll()
-            end)
-
-
-        if not Success
-            or type(Drops) ~= "table"
-        then
-
-            Ext.LootTargetCFrame =
-                nil
-
+        local Success, Drops = pcall(function()
+            return DropStoreModule.store.state:getAll()
+        end)
+        if not Success or type(Drops) ~= "table" then
+            Ext.LootStatus = "Drop store unavailable"
             return
         end
 
+        local Now = os.clock()
 
-        local Now =
-            os.clock()
+        -- Start settle clocks even while another drop is locked, so the
+        -- scanner can advance immediately after that drop disappears.
+        for Id in pairs(Drops) do
+            SeenDrops[Id] = SeenDrops[Id] or Now
+        end
 
-        local NearestDistance =
-            math.huge
-
-        local NearestCFrame =
-            nil
-
-
-        for DropId, DropState
-            in pairs(Drops)
-        do
-
-            if SeenDrops[DropId] == nil then
-                SeenDrops[DropId] = Now
-            end
-
-
-            local Position =
-                ReadDropPosition(
-                    DropState
-                )
-
-
-            if Position
-                and Now
-                    - SeenDrops[DropId]
-                    >= DROP_SETTLE_TIME
-            then
-
-                local Distance =
-                    (
-                        Root.Position
-                        - Position
-                    ).Magnitude
-
-
-                if Distance < NearestDistance then
-
-                    NearestDistance =
-                        Distance
-
-                    NearestCFrame =
-                        CFrame.new(
-                            Position
-                            + Vector3.new(
-                                0,
-                                2.5,
-                                0
-                            )
-                        )
-                end
-
-
-                if Distance <= DROP_PICKUP_RANGE
-                    and (
-                        LastDropAttempt[DropId] == nil
-                        or Now
-                            - LastDropAttempt[DropId]
-                            >= DROP_RETRY_TIME
-                    )
-                then
-
-                    LastDropAttempt[DropId] =
-                        Now
-
-
-                    pcall(function()
-
-                        RewardPackets
-                            .recoverDrop
-                            :fire(DropId)
-                    end)
+        -- A missing ID is our confirmation that a drop was recovered/removed.
+        for Id in pairs(SeenDrops) do
+            if Drops[Id] == nil then
+                SeenDrops[Id] = nil
+                LastDropAttempt[Id] = nil
+                DropAttempts[Id] = nil
+                DropIgnoreUntil[Id] = nil
+                if LockedDropId == Id then
+                    LockedDropId = nil
+                    LockedDropSince = 0
                 end
             end
         end
 
+        local function SkipLocked(Reason)
+            if LockedDropId ~= nil then
+                DropIgnoreUntil[LockedDropId] = Now + DROP_REVISIT_DELAY
+                DropAttempts[LockedDropId] = nil
+                LastDropAttempt[LockedDropId] = nil
+            end
+            LockedDropId = nil
+            LockedDropSince = 0
+            Ext.LootStatus = Reason
+        end
 
-        -- Farm/combat/area movement keeps ownership. In that mode loot is
-        -- still recovered inside the game's pickup radius without travelling.
-        Ext.LootTargetCFrame =
-            (not Settings.AutoFarm and not Settings.AutoRaidFarm)
-            and NearestCFrame
+        local LockedPosition = LockedDropId ~= nil
+            and Drops[LockedDropId]
+            and ReadDropPosition(Drops[LockedDropId])
             or nil
 
-
-        -- Forget ids that the replicated store has removed.
-        for DropId in pairs(SeenDrops) do
-
-            if Drops[DropId] == nil then
-                SeenDrops[DropId] = nil
-                LastDropAttempt[DropId] = nil
+        if LockedDropId ~= nil then
+            if not LockedPosition then
+                SkipLocked("Locked drop became unavailable")
+            elseif (DropIgnoreUntil[LockedDropId] or 0) > Now then
+                LockedDropId = nil
+                LockedDropSince = 0
+            elseif Now - LockedDropSince > DROP_TRAVEL_TIMEOUT
+                and (Root.Position - LockedPosition).Magnitude > DROP_PICKUP_RANGE
+            then
+                SkipLocked("Drop unreachable; cooldown")
+            elseif (DropAttempts[LockedDropId] or 0) >= DROP_MAX_ATTEMPTS
+                and Now - (LastDropAttempt[LockedDropId] or Now) >= DROP_RETRY_TIME
+            then
+                SkipLocked("Drop not confirmed; cooldown")
             end
         end
+
+        if LockedDropId == nil then
+            local BestDistance = math.huge
+            for Id, State in pairs(Drops) do
+                SeenDrops[Id] = SeenDrops[Id] or Now
+                if Now - SeenDrops[Id] >= DROP_SETTLE_TIME
+                    and (DropIgnoreUntil[Id] or 0) <= Now
+                then
+                    local Position = ReadDropPosition(State)
+                    if Position then
+                        local Distance = (Root.Position - Position).Magnitude
+                        if Distance < BestDistance then
+                            LockedDropId = Id
+                            LockedPosition = Position
+                            BestDistance = Distance
+                        end
+                    end
+                end
+            end
+            if LockedDropId ~= nil then
+                LockedDropSince = Now
+            end
+        end
+
+        if LockedDropId == nil or not LockedPosition then
+            Ext.LootStatus = "No eligible drops (or cooldown)"
+            return
+        end
+
+        local Distance = (Root.Position - LockedPosition).Magnitude
+        Ext.LootTargetId = LockedDropId
+        Ext.LootDistance = Distance
+
+        if Distance <= DROP_PICKUP_RANGE then
+            -- The drop is within the game's 12-stud pickup radius. Do not
+            -- keep teleporting to its center while confirmation is pending.
+            local Attempts = DropAttempts[LockedDropId] or 0
+            local LastAttempt = LastDropAttempt[LockedDropId] or -math.huge
+            if Attempts < DROP_MAX_ATTEMPTS
+                and Now - LastAttempt >= DROP_RETRY_TIME
+            then
+                DropAttempts[LockedDropId] = Attempts + 1
+                LastDropAttempt[LockedDropId] = Now
+                local Fired = pcall(function()
+                    RewardPackets.recoverDrop:fire(LockedDropId)
+                end)
+                Ext.LootStatus = (Fired and "Confirming " or "Recover failed ")
+                    .. tostring(LockedDropId)
+            else
+                Ext.LootStatus = "Waiting for pickup confirmation "
+                    .. tostring(LockedDropId)
+            end
+            return
+        end
+
+        -- Only the locked ID becomes a movement target. Do not retarget to
+        -- a closer coin every frame as animated drops/stores update.
+        Ext.LootTargetCFrame = CFrame.new(
+            LockedPosition + Vector3.new(0, 2.5, 0)
+        )
+        Ext.LootStatus = "Approaching " .. tostring(LockedDropId)
     end
 
-
-    GENV.__AZ_FARM_EXT.GetLootTargetCFrame =
-        function()
-
-            if Settings.AutoPickupLoot then
-                return GENV.__AZ_FARM_EXT
-                    .LootTargetCFrame
-            end
-
-
-            return nil
+    GENV.__AZ_FARM_EXT.GetLootTargetCFrame = function()
+        if Settings.AutoPickupLoot then
+            return GENV.__AZ_FARM_EXT.LootTargetCFrame
         end
+        return nil
+    end
+
+    GENV.__AZ_LOOT_STATUS = function()
+        local Ext = GENV.__AZ_FARM_EXT
+        local Snapshot = {
+            targetId = Ext.LootTargetId,
+            distance = Ext.LootDistance,
+            status = Ext.LootStatus,
+            movementGoal = Ext.LootTargetCFrame ~= nil,
+            attempts = LockedDropId and (DropAttempts[LockedDropId] or 0) or 0,
+        }
+        for Key, Value in pairs(Snapshot) do
+            print("[Anime Zero][Loot]", Key, "=", tostring(Value))
+        end
+        return Snapshot
+    end
 
 
     local function GetInfiniteWave()
@@ -33547,6 +33655,29 @@ local function ApplyFarmMovement(
     end
 
 
+    -- Coins use a smooth approach regardless of the Teleport/Tween choice.
+    -- Stop well inside the pickup range; no 60 FPS snapping to the same coin.
+    if CurrentFarmMode == "Loot" then
+        local Distance = (
+            Root.Position - DesiredFarmCFrame.Position
+        ).Magnitude
+        local Step = math.min(
+            110 * DeltaTime,
+            math.max(0, Distance - 8)
+        )
+        if Distance > 0.01 and Step > 0 then
+            local NewPosition = Root.Position:Lerp(
+                DesiredFarmCFrame.Position,
+                Step / Distance
+            )
+            Root.CFrame = CFrame.new(NewPosition) * Root.CFrame.Rotation
+            Root.AssemblyLinearVelocity = Vector3.zero
+            Root.AssemblyAngularVelocity = Vector3.zero
+        end
+        return
+    end
+
+
     if Settings.FarmMethod == "Teleport" then
 
         if CurrentFarmMode == "Enemy"
@@ -35168,6 +35299,42 @@ local function UpdateAutoFarm()
     end
 
 
+    -- Optional short loot travel DURING farm, but never while a live enemy,
+    -- rubble blocker, area trigger or opened Trials lift needs movement.
+    -- Without this step, the earlier fix intentionally suppressed all loot
+    -- travel as soon as Auto Farm was on.
+    if Settings.AutoFarm
+        and Settings.AutoPickupLoot
+        and not GENV.__AZ_IS_FLOOR_EXIT_READY()
+        and type(GENV.__AZ_FARM_EXT.GetLootTargetCFrame) == "function"
+    then
+        local TargetId = GetFreshFarmTarget()
+        local Area = tonumber(GetRunValue("area")) or 1
+        local Rubble = GetRubbleForArea(Area)
+        local RubbleAlive = Rubble
+            and type(Rubble.Health) == "number"
+            and Rubble.Health > 0
+        local StillFighting = (tonumber(GetRunValue("remaining")) or 0) > 0
+        if not TargetId
+            and GetLivingEnemyCount() == 0
+            and not RubbleAlive
+            and not IsCurrentRubbleAlive()
+            and not StillFighting
+        then
+            local LootGoal = GENV.__AZ_FARM_EXT.GetLootTargetCFrame()
+            if LootGoal then
+                CurrentTargetId = nil
+                CurrentTargetState = nil
+                CurrentRubbleInfo = nil
+                CurrentRubbleCFrame = nil
+                TargetAreaNumber = nil
+                DesiredFarmCFrame = LootGoal
+                SetFarmMode("Loot")
+                return
+            end
+        end
+    end
+
     if Settings.AutoPickupLoot
         and not Settings.AutoFarm
         and not Settings.AutoRaidFarm
@@ -35526,6 +35693,20 @@ GENV.__AZ_FARM_EXT.BindFarmHeartbeat = function()
 
                     GENV.__AZ_FARM_ENGINE_ACTIVE = true
 
+
+                    -- On a Trials floor clear, the rescue controller moves to
+                    -- Lift. The legacy engine MUST yield or it will teleport
+                    -- us back to the previous enemy/rubble every frame.
+                    if GENV.__AZ_IS_TRIALS_MODE()
+                        and GENV.__AZ_IS_FLOOR_EXIT_READY()
+                        and GENV.__AZ_FARM_RESCUE_ACTIVE == true
+                        and Settings.AutoFarm
+                    then
+                        pcall(function()
+                            GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false)
+                        end)
+                        return
+                    end
 
                     -- The dedicated rescue runtime owns all Raid modes.
                     -- Do not let the legacy movement/target logic fight it.
