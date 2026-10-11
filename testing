@@ -4521,7 +4521,10 @@ LobbyTab:CreateButton({
     callback = function()
         local Probe = GENV.__AZ_AUTOJOIN_STATUS
         if type(Probe) ~= "function" then
-            warn("[Anime Zero][Join] Queue runtime not initialized")
+            warn("[Anime Zero][Join] Queue engine not started. Startup phase:",
+                tostring(GENV.__AZ_STARTUP_PHASE or "unknown"),
+                "| place:", tostring(GENV.__AZ_BOOT_PLACE))
+            warn("[Anime Zero][Join] If this persists, copy the first red startup error from the console")
             return
         end
         local OK, Result = pcall(Probe)
@@ -8619,6 +8622,8 @@ FarmTab:CreateToggle({
 end)()
 
 
+
+GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
 --//============================================================
 --// EXTRA LOBBY TABS
@@ -18724,7 +18729,7 @@ end)()
 --// - Delivery quest + target teleport
 --//============================================================
 
-;(function()
+task.spawn(function()
 
     -- Keep this feature group in its own scope so it does not add
     -- registers/locals to the large main chunk or the other extra tabs.
@@ -18865,11 +18870,22 @@ end)()
                 :WaitForChild("characterLevelProgression")
         )
 
-        CodesConfig = require(
-            Assets
-                :WaitForChild("config")
-                :WaitForChild("codesConfig")
-        )
+        -- This module was removed from the 2026-10-11 lobby update.
+        -- Never use an unbounded WaitForChild for an OPTIONAL module:
+        -- it previously froze the entire main chunk before Auto Join
+        -- was even initialized. Other Player/Misc features still load.
+        local CodesParent = Assets:FindFirstChild("config")
+        local CodesModule = CodesParent and CodesParent:FindFirstChild("codesConfig")
+        if CodesModule and CodesModule:IsA("ModuleScript") then
+            local CodesOK, Codes = pcall(require, CodesModule)
+            if CodesOK and type(Codes) == "table" then
+                CodesConfig = Codes
+            else
+                warn("[Anime Zero][Startup] Optional codesConfig failed; skipping old code catalog")
+            end
+        else
+            print("[Anime Zero][Startup] codesConfig no longer exists; continuing queue startup")
+        end
 
         LevelProgression = require(
             Global
@@ -20178,7 +20194,7 @@ end)()
     print(
         "[Anime Zero] Player + Misc automation ready."
     )
-end)()
+end)
 
 
 --//============================================================
@@ -20188,7 +20204,7 @@ end)()
 --// 200-local register ceiling.
 --//============================================================
 
-;(function()
+task.spawn(function()
 
     if type(GENV.__AZ_TITLE_AUTOMATION_RUNTIME) == "table" then
         local Old = GENV.__AZ_TITLE_AUTOMATION_RUNTIME
@@ -21395,7 +21411,7 @@ end)()
     end)
 
     print("[Anime Zero] Title automation ready.")
-end)()
+end)
 
 
 
@@ -21403,7 +21419,7 @@ end)()
 --// MASTER AUTOMATION CONTROLLER + MATERIAL MARKET ASSIST
 --//============================================================
 
-;(function()
+task.spawn(function()
     local Master = GENV.__AZ_MASTER_AUTOMATION_SETTINGS
     if type(Master) ~= "table" then return end
 
@@ -21718,7 +21734,7 @@ end)()
             task.wait(0.75)
         end
     end)
-end)()
+end)
 
 
 --//============================================================
@@ -21736,7 +21752,7 @@ end)()
 --// - Repeats until one-of-each is finished, or forever in continuous mode.
 --//============================================================
 
-;(function()
+task.spawn(function()
 
     if type(GENV.__AZ_ACCESSORY_FARM_RUNTIME) == "table" then
         local Old = GENV.__AZ_ACCESSORY_FARM_RUNTIME
@@ -22744,7 +22760,7 @@ end)()
     print(
         "[Anime Zero] Accessory material farm automation ready."
     )
-end)()
+end)
 
 
 
@@ -22762,7 +22778,7 @@ end)()
 --// Luau's top-level local/register limit.
 --//============================================================
 
-;(function()
+task.spawn(function()
 
     if type(
         GENV.__AZ_ADVANCED_AUTOMATION_RUNTIME
@@ -26757,7 +26773,7 @@ end)()
         "[Anime Zero] Advanced automation ready."
     )
 
-end)()
+end)
 
 
 --//============================================================
@@ -26974,6 +26990,8 @@ end
 --//============================================================
 --//
 --//               LOBBY ENGINE
+--//
+GENV.__AZ_STARTUP_PHASE = "Loading lobby queue packets" 
 --//
 --// IMPORTANT:
 --// THIS ENTIRE SECTION RUNS BEFORE FARM MODULE LOADING
@@ -28078,6 +28096,10 @@ end)()
 --// AUTO JOIN LOOP
 --//============================================================
 
+GENV.__AZ_STARTUP_PHASE = LobbyReady
+    and "Queue engine initialized"
+    or (LobbyFolder and "Queue packets missing" or "Not in lobby place")
+
 GENV.__AZ_LOBBY_ENGINE_DEBUG = {
     started = LobbyReady,
     tick = 0,
@@ -28093,6 +28115,7 @@ GENV.__AZ_AUTOJOIN_STATUS = function()
     local Debug = GENV.__AZ_LOBBY_ENGINE_DEBUG or {}
     return {
         place = GENV.__AZ_BOOT_PLACE,
+        startupPhase = GENV.__AZ_STARTUP_PHASE,
         sessionAlive = SessionAlive(),
         engineStarted = Debug.started,
         engineTick = Debug.tick,
