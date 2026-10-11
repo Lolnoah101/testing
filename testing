@@ -2735,16 +2735,11 @@ local Rayfield = (function()
         "unknown error"
 
 
-    if type(GENV.__AZ_RAYFIELD_GEN2) == "table"
-        and type(GENV.__AZ_RAYFIELD_GEN2.CreateWindow) == "function"
-    then
-
-        print(
-            "[Anime Zero] Rayfield Gen2 loaded: existing runtime cache"
-        )
-
-        return GENV.__AZ_RAYFIELD_GEN2
-    end
+    -- IMPORTANT: Never reuse a live Rayfield library object across place
+    -- teleports. The cached object may still reference a destroyed ScreenGui,
+    -- leaving automation running with an invisible/unusable window.
+    -- Re-evaluate the cached *source* each execution instead.
+    GENV.__AZ_RAYFIELD_GEN2 = nil
 
 
     local function EnsureCacheFolder()
@@ -3158,6 +3153,9 @@ local Window =
 
         subtitle = "Automation Suite - Raid Area Route",
 
+        -- Visible recovery pill when the full Rayfield window is hidden.
+        showName = "Anime Zero",
+
         sidebarLayout = true,
 
         theme = "amethyst",
@@ -3171,6 +3169,51 @@ local Window =
     })
 
 GENV.__AZ_ACTIVE_WINDOW = Window
+
+-- Teleport/UI recovery. When auto-execute starts before the executor finishes
+-- restoring CoreGui, Rayfield sometimes starts hidden even though farm code
+-- runs. Show this *new* window once after the normal first render. F8 can
+-- reveal it manually, without reloading the farm or losing any settings.
+;(function()
+    if typeof(GENV.__AZ_UI_RESTORE_CONNECTION) == "RBXScriptConnection" then
+        pcall(function() GENV.__AZ_UI_RESTORE_CONNECTION:Disconnect() end)
+    end
+    local UIS = game:GetService("UserInputService")
+    local Runtime = {shown = false, lastError = nil, placeId = game.PlaceId}
+    GENV.__AZ_UI_RUNTIME = Runtime
+
+    local function ShowWindow()
+        if GENV.__AZ_ACTIVE_WINDOW ~= Window or Window.unloaded then
+            return false
+        end
+        local ok, err = pcall(function() Window:Show() end)
+        Runtime.shown = ok
+        Runtime.lastError = ok and nil or tostring(err)
+        if not ok then warn("[Anime Zero][UI] Show failed:", tostring(err)) end
+        return ok
+    end
+
+    GENV.__AZ_SHOW_UI = ShowWindow
+    GENV.__AZ_UI_STATUS = function()
+        return {
+            placeId = game.PlaceId,
+            activeWindow = GENV.__AZ_ACTIVE_WINDOW == Window,
+            unloaded = Window.unloaded == true,
+            showSucceeded = Runtime.shown,
+            showError = Runtime.lastError,
+        }
+    end
+    GENV.__AZ_UI_RESTORE_CONNECTION = UIS.InputBegan:Connect(function(input, processed)
+        if not processed and input.KeyCode == Enum.KeyCode.F8 then
+            ShowWindow()
+        end
+    end)
+    task.delay(2.5, function()
+        if GENV.__AZ_ACTIVE_WINDOW == Window then
+            ShowWindow()
+        end
+    end)
+end)()
 
 -- Sidebar grouping keeps the main automation tabs easy to scan.
 
@@ -4522,33 +4565,82 @@ LobbyTab:CreateToggle({
 
 
 --//============================================================
---// TRIALS: floor numbering (native Next Floor handles progression)
+--// TRIALS: select highest unlocked floor from live account progress.
+--// Matches the game lobby's GetOpenRoom() + 1 calculation.
 --//============================================================
+GENV.__AZ_GET_TOP_TRIALS_FLOOR = function()
+    local RS = game:GetService("ReplicatedStorage")
+    local Global = RS:FindFirstChild("global")
+    local Assets = RS:FindFirstChild("assets")
+    local AccountModule = Global and Global:FindFirstChild("stores")
+        and Global.stores:FindFirstChild("accountNamespace")
+    local SeasonModule = Assets and Assets:FindFirstChild("config")
+        and Assets.config:FindFirstChild("LeaderboardSeasonConfig")
+    if not AccountModule or not SeasonModule then
+        return nil, "Account or season module not replicated yet"
+    end
+
+    local ok, floorOrError = pcall(function()
+        local AccountNamespace = require(AccountModule)
+        local SeasonConfig = require(SeasonModule)
+        local Account = AccountNamespace.getLocalPlayerAccount()
+        local season = SeasonConfig.Season
+        if not Account or not season or season.Id == nil then
+            return nil
+        end
+        local Progress = Account.state.achievements.progress
+        local Prefix = "trials.s" .. tostring(season.Id) .. "."
+        local function ReadProgress(Suffix)
+            local Key = Progress:get(Prefix .. Suffix)
+            if not Key then return 0 end
+            return math.max(tonumber(Key:get()) or 0, 0)
+        end
+        local best = ReadProgress("room")
+        local unlocked = ReadProgress("unlocked")
+        return math.clamp(math.floor(math.max(best, unlocked) + 1), 1, 65535)
+    end)
+    if not ok then return nil, tostring(floorOrError) end
+    if type(floorOrError) ~= "number" then
+        return nil, "Waiting for the player account"
+    end
+    return floorOrError, nil
+end
+
 LobbyTab:CreateDivider({spacing = 16})
 LobbyTab:CreateSection({name = "Trials (2026 Update)"})
 
-LobbyTab:CreateInput({
-    name = "Trials Starting Floor",
-    flag = "TrialsRoom",
-    placeholder = "Starting floor (must be unlocked)",
-    numeric = true,
-    clearOnFocus = false,
-    value = tostring(Settings.SelectedTrialsRoom),
-    callback = function(Value)
-        local Room = tonumber(Value)
-        if not Room then return end
-        Settings.SelectedTrialsRoom = math.clamp(math.floor(Room), 1, 65535)
-        if type(Settings.SetLobbyUserPreference) == "function" then
-            Settings.SetLobbyUserPreference("SelectedTrialsRoom", Settings.SelectedTrialsRoom)
+-- Scoped so the UI display handle does not increase the main Luau local
+-- register count in this already very large script.
+;(function()
+    local TrialsFloorDisplay = LobbyTab:CreateStat({
+        name = "Highest Unlocked Trials Floor",
+        description = "Automatically uses your current season progress when joining Trials",
+        value = 0,
+    })
+
+    -- UI-only status refresh. The queue builder resolves the live floor again
+    -- at join time; no stale saved-floor value is used for queue requests.
+    task.spawn(function()
+        local last = nil
+        while GENV.__AZ_ACTIVE_WINDOW == Window and not Window.unloaded do
+            local top = GENV.__AZ_GET_TOP_TRIALS_FLOOR()
+            if top then
+                Settings.SelectedTrialsRoom = top
+                if top ~= last then
+                    last = top
+                    pcall(function() TrialsFloorDisplay:Set(top) end)
+                    print("[Anime Zero][Trials] Highest unlocked floor:", top)
+                end
+            end
+            task.wait(3)
         end
-        ResetLobbyState()
-    end,
-})
+    end)
+end)()
 
 LobbyTab:CreateToggle({
     name = "Auto Join Trials",
     flag = "AutoJoinTrials",
-    description = "Queue the specified unlocked Trials floor. Use Auto Next for subsequent floors.",
+    description = "Join the highest unlocked seasonal Trials floor automatically. Use Auto Next for subsequent floors.",
     value = Settings.AutoJoinTrials,
     callback = function(Value)
         local On = Value == true
@@ -15076,6 +15168,12 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                 GENV.__AZ_PLAYER_MISC_REDEEM_FUNCTION = nil
                 GENV.__AZ_RUNTIME = nil
 
+
+                -- Remove the UI rescue listener along with the old window.
+                if typeof(GENV.__AZ_UI_RESTORE_CONNECTION) == "RBXScriptConnection" then
+                    pcall(function() GENV.__AZ_UI_RESTORE_CONNECTION:Disconnect() end)
+                    GENV.__AZ_UI_RESTORE_CONNECTION = nil
+                end
 
                 -- Gen2 exposes Unload on the window, not Destroy on
                 -- the library; use the documented cleanup call.
@@ -27851,11 +27949,23 @@ local function CreateLobbyQueue(
     elseif Mode == "Trials" then
         local TrialMap = FindLobbyMap("Trials", "Trials")
         if TrialMap then
+            local HighestFloor, FloorError = GENV.__AZ_GET_TOP_TRIALS_FLOOR()
+            if not HighestFloor then
+                -- Never silently join Floor 1 just because saved data loaded
+                -- before the account namespace. The next queue tick retries.
+                if not GENV.__AZ_TRIALS_FLOOR_WARN_AT
+                    or os.clock() - GENV.__AZ_TRIALS_FLOOR_WARN_AT > 8 then
+                    GENV.__AZ_TRIALS_FLOOR_WARN_AT = os.clock()
+                    warn("[Anime Zero][Trials] Waiting for highest unlocked floor:", FloorError)
+                end
+                return false
+            end
+            Settings.SelectedTrialsRoom = HighestFloor
             Payload = {
                 gamemode = "Trials",
                 map = TrialMap.Id,
                 chapter = 0,
-                floor = math.clamp(math.floor(tonumber(Settings.SelectedTrialsRoom) or 1), 1, 65535),
+                floor = HighestFloor,
                 difficulty = 1,
                 maxPlayers = 1,
                 friendsOnly = false,
@@ -28326,6 +28436,7 @@ GENV.__AZ_AUTOJOIN_STATUS = function()
         raid = Settings.AutoJoinRaid == true,
         trials = Settings.AutoJoinTrials == true,
         trialsRoom = Settings.SelectedTrialsRoom,
+        trialsHighestFromAccount = (GENV.__AZ_GET_TOP_TRIALS_FLOOR and GENV.__AZ_GET_TOP_TRIALS_FLOOR()) or nil,
         selectedMap = Settings.SelectedMap,
         selectedRaidMap = Settings.SelectedRaidMap,
         openRoom = LobbyOpenRoom,
