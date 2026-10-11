@@ -5,6 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
+--// 2026-10-11: FARM PRIORITY + CLOSE RUBBLE HIT + RAID ELEVATOR CENTER FIX
 --// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + 2026-10-11 GAME UPDATE
 --//
 --// FIXED:
@@ -2427,6 +2428,58 @@ then
 end
 
 GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
+
+-- Move to the actual rubble blocker surface, NOT a distant damage-bar marker.
+-- Both farm controllers use the same positioning helper, preventing oscillation.
+GENV.__AZ_FARM_EXT.GetCloseRubbleGoal = function(Root, Blocker, Marker)
+    if not Root then
+        return nil
+    end
+
+    local Reference = Marker
+        and Marker:IsA("Attachment")
+        and Marker.WorldPosition
+        or nil
+
+    if Blocker and Blocker:IsA("BasePart") then
+        local Half = Blocker.Size * 0.5
+        local RootLocal = Blocker.CFrame:PointToObjectSpace(Root.Position)
+        local BarLocal = Blocker.CFrame:PointToObjectSpace(Reference or Blocker.Position)
+        local XClearance = math.abs(RootLocal.X) - Half.X
+        local ZClearance = math.abs(RootLocal.Z) - Half.Z
+        local StandOff = 3.0
+        local PointLocal
+
+        if XClearance >= ZClearance then
+            PointLocal = Vector3.new(
+                (RootLocal.X >= 0 and 1 or -1) * (Half.X + StandOff),
+                RootLocal.Y,
+                math.clamp(BarLocal.Z, -math.max(Half.Z - 1, 0), math.max(Half.Z - 1, 0))
+            )
+        else
+            PointLocal = Vector3.new(
+                math.clamp(BarLocal.X, -math.max(Half.X - 1, 0), math.max(Half.X - 1, 0)),
+                RootLocal.Y,
+                (RootLocal.Z >= 0 and 1 or -1) * (Half.Z + StandOff)
+            )
+        end
+
+        local Surface = Blocker.CFrame:PointToWorldSpace(PointLocal)
+        local Standing = Vector3.new(Surface.X, Root.Position.Y, Surface.Z)
+        local Face = Vector3.new(Blocker.Position.X, Root.Position.Y, Blocker.Position.Z)
+        if (Face - Standing).Magnitude < 0.1 then
+            Face = Standing + Vector3.new(0, 0, -1)
+        end
+        return CFrame.lookAt(Standing, Face, Vector3.yAxis)
+    end
+
+    if Reference then
+        local Standing = Vector3.new(Reference.X, Root.Position.Y, Reference.Z)
+        return CFrame.new(Standing) * Root.CFrame.Rotation
+    end
+
+    return nil
+end
 GENV.__AZ_FARM_EXT.AreaEntryRecoveryArea = nil
 GENV.__AZ_FARM_EXT.AreaEntryStartedAt = nil
 GENV.__AZ_FARM_EXT.AreaEntryRecoveryAttempt = 0
@@ -5643,32 +5696,29 @@ FarmTab:CreateToggle({
                         end
 
                         if TargetPosition then
-                            local Distance =
-                                (Root.Position - TargetPosition).Magnitude
+                            local Goal = GENV.__AZ_FARM_EXT.GetCloseRubbleGoal(
+                                Root,
+                                Blocker,
+                                RubbleBar
+                            )
 
-                            if Distance < BestDistance then
-                                local LookAt =
-                                    GetInstancePosition2(Blocker)
+                            if not Goal then
+                                local LookAt = GetInstancePosition2(Blocker)
                                     or GetInstancePosition2(Rubble)
                                     or TargetPosition + Vector3.new(0, 0, -1)
+                                LookAt = Vector3.new(LookAt.X, Root.Position.Y, LookAt.Z)
+                                Goal = CFrame.lookAt(TargetPosition, LookAt, Vector3.yAxis)
+                            end
 
-                                LookAt = Vector3.new(
-                                    LookAt.X,
-                                    Root.Position.Y,
-                                    LookAt.Z
-                                )
-
+                            local Distance = (Root.Position - Goal.Position).Magnitude
+                            if Distance < BestDistance then
                                 BestDistance = Distance
                                 Best = {
                                     Border = Border,
                                     Blocker = Blocker,
                                     Rubble = Rubble,
                                     Health = Health,
-                                    Goal = CFrame.lookAt(
-                                        TargetPosition,
-                                        LookAt,
-                                        Vector3.yAxis
-                                    ),
+                                    Goal = Goal,
                                 }
                             end
                         end
@@ -6389,22 +6439,13 @@ FarmTab:CreateToggle({
 
 
         Rescue.GetRaidRouteObjects = function()
-            local World =
-                workspace:FindFirstChild("World")
-
+            local World = workspace:FindFirstChild("World")
             if not World then
                 return nil, nil, nil, nil
             end
 
-            local Areas =
-                World:FindFirstChild("Areas")
-
-            local Area =
-                Areas
-                and Areas:FindFirstChild("1")
-
-            -- Future-proofing: if a later raid segment renames zone 1, use the
-            -- first actual area BasePart instead of falling back to spawn points.
+            local Areas = World:FindFirstChild("Areas")
+            local Area = Areas and Areas:FindFirstChild("1")
             if not Area and Areas then
                 for _, Object in ipairs(Areas:GetChildren()) do
                     if Object:IsA("BasePart") then
@@ -6414,16 +6455,29 @@ FarmTab:CreateToggle({
                 end
             end
 
-            local Markers =
-                World:FindFirstChild("Markers")
+            local Markers = World:FindFirstChild("Markers")
+            local Exit = Markers and (
+                Markers:FindFirstChild("Exit")
+                or Markers:FindFirstChild("Elevator")
+            )
+            local ExitPrompt = Exit and Exit:FindFirstChild("ExitPrompt", true)
 
-            local Exit =
-                Markers
-                and Markers:FindFirstChild("Exit")
-
-            local ExitPrompt =
-                Exit
-                and Exit:FindFirstChild("ExitPrompt")
+            -- The updated map may nest ExitPrompt under the pad, rather than
+            -- directly under the marker. Fall back to searching the World.
+            if not ExitPrompt then
+                ExitPrompt = World:FindFirstChild("ExitPrompt", true)
+            end
+            if ExitPrompt and not ExitPrompt:IsA("ProximityPrompt") then
+                ExitPrompt = nil
+            end
+            if not Exit and ExitPrompt then
+                local Parent = ExitPrompt.Parent
+                if Parent and Parent:IsA("Attachment") then
+                    Exit = Parent.Parent
+                else
+                    Exit = Parent
+                end
+            end
 
             return World, Area, Exit, ExitPrompt
         end
@@ -7024,53 +7078,73 @@ FarmTab:CreateToggle({
                     and ExitPrompt.Enabled == true
                 )
 
-            -- Exit state is authoritative. A dead/stale enemy model should never
-            -- hold the farm in the finished segment.
-            if ExitOpen and Exit then
+            -- Exit state is authoritative. Ignore stale enemies and prioritize
+            -- the center elevator platform as soon as RaidExitOpen is signaled.
+            if ExitOpen then
                 Rescue.RaidState = "Elevator"
 
                 local PromptParent = ExitPrompt and ExitPrompt.Parent
-                local PromptPosition = Exit.Position
+                local PromptPosition = nil
                 if PromptParent and PromptParent:IsA("Attachment") then
                     PromptPosition = PromptParent.WorldPosition
                 elseif PromptParent and PromptParent:IsA("BasePart") then
                     PromptPosition = PromptParent.Position
                 end
-                -- Move to the center of the actual elevator trigger/prompt.
-                -- The previous fixed +Z offset could land outside the new
-                -- segment's activation volume when its orientation changed.
-                local GoalPosition = PromptPosition + Vector3.new(0, 2.5, 0)
 
-                if (
-                    Root.Position
-                    - GoalPosition
-                ).Magnitude > 2.5
-                then
-                    Root.CFrame =
-                        CFrame.lookAt(
-                            GoalPosition,
-                            PromptPosition
-                        )
+                local ExitPosition = nil
+                if Exit and Exit:IsA("BasePart") then
+                    ExitPosition = Exit.Position
+                elseif Exit and Exit:IsA("Attachment") then
+                    ExitPosition = Exit.WorldPosition
+                elseif Exit and Exit:IsA("Model") then
+                    local Pad = Exit.PrimaryPart
+                        or Exit:FindFirstChildWhichIsA("BasePart", true)
+                    ExitPosition = Pad and Pad.Position or nil
                 end
 
-                if ExitPrompt
-                    and (
-                        Root.Position
-                        - PromptPosition
-                    ).Magnitude
-                        <= math.max(
-                            tonumber(
-                                ExitPrompt.MaxActivationDistance
-                            ) or 14,
-                            14
-                        )
-                then
-                    if Rescue.FireRaidExitPrompt(
-                        ExitPrompt
-                    ) then
-                        Rescue.RaidState = "ElevatorPrompt"
-                        Rescue.RaidLastAreaAt = 0
+                -- The pad marker is the center location. Prompt attachments
+                -- are a fallback and can be mounted above the actual surface.
+                local Destination = ExitPosition or PromptPosition
+                if not Destination and Area then
+                    Destination = Area.Position
+                    Rescue.RaidState = "Elevator Center Fallback"
+                end
+
+                if Destination then
+                    -- Keep the current floor height while centering on the pad;
+                    -- marker heights can be high above/below the walkable top.
+                    local GoalPosition = Vector3.new(
+                        Destination.X,
+                        Root.Position.Y,
+                        Destination.Z
+                    )
+                    if (Root.Position - GoalPosition).Magnitude > 1.8 then
+                        Root.CFrame = CFrame.new(GoalPosition) * Root.CFrame.Rotation
+                        Root.AssemblyLinearVelocity = Vector3.zero
+                        Root.AssemblyAngularVelocity = Vector3.zero
+                        Rescue.RaidState = "Moving To Elevator Center"
+                    else
+                        Rescue.RaidState = "Elevator Center Ready"
                     end
+
+                    -- Prefer the normal prompt interaction, when present.
+                    -- No remote is invented when the server provides a pad
+                    -- that activates simply by standing in the center.
+                    if ExitPrompt and ExitPrompt.Enabled and PromptPosition then
+                        local MaxDistance = tonumber(ExitPrompt.MaxActivationDistance) or 10
+                        if (Root.Position - PromptPosition).Magnitude
+                            <= math.max(1, MaxDistance - 0.5)
+                        then
+                            if Rescue.FireRaidExitPrompt(ExitPrompt) then
+                                Rescue.RaidState = "Elevator Prompt"
+                                Rescue.RaidLastAreaAt = 0
+                            end
+                        else
+                            Rescue.RaidState = "Waiting For Elevator Prompt Range"
+                        end
+                    end
+                else
+                    Rescue.RaidState = "Waiting For Elevator Marker"
                 end
 
                 return true
@@ -7174,6 +7248,30 @@ FarmTab:CreateToggle({
             return true
         end
 
+
+        -- Live debug: run getgenv().__AZ_ELEVATOR_STATUS() in the executor
+        -- console while the exit banner is visible.
+        GENV.__AZ_ELEVATOR_STATUS = function()
+            local World, Area, Exit, ExitPrompt = Rescue.GetRaidRouteObjects()
+            local Root = GetRoot2()
+            local Status = {
+                mode = workspace:GetAttribute("Mode"),
+                raidFarmOn = Settings.AutoRaidFarm == true,
+                autoFarmOn = Settings.AutoFarm == true,
+                exitOpen = workspace:GetAttribute("RaidExitOpen") == true,
+                raidState = Rescue.RaidState,
+                worldFound = World ~= nil,
+                areaFound = Area ~= nil,
+                exitMarkerFound = Exit ~= nil,
+                exitPromptFound = ExitPrompt ~= nil,
+                exitPromptEnabled = ExitPrompt and ExitPrompt.Enabled or false,
+                rootFound = Root ~= nil,
+            }
+            for Key, Value in pairs(Status) do
+                print("[Anime Zero][Elevator]", Key, "=", tostring(Value))
+            end
+            return Status
+        end
 
         local function MoveFarm2(DeltaTime)
             local IsRaid =
@@ -7287,6 +7385,15 @@ FarmTab:CreateToggle({
                         .. tostring(
                             Rescue.RaidDodgeState
                         )
+                    return
+                end
+            end
+
+            -- A cleared raid elevator must outrank Auto Arise's hold.
+            -- Otherwise a corpse prompt can keep the avatar from returning
+            -- to the circular center pad at the end of a raid segment.
+            if IsRaid and workspace:GetAttribute("RaidExitOpen") == true then
+                if Rescue.HandleRaidRoute(Root, nil) then
                     return
                 end
             end
@@ -7943,17 +8050,13 @@ FarmTab:CreateToggle({
 
             for Id, DropState in pairs(Drops) do
                 local Position = nil
-
                 pcall(function()
                     Position = ReadLeaf(DropState.position)
                 end)
 
                 if typeof(Position) == "Vector3" then
                     DropCount = DropCount + 1
-
-                    local Distance =
-                        (Root.Position - Position).Magnitude
-
+                    local Distance = (Root.Position - Position).Magnitude
                     if Distance < BestDistance then
                         BestDistance = Distance
                         BestId = Id
@@ -7967,62 +8070,28 @@ FarmTab:CreateToggle({
                 return
             end
 
-            Rescue.LootState =
-                "Drop "
-                .. tostring(BestId)
-                .. " ("
-                .. tostring(DropCount)
-                .. ")"
+            Rescue.LootState = "Nearby " .. tostring(DropCount) .. " drops"
 
-            -- The game's own drop controller only finishes recoverDrop after
-            -- the player is close enough for the magnet pickup (about 12 studs).
-            -- The old rescue code refused to move to loot whenever Auto Farm was
-            -- enabled, so raid drops outside that radius could never be recovered.
-            -- Snap briefly into pickup range even while farming; normal farm/raid
-            -- movement resumes on the next heartbeat.
-            if BestDistance > 10 then
-                local PickupCF =
-                    CFrame.new(
-                        BestPosition
-                        + Vector3.new(0, 2.5, 0)
-                    )
-
-                Root.CFrame = PickupCF
-                Rescue.LootState =
-                    "Collecting "
-                    .. tostring(BestId)
-
-                -- Fire once immediately and once after a short replication beat.
-                -- The second attempt covers executors/servers where the CFrame
-                -- reaches the server one network step after the remote.
+            -- Never pull the avatar away from a live enemy, rubble, activation
+            -- center, raid elevator, or dodge. Recover only reachable loot.
+            if BestDistance <= 12 then
+                Rescue.LootState = "Recover " .. tostring(BestId)
                 pcall(function()
                     RewardPackets2.recoverDrop:fire(BestId)
                 end)
-
-                task.delay(0.07, function()
-                    if Rescue.Active
-                        and Settings.AutoPickupLoot
-                        and RewardPackets2
-                        and RewardPackets2.recoverDrop
-                    then
-                        pcall(function()
-                            RewardPackets2.recoverDrop:fire(BestId)
-                        end)
-                    end
-                end)
-
                 return
             end
 
-            if BestDistance <= 15 then
-                Rescue.LootState =
-                    "Recover "
-                    .. tostring(BestId)
-
-                pcall(function()
-                    RewardPackets2.recoverDrop:fire(BestId)
-                end)
+            local AnyFarmActive = Settings.AutoFarm or Settings.AutoRaidFarm
+            if AnyFarmActive or workspace:GetAttribute("RaidExitOpen") == true then
+                Rescue.LootState = "Deferred (farm/transition active)"
+                return
             end
+
+            -- Standalone Auto Pickup still travels to distant drops when
+            -- neither farming controller owns movement.
+            Root.CFrame = CFrame.new(BestPosition + Vector3.new(0, 2.5, 0))
+            Rescue.LootState = "Standalone pickup " .. tostring(BestId)
         end
 
 
@@ -8514,11 +8583,17 @@ FarmTab:CreateToggle({
                 then
                     GENV.__AZ_FARM_ENGINE_ACTIVE = true
 
-                    local AssistOK, AssistError =
-                        pcall(
+                    -- Only one controller may own a rubble target. The
+                    -- legacy farm is authoritative while actively targeting it.
+                    local AssistOK, AssistError = true, nil
+                    if CurrentFarmMode ~= "Rubble"
+                        and CurrentFarmMode ~= "Waiting For Rubble To Drop"
+                    then
+                        AssistOK, AssistError = pcall(
                             Rescue.RunNormalProgressionAssist,
                             DeltaTime
                         )
+                    end
 
                     if not AssistOK then
                         warn(
@@ -29294,8 +29369,12 @@ end)()
         end
 
 
+        -- Farm/combat/area movement keeps ownership. In that mode loot is
+        -- still recovered inside the game's pickup radius without travelling.
         Ext.LootTargetCFrame =
-            NearestCFrame
+            (not Settings.AutoFarm and not Settings.AutoRaidFarm)
+            and NearestCFrame
+            or nil
 
 
         -- Forget ids that the replicated store has removed.
@@ -31341,117 +31420,18 @@ end
 --//============================================================
 
 local function GetRubbleFarmCFrame(Info)
-
     if not Info then
         return nil
     end
-
-
-    local Root =
-        GetRoot()
-
-
+    local Root = GetRoot()
     if not Root then
         return nil
     end
 
-
-    local TargetPosition = nil
-
-
-    if Info.RubbleBar
-        and Info.RubbleBar:IsA(
-            "Attachment"
-        )
-    then
-
-        local Position =
-            Info.RubbleBar.WorldPosition
-
-
-        TargetPosition =
-            Vector3.new(
-                Position.X,
-                Root.Position.Y,
-                Position.Z
-            )
-    end
-
-
-    if not TargetPosition
-        and Info.Blocker
-    then
-
-        local Look =
-            Info.Blocker.CFrame.LookVector
-
-
-        local Flat =
-            Vector3.new(
-                Look.X,
-                0,
-                Look.Z
-            )
-
-
-        if Flat.Magnitude < 0.01 then
-
-            Flat =
-                Vector3.new(
-                    0,
-                    0,
-                    1
-                )
-
-        else
-
-            Flat =
-                Flat.Unit
-        end
-
-
-        TargetPosition =
-            Info.Blocker.Position
-            + Flat * 8
-
-
-        TargetPosition =
-            Vector3.new(
-                TargetPosition.X,
-                Root.Position.Y,
-                TargetPosition.Z
-            )
-    end
-
-
-    if not TargetPosition then
-        return nil
-    end
-
-
-    local LookAt =
-        Info.Blocker
-        and Info.Blocker.Position
-        or TargetPosition
-            + Vector3.new(
-                0,
-                0,
-                -1
-            )
-
-
-    LookAt =
-        Vector3.new(
-            LookAt.X,
-            Root.Position.Y,
-            LookAt.Z
-        )
-
-
-    return CFrame.lookAt(
-        TargetPosition,
-        LookAt,
-        Vector3.yAxis
+    return GENV.__AZ_FARM_EXT.GetCloseRubbleGoal(
+        Root,
+        Info.Blocker,
+        Info.RubbleBar
     )
 end
 
@@ -35189,6 +35169,8 @@ local function UpdateAutoFarm()
 
 
     if Settings.AutoPickupLoot
+        and not Settings.AutoFarm
+        and not Settings.AutoRaidFarm
         and type(
             GENV.__AZ_FARM_EXT
                 .GetLootTargetCFrame
