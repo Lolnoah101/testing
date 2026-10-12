@@ -34745,7 +34745,9 @@ end
 --//============================================================
 
 GENV.__AZ_FARM_EXT.HxhEntry = { Area = nil, Goal = nil, Attempts = 0,
-    LastMoveAt = 0, FirstInsideAt = nil, Confirmed = nil, Status = "Idle" }
+    LastMoveAt = 0, FirstInsideAt = nil, Confirmed = nil, Status = "Idle",
+    VerifiedGoal = nil, VerifiedArea = nil, WatchUntil = 0,
+    WatchOutsideAt = nil, RearmCount = 0 }
 
 local function GetRequestedEntryArea()
     local Area = tonumber(GetRunValue("area"))
@@ -34757,6 +34759,11 @@ local function GetRequestedEntryArea()
     if Entry.Area ~= Area then
         Entry.Area = Area
         Entry.Goal = nil
+        Entry.VerifiedGoal = nil
+        Entry.VerifiedArea = nil
+        Entry.WatchUntil = 0
+        Entry.WatchOutsideAt = nil
+        Entry.RearmCount = 0
         Entry.Attempts = 0
         Entry.LastMoveAt = 0
         Entry.FirstInsideAt = nil
@@ -34764,6 +34771,44 @@ local function GetRequestedEntryArea()
         Entry.Status = "Server requested area " .. tostring(Area)
     end
     if Entry.Confirmed == Area then
+        -- POST-RUBBLE WATCHER: a successful landing can be rolled back by
+        -- the server shortly afterward.  Do not permanently forget the
+        -- destination.  Re-arm only the SAME server-verified marker goal,
+        -- never a guessed area-center or a later area's marker.
+        local Now = os.clock()
+        if IsHxhMap()
+            and Settings.AutoFarm
+            and Entry.VerifiedArea == Area
+            and Entry.VerifiedGoal
+            and Now <= (Entry.WatchUntil or 0)
+            and not Ext.IsHxhEntryDeep(Area, 3)
+        then
+            Entry.WatchOutsideAt = Entry.WatchOutsideAt or Now
+            -- Give physics/replication time to settle.  The normal Enemy
+            -- controller is already responsible if enemies are targetable.
+            if Now - Entry.WatchOutsideAt >= 1.75
+                and not GetFreshFarmTarget()
+            then
+                Entry.Confirmed = nil
+                Entry.Goal = Entry.VerifiedGoal
+                Entry.Attempts = 0
+                Entry.LastMoveAt = 0
+                Entry.MoveFinishAt = 0
+                Entry.RestartAt = nil
+                Entry.MarkerObservedAt = Now - 1
+                Entry.FirstInsideAt = nil
+                Entry.InsideAt = nil
+                Entry.RearmCount = (Entry.RearmCount or 0) + 1
+                Entry.Status = "Watcher: returned outside AREA "
+                    .. tostring(Area) .. "; retrying verified marker"
+                print("[Anime Zero][AREA Watcher] Reapproach AREA", Area,
+                    "attempt", Entry.RearmCount,
+                    "using locked game marker (", Settings.FarmMethod, ")")
+                return Area
+            end
+            return nil
+        end
+        Entry.WatchOutsideAt = nil
         return nil
     end
     -- Hxh must actually enter the activation volume and receive the new
@@ -34778,8 +34823,16 @@ local function GetRequestedEntryArea()
         Entry.FirstInsideAt = Entry.FirstInsideAt or os.clock()
         if os.clock() - Entry.FirstInsideAt >= 0.50 then
             Entry.Confirmed = Area
+            -- Keep the marker-derived 10-stud goal available if Roblox
+            -- subsequently places the character back near the old rubble.
+            if Entry.Goal and Entry.VerifiedArea == Area then
+                Entry.VerifiedGoal = Entry.Goal
+            end
             Entry.Goal = nil
-            Entry.Status = "Entered area " .. tostring(Area) .. "; wave active"
+            Entry.WatchOutsideAt = nil
+            Entry.WatchUntil = os.clock() + 45
+            Entry.Status = "Entered area " .. tostring(Area)
+                .. "; watcher active for 45 seconds"
             Ext.PendingAreaEntry = nil
             Ext.AreaEntryLastConfirmed = Area
             return nil
@@ -34819,7 +34872,14 @@ local function HandleAreaEntry(TargetArea)
     local DeepInside = IsHxhMap()
         and Ext.IsHxhEntryDeep(TargetArea, 3)
         or (not IsHxhMap() and IsPlayerInsideArea(TargetArea))
-    if DeepInside then
+    -- Being 3 studs inside a volume does not mean the character reached
+    -- the actual 10-stud inset.  Finish the locked approach first unless
+    -- the server has already activated the wave.
+    local WaveActive = (tonumber(GetRunValue("wave")) or 0) > 0
+        or (tonumber(GetRunValue("remaining")) or 0) > 0
+    local NearVerifiedGoal = Entry.Goal
+        and (Root.Position - Entry.Goal.Position).Magnitude <= 3.0
+    if DeepInside and (WaveActive or NearVerifiedGoal) then
         Entry.InsideAt = Entry.InsideAt or Now
         if Ext.AreaMarkerTween then
             pcall(function() Ext.AreaMarkerTween:Cancel() end)
@@ -34859,14 +34919,14 @@ local function HandleAreaEntry(TargetArea)
 
     local MarkerGoal, Reason = Ext.GetGameAreaMarkerGoal(TargetArea)
     if not MarkerGoal then
-        -- Keep an already verified destination while the game briefly hides
-        -- the marker mid-move; never invent a new center/area fallback.
-        if Entry.Goal and Entry.Attempts > 0
-            and tonumber(GetRunValue("wave")) == 0
-            and Now <= (Entry.MoveFinishAt or 0) + 1.2
+        -- The game hides NextAreaMarker once its trigger is crossed.  If
+        -- position rollback happens afterward, reuse the marker location
+        -- already verified for THIS server area (even if wave > 0).
+        if Entry.Goal and Entry.VerifiedArea == TargetArea
+            and tonumber(GetRunValue("area")) == TargetArea
         then
             MarkerGoal = Entry.Goal
-            Reason = "Finishing verified AREA marker movement"
+            Reason = "Reusing locked verified AREA marker after rollback"
         else
             if not IsRubblePhysicallyOpen(TargetArea - 1) then
                 Entry.Status = "Waiting for rubble to lower"
@@ -34884,6 +34944,8 @@ local function HandleAreaEntry(TargetArea)
     -- following every tiny change resets the tween and can bounce areas.
     if not Entry.Goal then
         Entry.Goal = MarkerGoal
+        Entry.VerifiedGoal = MarkerGoal
+        Entry.VerifiedArea = TargetArea
         Entry.Attempts = 0
         Entry.LastMoveAt = 0
         Entry.MoveFinishAt = 0
@@ -34917,6 +34979,10 @@ local function HandleAreaEntry(TargetArea)
         Entry.RestartAt = nil
         Entry.Attempts = 0
         Entry.Goal = MarkerGoal
+        -- If the actual marker is still present, update our verified
+        -- target; otherwise MarkerGoal is the same locked goal as before.
+        Entry.VerifiedGoal = MarkerGoal
+        Entry.VerifiedArea = TargetArea
     end
 
     local Distance = (Root.Position - Entry.Goal.Position).Magnitude
@@ -35753,6 +35819,13 @@ GENV.__AZ_AREA_STATUS = function()
         boundedEntryStatus = (Ext.HxhEntry or {}).Status,
         boundedEntryAttempts = (Ext.HxhEntry or {}).Attempts,
         boundedEntryConfirmed = (Ext.HxhEntry or {}).Confirmed,
+        watcherStatus = (Ext.HxhEntry or {}).Status,
+        watcherRetries = (Ext.HxhEntry or {}).RearmCount,
+        watcherRemaining = math.max(0, ((Ext.HxhEntry or {}).WatchUntil or 0) - os.clock()),
+        watcherVerifiedGoal = (Ext.HxhEntry or {}).VerifiedGoal
+            and (Ext.HxhEntry or {}).VerifiedGoal.Position or nil,
+        watcherOutsideSeconds = (Ext.HxhEntry or {}).WatchOutsideAt
+            and (os.clock() - (Ext.HxhEntry or {}).WatchOutsideAt) or nil,
         farmMode = CurrentFarmMode,
         gameMarkerArea = Ext.GameAreaMarkerNumber,
         gameMarkerPosition = Ext.GameAreaMarkerPosition,
@@ -36030,7 +36103,9 @@ GENV.__AZ_FARM_EXT.RespawnConnection =
                 GENV.__AZ_FARM_EXT.CrossingArea = nil
                 GENV.__AZ_FARM_EXT.HxhEntry = {Area = nil, Goal = nil,
                     Attempts = 0, LastMoveAt = 0, FirstInsideAt = nil,
-                    Confirmed = nil, Status = "Respawn reset"}
+                    Confirmed = nil, Status = "Respawn reset",
+                    VerifiedGoal = nil, VerifiedArea = nil,
+                    WatchUntil = 0, WatchOutsideAt = nil, RearmCount = 0}
             end
         )
 
