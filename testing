@@ -30789,6 +30789,12 @@ local function GetCurrentMapConfig()
     ]
 end
 
+-- The updated Hxh map has its OWN rubble + next-area entry markers.
+-- Never let generic wave/stillness recovery override its destinations.
+local function IsHxhMap()
+    return string.lower(tostring(MapConstants.currentMap or "")) == "hxh"
+end
+
 
 --//============================================================
 --// RUBBLE
@@ -31233,16 +31239,39 @@ GENV.__AZ_FARM_EXT.GetGameAreaMarkerGoal = function(TargetArea)
         (Human and Human.HipHeight or 2) + Root.Size.Y * 0.5,
         2.5, 6.5
     )
-    local TargetPosition = Pad.Position + Vector3.new(0, Height, 0)
     local Area = GetAreaPart(tonumber(TargetArea))
+    local MarkerPosition = Pad.Position
+    local EntryPosition = MarkerPosition
+    -- NextAreaMarker is a NAVIGATION hint, not an arrival trigger.  Some
+    -- placed AreaEntries sit on the rim of the zone; standing at their pad
+    -- can leave the player outside the actual wave-activation volume.
+    -- Keep the marker's road height, but move the landing X/Z inside the
+    -- server-selected area box by roughly ten studs on each edge.
+    if IsHxhMap() and Area then
+        local Local = Area.CFrame:PointToObjectSpace(MarkerPosition)
+        local Half = Area.Size * 0.5
+        local InsetX = math.min(10, Half.X * 0.45)
+        local InsetZ = math.min(10, Half.Z * 0.45)
+        local Interior = Area.CFrame:PointToWorldSpace(Vector3.new(
+            math.clamp(Local.X, -Half.X + InsetX, Half.X - InsetX),
+            Local.Y,
+            math.clamp(Local.Z, -Half.Z + InsetZ, Half.Z - InsetZ)
+        ))
+        -- This is a server-reported area volume paired with the actual AREA
+        -- marker; unlike older versions, don't apply a guessed max-distance
+        -- cutoff that could strand the player at the entrance.
+        EntryPosition = Vector3.new(Interior.X, MarkerPosition.Y, Interior.Z)
+    end
+    local TargetPosition = EntryPosition + Vector3.new(0, Height, 0)
     local LookAt = Area and Vector3.new(Area.Position.X, TargetPosition.Y, Area.Position.Z)
         or (TargetPosition + Root.CFrame.LookVector)
     if (LookAt - TargetPosition).Magnitude < 0.1 then
         LookAt = TargetPosition + Root.CFrame.LookVector
     end
     Ext.GameAreaMarkerNumber = MarkerArea
-    Ext.GameAreaMarkerPosition = TargetPosition
-    return CFrame.lookAt(TargetPosition, LookAt), "AREA marker verified"
+    Ext.GameAreaMarkerPosition = MarkerPosition
+    Ext.GameAreaActivationPosition = TargetPosition
+    return CFrame.lookAt(TargetPosition, LookAt), "AREA marker verified; target inset into activation area"
 end
 
 --//============================================================
@@ -31425,6 +31454,24 @@ local function IsPlayerInsideArea(
                 + AREA_INSIDE_TOLERANCE
 end
 
+
+--//============================================================
+--// HxH AREA ACTIVATION: STRICT INTERIOR, NOT NEAR-EDGE ARRIVAL
+--// Mirrors the game marker's X/Z-only area-box check, with a margin
+--// to make sure the player crosses the boundary far enough for waves.
+--//============================================================
+GENV.__AZ_FARM_EXT.IsHxhEntryDeep = function(AreaNumber, Inset)
+    local Root = GetRoot()
+    local Area = GetAreaPart(AreaNumber)
+    if not Root or not Area then return false end
+    local Local = Area.CFrame:PointToObjectSpace(Root.Position)
+    local Half = Area.Size * 0.5
+    local Margin = math.max(0, tonumber(Inset) or 3)
+    local XLimit = Half.X - math.min(Margin, Half.X * 0.45)
+    local ZLimit = Half.Z - math.min(Margin, Half.Z * 0.45)
+    return math.abs(Local.X) <= XLimit
+        and math.abs(Local.Z) <= ZLimit
+end
 
 --//============================================================
 --// AREA ENTRY
@@ -32188,6 +32235,13 @@ GENV.__AZ_FARM_EXT.RunStillnessRecovery = function()
 
     local Ext = GENV.__AZ_FARM_EXT
 
+    -- Hxh's AREA marker is authoritative. The old generic stillness
+    -- watchdog jumped to rotating area-center points while the server was
+    -- loading enemies in Area 5, fighting the marker/entry controller.
+    if IsHxhMap() then
+        Ext.ResetStillness()
+        return false
+    end
 
     if not Settings.AutoFarm
         or not IsAlive()
@@ -32602,6 +32656,15 @@ local function HandleWaveRecovery(
         return false
     end
 
+    -- On updated Hxh, wave gaps are NOT proof that the player should move.
+    -- The server and NextAreaMarker determine area entry; rotating wave
+    -- recovery locations can send us across a recently lowered barrier.
+    if IsHxhMap() then
+        ResetWaveRecovery()
+        DesiredFarmCFrame = nil
+        SetFarmMode("Waiting For Wave")
+        return true
+    end
 
     if GetLivingEnemyCount() > 0 then
 
@@ -33089,6 +33152,11 @@ local function ApplyFarmMovement(
     if CurrentFarmMode == "Wave Recovery"
         or CurrentFarmMode == "Waiting For Wave"
     then
+
+        -- Defensive check: Hxh must NEVER hard-snap to a generic wave goal.
+        if IsHxhMap() then
+            return
+        end
 
         if (
             Root.Position
@@ -34698,27 +34766,40 @@ local function GetRequestedEntryArea()
     if Entry.Confirmed == Area then
         return nil
     end
-    -- Brief presence within the area is sufficient; never later un-confirm
-    -- this same area simply because the character moved to fight an enemy.
-    if IsPlayerInsideArea(Area) then
+    -- Hxh must actually enter the activation volume and receive the new
+    -- wave signal. The generic IsPlayerInsideArea check includes 0.5 studs
+    -- of padding and was incorrectly confirming the edge of the zone.
+    local DeepInside = IsHxhMap()
+        and Ext.IsHxhEntryDeep(Area, 3)
+        or (not IsHxhMap() and IsPlayerInsideArea(Area))
+    local WaveActive = (tonumber(GetRunValue("wave")) or 0) > 0
+        or (tonumber(GetRunValue("remaining")) or 0) > 0
+    if DeepInside and (not IsHxhMap() or WaveActive) then
         Entry.FirstInsideAt = Entry.FirstInsideAt or os.clock()
-        if os.clock() - Entry.FirstInsideAt >= 0.30 then
+        if os.clock() - Entry.FirstInsideAt >= 0.50 then
             Entry.Confirmed = Area
             Entry.Goal = nil
-            Entry.Status = "Confirmed area " .. tostring(Area)
+            Entry.Status = "Entered area " .. tostring(Area) .. "; wave active"
             Ext.PendingAreaEntry = nil
             Ext.AreaEntryLastConfirmed = Area
             return nil
         end
     else
         Entry.FirstInsideAt = nil
+        if DeepInside and not WaveActive then
+            Entry.Status = "Inside AREA " .. tostring(Area) .. "; waiting for enemies to spawn"
+        end
     end
     return Area
 end
 
 local function HandleAreaEntry(TargetArea)
-    -- One server-approved destination. No guessed area-center, early skip,
-    -- escalating recoveries, or fighting a second controller during travel.
+    -- Updated Hxh: SINGLE movement owner for an area change.
+    -- 1. Server changes area 2..N after rubble drops.
+    -- 2. Wait for the game's marker; freeze that exact landing point.
+    -- 3. Give the area transition time to settle before moving.
+    -- 4. Move with selected Farm Method, confirm physical arrival.
+    -- No legacy wave/area-center movement is allowed during this handoff.
     ResetWaveRecovery()
     CurrentTargetId = nil
     CurrentTargetState = nil
@@ -34728,61 +34809,126 @@ local function HandleAreaEntry(TargetArea)
     local Entry = Ext.HxhEntry
     if Entry.Area ~= TargetArea then return end
 
+    local Root = GetRoot()
+    if not Root then return end
+    local Now = os.clock()
+
+    -- The marker's *edge* is not the trigger. Never cancel the movement
+    -- merely because IsPlayerInsideArea returns true: it has a permissive
+    -- border tolerance. Wait until safely inside the X/Z activation zone.
+    local DeepInside = IsHxhMap()
+        and Ext.IsHxhEntryDeep(TargetArea, 3)
+        or (not IsHxhMap() and IsPlayerInsideArea(TargetArea))
+    if DeepInside then
+        Entry.InsideAt = Entry.InsideAt or Now
+        if Ext.AreaMarkerTween then
+            pcall(function() Ext.AreaMarkerTween:Cancel() end)
+            Ext.AreaMarkerTween = nil
+        end
+        if (tonumber(GetRunValue("wave")) or 0) > 0
+            or (tonumber(GetRunValue("remaining")) or 0) > 0
+        then
+            Entry.Status = "Inside AREA " .. tostring(TargetArea) .. "; wave started"
+            SetFarmMode("Area Entry Confirming " .. tostring(TargetArea))
+        else
+            Entry.Status = "Inside AREA " .. tostring(TargetArea) .. "; waiting for wave"
+            SetFarmMode("Waiting For AREA Wave " .. tostring(TargetArea))
+        end
+        return
+    end
+    Entry.InsideAt = nil
+
     local PreviousRubble = GetRubbleForArea(TargetArea - 1)
     if PreviousRubble and tonumber(PreviousRubble.Health)
         and PreviousRubble.Health > 0 then
-        CurrentRubbleInfo = PreviousRubble
-        RecordRubbleHeight(PreviousRubble)
-        CurrentRubbleCFrame = GetRubbleFarmCFrame(PreviousRubble)
-        DesiredFarmCFrame = CurrentRubbleCFrame
-        Entry.Status = "Previous rubble still has health"
-        SetFarmMode("Rubble")
-        return
-    end
-    local Root = GetRoot()
-    if not Root then return end
-    -- The game's own marker only appears after rubbleArmed is cleared,
-    -- the server has advanced and wave is zero. That is the authoritative
-    -- completion signal even if the animation/height check fails to replicate.
-    local Goal, Reason = Ext.GetGameAreaMarkerGoal(TargetArea)
-    if not Goal then
-        if not IsRubblePhysicallyOpen(TargetArea - 1) then
-            Entry.Status = "Waiting for rubble to physically lower"
-            SetFarmMode("Waiting For Rubble To Drop")
-        else
-            Entry.Status = Reason
-            SetFarmMode("Waiting For AREA Marker " .. tostring(TargetArea))
-        end
-        Entry.Goal = nil
-        return
-    end
-    if not Entry.Goal or (Entry.Goal.Position - Goal.Position).Magnitude > 2 then
-        Entry.Goal = Goal
-        Entry.Attempts = 0
-        Entry.LastMoveAt = 0
-        Entry.MoveFinishAt = 0
-    end
-    if IsPlayerInsideArea(TargetArea) then
-        Entry.Status = "Arrived at AREA " .. tostring(TargetArea) .. "; confirming"
-        SetFarmMode("Area Entry Confirming " .. tostring(TargetArea))
+        -- Do not attack or re-cross when the server has advanced but a
+        -- client-side rubble-health value is stale. Wait for consistency.
+        Entry.Status = "Waiting for previous rubble state to synchronize"
+        SetFarmMode("Waiting For Rubble To Drop")
         return
     end
 
-    local Dist = (Root.Position - Entry.Goal.Position).Magnitude
-    -- The game itself chooses this marker, often far across the current map.
-    -- No arbitrary distance cutoff: the server area and marker label were
-    -- verified in GetGameAreaMarkerGoal.
+    -- A new server area doesn't imply the client is ready to move on the
+    -- same frame. The game's marker/geometry replicates asynchronously.
+    local ServerSettledAt = Ext.AreaEntryLastChange or Now
+    if Now - ServerSettledAt < 0.90 then
+        Entry.Status = "Server area settling before marker approach"
+        SetFarmMode("Waiting For AREA Marker " .. tostring(TargetArea))
+        return
+    end
+
+    local MarkerGoal, Reason = Ext.GetGameAreaMarkerGoal(TargetArea)
+    if not MarkerGoal then
+        -- Keep an already verified destination while the game briefly hides
+        -- the marker mid-move; never invent a new center/area fallback.
+        if Entry.Goal and Entry.Attempts > 0
+            and tonumber(GetRunValue("wave")) == 0
+            and Now <= (Entry.MoveFinishAt or 0) + 1.2
+        then
+            MarkerGoal = Entry.Goal
+            Reason = "Finishing verified AREA marker movement"
+        else
+            if not IsRubblePhysicallyOpen(TargetArea - 1) then
+                Entry.Status = "Waiting for rubble to lower"
+                SetFarmMode("Waiting For Rubble To Drop")
+            else
+                Entry.Status = Reason
+                SetFarmMode("Waiting For AREA Marker " .. tostring(TargetArea))
+            end
+            return
+        end
+    end
+
+    -- Lock the first verified marker position for the WHOLE attempt.
+    -- The game's fallback marker is recomputed from character position;
+    -- following every tiny change resets the tween and can bounce areas.
+    if not Entry.Goal then
+        Entry.Goal = MarkerGoal
+        Entry.Attempts = 0
+        Entry.LastMoveAt = 0
+        Entry.MoveFinishAt = 0
+        Entry.MarkerObservedAt = Now
+        Entry.Status = "AREA marker acquired; settling"
+    end
+
+    -- Confirm marker stability, rather than firing the first teleport as
+    -- soon as a new server area value is observed.
+    if Now - (Entry.MarkerObservedAt or Now) < 0.55 then
+        Entry.Status = "AREA marker settling"
+        SetFarmMode("Waiting For AREA Marker " .. tostring(TargetArea))
+        return
+    end
+
+    if Now < (Entry.MoveFinishAt or 0) then
+        Entry.Status = "Moving to verified AREA marker"
+        SetFarmMode("Area Marker Waiting")
+        return
+    end
+
+    -- After two failed landings, pause a few seconds and TRY the latest
+    -- VERIFIED marker position again. Never rotate among area-center points.
     if Entry.Attempts >= 2 then
-        Entry.Status = "Two entry attempts used; waiting for arrival confirmation"
+        Entry.RestartAt = Entry.RestartAt or (Now + 5)
+        if Now < Entry.RestartAt then
+            Entry.Status = "AREA marker retry cooldown"
+            SetFarmMode("Area Marker Waiting")
+            return
+        end
+        Entry.RestartAt = nil
+        Entry.Attempts = 0
+        Entry.Goal = MarkerGoal
+    end
+
+    local Distance = (Root.Position - Entry.Goal.Position).Magnitude
+    if Distance <= 1.0 then
+        -- The inset goal should be within the activation zone. If the client
+        -- is very close but does not register inside, report the mismatch;
+        -- do not start a per-frame correction or bounce between area centers.
+        Entry.Status = "At AREA inset goal; waiting for zone registration"
         SetFarmMode("Area Marker Waiting")
         return
     end
-    local Now = os.clock()
-    if Now < (Entry.MoveFinishAt or (Entry.LastMoveAt + 3.5)) then
-        Entry.Status = "AREA marker movement in progress"
-        SetFarmMode("Area Marker Waiting")
-        return
-    end
+
     Entry.Attempts = Entry.Attempts + 1
     Entry.LastMoveAt = Now
     Entry.Status = "Moving to game AREA " .. tostring(TargetArea)
@@ -34791,7 +34937,7 @@ local function HandleAreaEntry(TargetArea)
         if Ext.AreaMarkerTween then
             pcall(function() Ext.AreaMarkerTween:Cancel() end)
         end
-        local Duration = math.max(Dist / math.max(Settings.TweenSpeed or 95, 1), 0.12)
+        local Duration = math.max(Distance / math.max(Settings.TweenSpeed or 95, 1), 0.12)
         Entry.MoveFinishAt = Now + Duration + 1.0
         local Tween = game:GetService("TweenService"):Create(
             Root, TweenInfo.new(Duration, Enum.EasingStyle.Linear),
@@ -35600,12 +35746,22 @@ GENV.__AZ_AREA_STATUS = function()
     local Result = {
         serverArea = ServerArea,
         serverWave = GetRunValue("wave"),
+        currentMap = tostring(MapConstants.currentMap or "unknown"),
+        entryAgeSeconds = os.clock() - (Ext.AreaEntryLastChange or os.clock()),
+        entryLockedMarker = (Ext.HxhEntry or {}).Goal and (Ext.HxhEntry or {}).Goal.Position,
+        entryRetryCooldown = (Ext.HxhEntry or {}).RestartAt and math.max(0, (Ext.HxhEntry or {}).RestartAt - os.clock()),
         boundedEntryStatus = (Ext.HxhEntry or {}).Status,
         boundedEntryAttempts = (Ext.HxhEntry or {}).Attempts,
         boundedEntryConfirmed = (Ext.HxhEntry or {}).Confirmed,
         farmMode = CurrentFarmMode,
         gameMarkerArea = Ext.GameAreaMarkerNumber,
         gameMarkerPosition = Ext.GameAreaMarkerPosition,
+        gameActivationPosition = Ext.GameAreaActivationPosition,
+        distanceToActivation = Root and Ext.GameAreaActivationPosition
+            and (Root.Position - Ext.GameAreaActivationPosition).Magnitude or nil,
+        deepInsideServerArea = ServerArea and Ext.IsHxhEntryDeep(ServerArea, 3) or nil,
+        areaWaveActivated = (tonumber(GetRunValue("wave")) or 0) > 0
+            or (tonumber(GetRunValue("remaining")) or 0) > 0,
         markerVisible = workspace:FindFirstChild("NextAreaMarker") ~= nil,
         pendingArea = Ext.PendingAreaEntry,
         areaState = Ext.AreaEntryState,
