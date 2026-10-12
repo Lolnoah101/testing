@@ -12064,6 +12064,320 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                 name = "Player",
             })
 
+
+        --//====================================================
+        --// PLAYER PRESETS | 4 EQUIPMENT SLOTS + 1 TITLE
+        --// Uses the game's own slot/config modules and the owned account
+        --// inventory. A button press makes a finite, acknowledged equip pass.
+        --// This intentionally does not start crafting or automation tasks.
+        --//====================================================
+        ;(function()
+            local PresetNames = {
+                "Full DMG", "Full EXP", "Full Drop", "Full Coins",
+                "Full Crit", "Full CDR", "Full HP", "Balanced",
+            }
+            local PresetWeights = {
+                ["Full DMG"] = {
+                    ["Damage"] = 100,
+                    ["Critical Chance"] = 2, ["Critical Damage"] = 2,
+                    ["Attack Speed"] = 1, ["Cooldown Reduction"] = 1,
+                },
+                ["Full EXP"] = {
+                    ["Exp"] = 100, ["Damage"] = 0.3,
+                    ["Drop Rate"] = 0.1,
+                },
+                ["Full Drop"] = {
+                    ["Drop Rate"] = 100, ["Damage"] = 0.3,
+                    ["Exp"] = 0.1,
+                },
+                ["Full Coins"] = {
+                    ["Coins"] = 100, ["Damage"] = 0.3,
+                },
+                ["Full Crit"] = {
+                    ["Critical Chance"] = 100,
+                    ["Critical Damage"] = 12, ["Damage"] = 1,
+                },
+                ["Full CDR"] = {
+                    ["Cooldown Reduction"] = 100,
+                    ["Attack Speed"] = 1, ["Damage"] = 0.3,
+                },
+                ["Full HP"] = {
+                    ["HP"] = 100, ["Defense"] = 30,
+                    ["Damage"] = 0.3,
+                },
+                ["Balanced"] = {
+                    ["Damage"] = 6, ["HP"] = 3,
+                    ["Defense"] = 3, ["Exp"] = 2,
+                    ["Drop Rate"] = 2, ["Coins"] = 2,
+                    ["Critical Chance"] = 3,
+                    ["Critical Damage"] = 2,
+                    ["Cooldown Reduction"] = 3,
+                    ["Attack Speed"] = 2,
+                },
+            }
+            local Selected = "Full DMG"
+            local StorageKey = "__AZ_PLAYER_PRESET_V1"
+            local StorageFile = "AnimeZero/player_preset_v1.json"
+            local TeleportService = game:GetService("TeleportService")
+            local ReplicatedStorage = game:GetService("ReplicatedStorage")
+            local HttpService = game:GetService("HttpService")
+            local Previous = GENV.__AZ_PLAYER_PRESET_RUNTIME
+            if type(Previous) == "table" then
+                Previous.Active = false
+            end
+            local State = {Active = true, Busy = false}
+            GENV.__AZ_PLAYER_PRESET_RUNTIME = State
+
+            local function Allowed(Name)
+                return type(Name) == "string"
+                    and PresetWeights[Name] ~= nil
+            end
+            local Saved = GENV[StorageKey]
+            if not Allowed(Saved) then
+                pcall(function()
+                    Saved = TeleportService:GetTeleportSetting(StorageKey)
+                end)
+            end
+            if not Allowed(Saved) and type(isfile) == "function"
+                and type(readfile) == "function" and isfile(StorageFile)
+            then
+                pcall(function()
+                    local Data = HttpService:JSONDecode(readfile(StorageFile))
+                    Saved = type(Data) == "table" and Data.Preset or nil
+                end)
+            end
+            if Allowed(Saved) then Selected = Saved end
+
+            local function Persist()
+                GENV[StorageKey] = Selected
+                pcall(function()
+                    TeleportService:SetTeleportSetting(StorageKey, Selected)
+                end)
+                if type(writefile) == "function" then
+                    pcall(function()
+                        if type(makefolder) == "function" then
+                            makefolder("AnimeZero")
+                        end
+                        writefile(StorageFile, HttpService:JSONEncode({Preset = Selected}))
+                    end)
+                end
+            end
+            Persist()
+
+            local function Notice(Message, Seconds)
+                print("[Anime Zero][Presets] " .. tostring(Message))
+                QueueNotification("Presets", tostring(Message), Seconds or 5)
+            end
+            local function Modules()
+                local Global = ReplicatedStorage:FindFirstChild("global")
+                local Assets = ReplicatedStorage:FindFirstChild("assets")
+                local Lobby = ReplicatedStorage:FindFirstChild("lobby")
+                local Stores = Global and Global:FindFirstChild("stores")
+                local Config = Assets and Assets:FindFirstChild("config")
+                if not Stores or not Config or not Lobby then return nil end
+                local Ok, Result = pcall(function()
+                    return {
+                        Accounts = require(Stores:WaitForChild("accountNamespace", 5)),
+                        Accessories = require(Config:WaitForChild("accessoryConfig", 5)),
+                        Slots = require(Config:WaitForChild("accessorySlotConfig", 5)),
+                        Titles = require(Config:WaitForChild("titleConfig", 5)),
+                        Packets = require(Lobby:WaitForChild("packets", 5)),
+                    }
+                end)
+                return Ok and Result or nil
+            end
+            local function DataOf(M)
+                local Ok, Data = pcall(function()
+                    local Account = M.Accounts.getLocalPlayerAccount()
+                    return Account and Account:toTable() or nil
+                end)
+                return Ok and Data or nil
+            end
+            local function Score(Definition, Preset)
+                local Weights = PresetWeights[Preset]
+                if not Weights or type(Definition) ~= "table" then
+                    return -math.huge
+                end
+                local Total = 0
+                for _, Buff in ipairs(Definition.Buffs or {}) do
+                    Total = Total
+                        + (tonumber(Weights[tostring(Buff.Type)]) or 0)
+                        * (tonumber(Buff.Percent or Buff.Amount) or 0)
+                end
+                return Total
+            end
+            local function CurrentSlot(Data, Slot, SlotConfig)
+                local Equipped = Data.equippedAccessories
+                if type(Equipped) == "table" and type(Equipped[Slot]) == "string"
+                    and Equipped[Slot] ~= ""
+                then
+                    return Equipped[Slot]
+                end
+                local Legacy = tostring(Data.equippedAccessory or "")
+                if SlotConfig.GetSlot(Legacy) == Slot then
+                    return Legacy
+                end
+                return ""
+            end
+            local function BestEquipment(Data, M, Preset)
+                local Found = {}
+                local Scores = {}
+                for Id, Definition in pairs(M.Accessories) do
+                    local Key = tostring(Id)
+                    local Owned = tonumber(
+                        type(Data.accessory) == "table" and Data.accessory[Key]
+                    ) or 0
+                    local Slot = M.Slots.GetSlot(Key)
+                    if Owned > 0 and Slot then
+                        local Value = Score(Definition, Preset)
+                        -- Stable tie-breaker; don't swap equal-stat items randomly.
+                        local Old = Scores[Slot]
+                        if Old == nil or Value > Old
+                            or (Value == Old and Key < tostring(Found[Slot]))
+                        then
+                            Found[Slot] = Key
+                            Scores[Slot] = Value
+                        end
+                    end
+                end
+                local BestTitle, BestTitleScore = nil, -math.huge
+                for Id, Definition in pairs(M.Titles) do
+                    local Key = tostring(Id)
+                    if type(Data.title) == "table" and Data.title[Key] == true then
+                        local Value = Score(Definition, Preset)
+                        if Value > BestTitleScore
+                            or (Value == BestTitleScore and Key < tostring(BestTitle))
+                        then
+                            BestTitle, BestTitleScore = Key, Value
+                        end
+                    end
+                end
+                return Found, BestTitle
+            end
+            local function IsRunning()
+                return State.Active and GENV.__AZ_PLAYER_PRESET_RUNTIME == State
+            end
+            local function WaitForSlot(M, Slot, Id, Timeout)
+                local Deadline = os.clock() + Timeout
+                while IsRunning() and os.clock() < Deadline do
+                    local Latest = DataOf(M)
+                    if Latest and CurrentSlot(Latest, Slot, M.Slots) == Id then
+                        return true
+                    end
+                    task.wait(0.2)
+                end
+                return false
+            end
+            local function WaitForTitle(M, Id, Timeout)
+                local Deadline = os.clock() + Timeout
+                while IsRunning() and os.clock() < Deadline do
+                    local Latest = DataOf(M)
+                    if Latest and tostring(Latest.equippedTitle or "") == Id then
+                        return true
+                    end
+                    task.wait(0.2)
+                end
+                return false
+            end
+            local function EquipPreset()
+                if State.Busy then
+                    Notice("Already equipping a preset.", 4)
+                    return
+                end
+                State.Busy = true
+                local CurrentPreset = Selected
+                local Ok, ErrorMessage = pcall(function()
+                    local M = Modules()
+                    if not M or not M.Packets.setEquippedAccessory
+                        or not M.Packets.equipTitle
+                    then
+                        Notice("Equipment is available from the lobby only.")
+                        return
+                    end
+                    local Data = DataOf(M)
+                    if not Data then
+                        Notice("Account inventory isn't loaded yet. Try again.")
+                        return
+                    end
+                    local Chosen, TitleId = BestEquipment(Data, M, CurrentPreset)
+                    local EquippedCount, AlreadyCount, FailedCount = 0, 0, 0
+                    for _, Slot in ipairs(M.Slots.Order) do
+                        if not IsRunning() then return end
+                        local Id = Chosen[Slot]
+                        if Id then
+                            local Latest = DataOf(M) or Data
+                            if CurrentSlot(Latest, Slot, M.Slots) == Id then
+                                AlreadyCount += 1
+                            else
+                                local Fired = pcall(function()
+                                    M.Packets.setEquippedAccessory:fire(Id)
+                                end)
+                                if Fired and WaitForSlot(M, Slot, Id, 3) then
+                                    EquippedCount += 1
+                                else
+                                    FailedCount += 1
+                                end
+                            end
+                        end
+                    end
+                    local TitleStatus = "no unlocked title"
+                    if TitleId and IsRunning() then
+                        local Latest = DataOf(M) or Data
+                        if tostring(Latest.equippedTitle or "") == TitleId then
+                            TitleStatus = "title already equipped"
+                        else
+                            local Fired = pcall(function()
+                                M.Packets.equipTitle:fire(TitleId)
+                            end)
+                            if Fired and WaitForTitle(M, TitleId, 3) then
+                                TitleStatus = "title equipped"
+                            else
+                                TitleStatus = "title not confirmed"
+                            end
+                        end
+                    end
+                    if IsRunning() then
+                        Notice(CurrentPreset .. ": " .. EquippedCount
+                            .. " accessories equipped, " .. AlreadyCount
+                            .. " already equipped, " .. FailedCount
+                            .. " unconfirmed; " .. TitleStatus .. ".", 8)
+                    end
+                end)
+                State.Busy = false
+                if not Ok then
+                    warn("[Anime Zero][Presets] Equip failed:", ErrorMessage)
+                    Notice("Equip failed; check console.", 5)
+                end
+            end
+
+            PlayerTab:CreateSection({name = "Presets"})
+            PlayerTab:CreateDropdown({
+                name = "Preset",
+                flag = "PlayerStatPreset",
+                options = PresetNames,
+                value = Selected,
+                callback = function(Value)
+                    if type(Value) == "table" then
+                        Value = Value[1] or next(Value)
+                    end
+                    if Allowed(Value) then
+                        Selected = Value
+                        Persist()
+                    end
+                end,
+            })
+            PlayerTab:CreateButton({
+                name = "Equip Preset",
+                callback = function()
+                    task.spawn(EquipPreset)
+                end,
+            })
+            GENV.__AZ_PLAYER_PRESET_STATUS = function()
+                print("[Anime Zero][Presets] selected=", Selected,
+                    "busy=", State.Busy)
+            end
+        end)()
+
         PlayerTab:CreateSection({
             name = "Progression",
         })
@@ -12093,24 +12407,6 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
         MiscTab:CreateSection({
             name = "Rewards",
-        })
-
-        MiscTab:CreateButton({
-            name = "Redeem Codes",
-            callback = function()
-                local Handler =
-                    GENV.__AZ_PLAYER_MISC_REDEEM_FUNCTION
-
-                if type(Handler) == "function" then
-                    task.spawn(Handler)
-                else
-                    QueueNotification(
-                        "Codes",
-                        "Code engine is still loading.",
-                        4
-                    )
-                end
-            end,
         })
 
         local RewardsRow = MiscTab:CreateGroup({direction = "row"})
