@@ -5,6 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
+--// 2026-10-12: AUTO ULTIMATE SUPPORTS BONUS SECOND ULT (MAIN + TRIALS/RAID)
 --// 2026-10-12: TWEEN SPEED SLIDER + FULL TWEEN NOCLIP + RUBBLE CLOSE ARRIVAL
 --// 2026-10-11: HxH RUBBLE RETRY + STAY NOCLIP + TWEEN SPEED + AREA MARKERS
 --// RUBBLE SINGLE-MOVER ISOLATION + RUBBLE AUTO-RETRY + VISIBLE-RUBBLE FACE + GAME-MARKER AREA TRANSITIONS + UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + 2026-10-11 GAME UPDATE
@@ -5976,6 +5977,18 @@ FarmTab:CreateToggle({
         CharacterPackets2 = PacketResult
         PlayerNamespace2 = PlayerResult
 
+        -- Same character definitions the native combat UI uses. Slot 4 can
+        -- temporarily turn into a bonus Ultimate (e.g. skill 5). This applies
+        -- to the separate Trials/Raid combat controller too.
+        local CharacterConstants2 = nil
+        pcall(function()
+            local Global = ReplicatedStorageService:FindFirstChild("global")
+            local Constants = Global and Global:FindFirstChild("constants")
+            local Characters = Constants and Constants:FindFirstChild("characters")
+            if Characters then
+                CharacterConstants2 = require(Characters)
+            end
+        end)
 
         pcall(function()
             local DropObject =
@@ -8328,33 +8341,53 @@ FarmTab:CreateToggle({
             end
 
             local Store = GetPlayerStore2()
-
-            if not Store or not CooldownReady2(Store, Slot) then
+            if not Store then
                 return false
             end
 
-            if Slot == 4 then
-                local Progress = nil
+            local CharacterName = nil
+            pcall(function()
+                CharacterName = Store.state.character:get()
+            end)
+            if not CharacterName then
+                return false
+            end
 
+            -- Replicate native characterController.performSkill:
+            -- during the character's own bonus window, requesting Ultimate 4
+            -- uses the bonus slot (usually 5), not slot 4 again.
+            local EffectiveSlot = Slot
+            local CharacterInfo = CharacterConstants2
+                and CharacterConstants2.charactersByName
+                and CharacterConstants2.charactersByName[CharacterName]
+            local SkillInfo = CharacterInfo and CharacterInfo.skills
+                and CharacterInfo.skills[Slot]
+            local BonusSlot = SkillInfo and SkillInfo.bonus
+            local ServerNow = workspace:GetServerTimeNow()
+            if BonusSlot
+                and (tonumber(LocalPlayerObject:GetAttribute("BonusUntil")) or 0) > ServerNow
+                and (LocalPlayerObject:GetAttribute("BonusSlot") or Slot) == Slot
+                and CharacterInfo.skills[BonusSlot]
+            then
+                EffectiveSlot = BonusSlot
+            end
+
+            if not CooldownReady2(Store, EffectiveSlot) then
+                return false
+            end
+
+            -- The base Ultimate requires the meter; a temporary bonus move
+            -- does not (the official client makes this same distinction).
+            if EffectiveSlot == 4 then
+                local Progress = nil
                 pcall(function()
                     Progress = Store.state.ultProgress:get()
                 end)
-
                 if (tonumber(Progress) or 0) < 100
                     or LocalPlayerObject:GetAttribute("UltimateLocked")
                 then
                     return false
                 end
-            end
-
-            local CharacterName = nil
-
-            pcall(function()
-                CharacterName = Store.state.character:get()
-            end)
-
-            if not CharacterName then
-                return false
             end
 
             Rescue.Sequence =
@@ -8364,14 +8397,17 @@ FarmTab:CreateToggle({
                 id = Rescue.Sequence,
                 char = CharacterName,
                 character = LocalPlayerObject.Character,
-                skill = Slot,
-                expiresAt = workspace:GetServerTimeNow() + 5,
+                skill = EffectiveSlot,
+                expiresAt = ServerNow + 5,
             }
 
             local Success = pcall(function()
                 CharacterPackets2.performSkill:fire(Request)
             end)
-
+            if Success and Slot == 4 then
+                Rescue.LastUltimateRequestSlot = EffectiveSlot
+                Rescue.LastUltimateRequestAt = ServerNow
+            end
             return Success
         end
 
@@ -30806,10 +30842,16 @@ GENV.__AZ_FARM_EXT.ResolveEffectiveSkill = function(
         ]
 
 
+    -- Bonus skills are selected only while their OWN base slot is active.
+    -- This matches the native client and prevents stale bonus attributes from
+    -- turning an unrelated skill into the wrong ability.
     if SkillConfig
         and SkillConfig.bonus
         and workspace:GetServerTimeNow()
-            < (LocalPlayer:GetAttribute("BonusUntil") or 0)
+            < (tonumber(LocalPlayer:GetAttribute("BonusUntil")) or 0)
+        and (LocalPlayer:GetAttribute("BonusSlot") or RequestedSkill)
+            == RequestedSkill
+        and Config.skills[SkillConfig.bonus]
     then
         EffectiveSkill =
             SkillConfig.bonus
@@ -35056,6 +35098,13 @@ local function TrySkill(
         return false
     end
 
+    -- Do not request slots missing from this character's current moveset.
+    local CharacterInfo = CharacterConstants.charactersByName[CharacterName]
+    if not CharacterInfo or not CharacterInfo.skills
+        or not CharacterInfo.skills[EffectiveSkill]
+    then
+        return false
+    end
 
     if EffectiveSkill == 4 then
 
@@ -35183,6 +35232,10 @@ local function TrySkill(
         return false
     end
 
+    if SkillNumber == 4 then
+        GENV.__AZ_FARM_EXT.LastUltimateRequestSlot = EffectiveSkill
+        GENV.__AZ_FARM_EXT.LastUltimateRequestAt = Now
+    end
 
     return true
 end
@@ -35238,6 +35291,54 @@ pcall(function()
         end)
 end)
 
+
+
+-- Diagnose the primary Ultimate and any bonus ability in the active moveset.
+-- The UI toggle is unchanged: "Auto Ultimate" controls both stages.
+GENV.__AZ_ULTIMATE_STATUS = function()
+    local Store = GetPlayerStore()
+    if not Store then
+        print("[Anime Zero][Ultimate] Player store not ready")
+        return nil
+    end
+
+    local CharacterName = GENV.__AZ_FARM_EXT.GetCurrentCharacterName(Store)
+    local Info = CharacterName and CharacterConstants.charactersByName[CharacterName]
+    local Base = Info and Info.skills and Info.skills[4]
+    local BonusUntil = tonumber(LocalPlayer:GetAttribute("BonusUntil")) or 0
+    local BonusOwnerSlot = LocalPlayer:GetAttribute("BonusSlot") or 4
+    local BonusAvailable = Base and Base.bonus and Info.skills[Base.bonus] ~= nil
+    local TimeLeft = math.max(0, BonusUntil - workspace:GetServerTimeNow())
+    local BonusActive = BonusAvailable and TimeLeft > 0 and BonusOwnerSlot == 4
+    local EffectiveSlot = BonusActive and Base.bonus or 4
+    local Meter = nil
+    pcall(function() Meter = Store.state.ultProgress:get() end)
+    local CooldownOK = false
+    if CharacterName then
+        CooldownOK = SkillCooldownReady(Store, 4) == true
+    end
+    local RescueState = GENV.__AZ_FARM_RESCUE_RUNTIME
+
+    local Status = {
+        autoUltimate = Settings.AutoUltimate == true,
+        character = CharacterName or "none",
+        baseUltimateSlot = 4,
+        bonusUltimateSlot = BonusAvailable and Base.bonus or "none",
+        bonusWindowSeconds = math.floor(TimeLeft * 10 + 0.5) / 10,
+        bonusOwnerSlot = BonusOwnerSlot,
+        bonusActive = BonusActive == true,
+        nextSlot = EffectiveSlot,
+        nextSlotCooldownReady = CooldownOK,
+        ultimateProgress = Meter,
+        lastMainRequestSlot = GENV.__AZ_FARM_EXT.LastUltimateRequestSlot or "none",
+        lastTrialsRaidRequestSlot = RescueState
+            and RescueState.LastUltimateRequestSlot or "none",
+    }
+    for Key, Value in pairs(Status) do
+        print("[Anime Zero][Ultimate]", Key, "=", tostring(Value))
+    end
+    return Status
+end
 
 local SkillOrder = {
     "Skill 1",
