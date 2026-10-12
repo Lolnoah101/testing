@@ -5,7 +5,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// 2026-10-11: BELOW SURFACE STANDBY + LOCKED LOOT TELEPORT + TRIALS LIFT
+--// 2026-10-11: HxH PERSISTENT AREA ENTRY + RUBBLE RETRY + AUTO START VOTE
 --// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + 2026-10-11 GAME UPDATE
 --//
 --// FIXED:
@@ -308,6 +308,8 @@ local Settings = {
     -- Farm
 
     AutoFarm = false,
+    -- Trials has its own room-based farm. Hxh area guards do not run here.
+    AutoTrialsFarm = false,
 
     -- Story / Endless movement + rubble progression.
     AutoRaidFarm = false,
@@ -2156,6 +2158,9 @@ end)()
         AutoFarm =
             ReadSavedBool("AutoFarm", Settings.AutoFarm),
 
+        AutoTrialsFarm =
+            ReadSavedBool("AutoTrialsFarm", Settings.AutoTrialsFarm),
+
         AutoRaidFarm =
             ReadSavedBool("AutoRaidFarm", Settings.AutoRaidFarm),
 
@@ -2267,6 +2272,9 @@ end)()
 
         Settings.AutoFarm =
             User.AutoFarm == true
+
+        Settings.AutoTrialsFarm =
+            User.AutoTrialsFarm == true
 
         Settings.AutoRaidFarm =
             User.AutoRaidFarm == true
@@ -2573,56 +2581,370 @@ GENV.__AZ_BELOW_STATUS = function()
     return Status
 end
 
--- Move to the actual rubble blocker surface, NOT a distant damage-bar marker.
--- Both farm controllers use the same positioning helper, preventing oscillation.
-GENV.__AZ_FARM_EXT.GetCloseRubbleGoal = function(Root, Blocker, Marker)
-    if not Root then
+-- A fixed exterior goal for each active rubble blocker. Older logic chose
+-- whichever side the CHARACTER was on at the time of each heartbeat. If a
+-- teleport went inside the geometry, the goal flipped and movement oscillated.
+-- The current area volume decides the approach side, and raycasts find a
+-- grounded spot clear of the Blocker before any character movement.
+GENV.__AZ_FARM_EXT.RubbleGoals = setmetatable({}, { __mode = "k" })
+GENV.__AZ_FARM_EXT.RubbleLastStatus = "Idle"
+GENV.__AZ_FARM_EXT.RubbleLastGoal = nil
+GENV.__AZ_FARM_EXT.RubbleLastSide = nil
+GENV.__AZ_FARM_EXT.RubbleLastBlocker = nil
+GENV.__AZ_FARM_EXT.RubbleLastArea = nil
+-- Rubble is NOT enemy following. A single stable snap must not be repeated
+-- every Heartbeat as the character physics settles on the floor.
+GENV.__AZ_FARM_EXT.RubbleMoveGoal = nil
+GENV.__AZ_FARM_EXT.RubbleMoveBlocker = nil
+GENV.__AZ_FARM_EXT.RubbleMoveCharacter = nil
+GENV.__AZ_FARM_EXT.RubbleLastMoveAt = 0
+GENV.__AZ_FARM_EXT.RubbleMoveAttempts = 0
+GENV.__AZ_FARM_EXT.RubbleMotionState = "Idle"
+GENV.__AZ_FARM_EXT.RubbleLastMoveDistance = nil
+GENV.__AZ_FARM_EXT.RubbleLastExterior = nil
+GENV.__AZ_FARM_EXT.RubbleM1Requests = 0
+GENV.__AZ_FARM_EXT.RubbleLastM1At = 0
+GENV.__AZ_FARM_EXT.RubbleSafeApproachAt = 0
+GENV.__AZ_FARM_EXT.RubbleSafeApproachGoal = nil
+GENV.__AZ_FARM_EXT.RubbleSafeApproachSteps = 0
+GENV.__AZ_FARM_EXT.RubbleSafeApproachLastDistance = nil
+GENV.__AZ_FARM_EXT.RubbleSafeApproachCooldownUntil = 0
+GENV.__AZ_FARM_EXT.RubbleApproachReason = "Idle"
+-- Keep the destination until the actual player enters it. A server wave
+-- can leave zero before movement finishes, and visuals may replicate late.
+GENV.__AZ_FARM_EXT.PendingAreaEntry = nil
+GENV.__AZ_FARM_EXT.AreaEntryState = "Idle"
+GENV.__AZ_FARM_EXT.AreaEntryServerWave = nil
+GENV.__AZ_FARM_EXT.AreaEntryLastConfirmed = nil
+GENV.__AZ_FARM_EXT.AreaEntryLastChange = 0
+-- Hxh transition guard: don't leave an area because the client predicted
+-- an unlock, and don't chase mobs into an unconfirmed later area.
+GENV.__AZ_FARM_EXT.ValidatedArea = nil
+GENV.__AZ_FARM_EXT.ProgressionFault = nil
+GENV.__AZ_FARM_EXT.CrossingArea = nil
+GENV.__AZ_FARM_EXT.CrossingStartedAt = 0
+GENV.__AZ_FARM_EXT.CrossingLastMoveAt = 0
+GENV.__AZ_FARM_EXT.CrossingAttempts = 0
+GENV.__AZ_FARM_EXT.CrossingStatus = "Idle"
+
+-- Stay in the CURRENT SERVER AREA while approaching a far-away rubble wall.
+-- A 70-stud cutoff alone stranded the character even for legitimate walks
+-- across a long Hxh area. This sends at most a few short, verified steps.
+-- If navigation is ambiguous, pause instead of risking a server area skip.
+GENV.__AZ_FARM_EXT.TryRubbleSafeApproach = function(Root, Goal, Token)
+    local Ext = GENV.__AZ_FARM_EXT
+    local Now = os.clock()
+    local Pos = Root and Root.Position
+    if not Pos or typeof(Goal) ~= "CFrame" then
+        return "Missing player or goal"
+    end
+
+    local ServerArea = tonumber(GENV.__AZ_FARM_EXT.ValidatedArea)
+    local RequestedArea = tonumber(Token)
+    local World = workspace:FindFirstChild("World")
+    local Areas = World and World:FindFirstChild("Areas")
+    local Area = Areas and Areas:FindFirstChild(tostring(Token))
+    local WorldMap = World and World:FindFirstChild("Map")
+    if not Area or not Area:IsA("BasePart") or not WorldMap
+        or not ServerArea or not RequestedArea
+        or ServerArea ~= RequestedArea or Ext.ProgressionFault
+    then
+        return "Unconfirmed area / map: no move"
+    end
+
+    local Delta = Goal.Position - Pos
+    local Horizontal = Vector3.new(Delta.X, 0, Delta.Z)
+    if math.abs(Delta.Y) > 15 then
+        return "Ground level mismatch: no move"
+    end
+    if Horizontal.Magnitude < 4 then
+        return "Near wall horizontally: no distant move"
+    end
+    if Now < (Ext.RubbleSafeApproachCooldownUntil or 0) then
+        return "Waiting for approach cooldown"
+    end
+
+    -- Same blocker goal? Continue bounded steps. Otherwise start a fresh
+    -- approach and discard the previous blocker progress.
+    if not Ext.RubbleSafeApproachGoal
+        or (Ext.RubbleSafeApproachGoal - Goal.Position).Magnitude > 3
+    then
+        Ext.RubbleSafeApproachGoal = Goal.Position
+        Ext.RubbleSafeApproachSteps = 0
+        Ext.RubbleSafeApproachLastDistance = nil
+        Ext.RubbleSafeApproachAt = 0
+    end
+    if Ext.RubbleSafeApproachSteps >= 5 then
+        return "Five approach steps reached: waiting for review"
+    end
+    if Now - (Ext.RubbleSafeApproachAt or 0) < 1.6 then
+        return "Waiting for safe approach verification"
+    end
+    local Last = Ext.RubbleSafeApproachLastDistance
+    if Last and Horizontal.Magnitude > Last - 4 then
+        Ext.RubbleSafeApproachCooldownUntil = Now + 8
+        return "Approach did not reduce distance: paused 8 seconds"
+    end
+
+    local StepLength = math.min(24, math.max(1, Horizontal.Magnitude - 10))
+    local Flat = Pos + Horizontal.Unit * StepLength
+    local Relative = Area.CFrame:PointToObjectSpace(Flat)
+    local Half = Area.Size * 0.5
+    local Inside = math.abs(Relative.X) <= Half.X + 3
+        and math.abs(Relative.Z) <= Half.Z + 3
+        and math.abs(Relative.Y) <= Half.Y + 12
+    if not Inside then
+        return "Waypoint outside current area: no move"
+    end
+
+    local Params = RaycastParams.new()
+    Params.FilterType = Enum.RaycastFilterType.Include
+    Params.FilterDescendantsInstances = {WorldMap}
+    Params.IgnoreWater = true
+    local Hit = workspace:Raycast(
+        Vector3.new(Flat.X, Pos.Y + 25, Flat.Z),
+        Vector3.new(0, -65, 0), Params
+    )
+    if not Hit or Hit.Normal.Y < 0.7 then
+        return "No safe floor at waypoint"
+    end
+    local Humanoid = Root.Parent and Root.Parent:FindFirstChildOfClass("Humanoid")
+    local Height = math.clamp((Humanoid and Humanoid.HipHeight or 2) + Root.Size.Y * 0.5, 2.5, 7)
+    local Safe = Hit.Position + Vector3.new(0, Height, 0)
+    if math.abs(Safe.Y - Pos.Y) > 11 then
+        return "Waypoint is on another elevation: no move"
+    end
+    local Character = Root.Parent
+    local NewCF = CFrame.new(Safe) * CFrame.Angles(0, math.rad(Root.Orientation.Y), 0)
+    if Settings.FarmMethod == "Tween" then
+        if Ext.RubbleTween then
+            pcall(function() Ext.RubbleTween:Cancel() end)
+        end
+        local Tween = game:GetService("TweenService"):Create(
+            Root, TweenInfo.new(math.clamp(StepLength / 50, 0.3, 1.0), Enum.EasingStyle.Linear),
+            {CFrame = NewCF}
+        )
+        Ext.RubbleTween = Tween
+        Tween:Play()
+    else
+        if Character and Character:IsA("Model") then
+            Character:PivotTo(NewCF)
+        else
+            Root.CFrame = NewCF
+        end
+        Root.AssemblyLinearVelocity = Vector3.zero
+        Root.AssemblyAngularVelocity = Vector3.zero
+    end
+    Ext.RubbleSafeApproachAt = Now
+    Ext.RubbleSafeApproachSteps = Ext.RubbleSafeApproachSteps + 1
+    Ext.RubbleSafeApproachLastDistance = Horizontal.Magnitude
+    return "Safe same-area step " .. tostring(Ext.RubbleSafeApproachSteps) .. "/5"
+end
+
+GENV.__AZ_FARM_EXT.GetCloseRubbleGoal = function(Root, Blocker, Marker, AreaToken)
+    local Ext = GENV.__AZ_FARM_EXT
+    if not Root or not Root.Parent or not Blocker or not Blocker:IsA("BasePart") then
+        Ext.RubbleLastStatus = "Missing root or physical rubble blocker"
         return nil
     end
 
-    local Reference = Marker
-        and Marker:IsA("Attachment")
-        and Marker.WorldPosition
-        or nil
-
-    if Blocker and Blocker:IsA("BasePart") then
-        local Half = Blocker.Size * 0.5
-        local RootLocal = Blocker.CFrame:PointToObjectSpace(Root.Position)
-        local BarLocal = Blocker.CFrame:PointToObjectSpace(Reference or Blocker.Position)
-        local XClearance = math.abs(RootLocal.X) - Half.X
-        local ZClearance = math.abs(RootLocal.Z) - Half.Z
-        local StandOff = 3.0
-        local PointLocal
-
-        if XClearance >= ZClearance then
-            PointLocal = Vector3.new(
-                (RootLocal.X >= 0 and 1 or -1) * (Half.X + StandOff),
-                RootLocal.Y,
-                math.clamp(BarLocal.Z, -math.max(Half.Z - 1, 0), math.max(Half.Z - 1, 0))
-            )
-        else
-            PointLocal = Vector3.new(
-                math.clamp(BarLocal.X, -math.max(Half.X - 1, 0), math.max(Half.X - 1, 0)),
-                RootLocal.Y,
-                (RootLocal.Z >= 0 and 1 or -1) * (Half.Z + StandOff)
-            )
+    local Token = tostring(AreaToken or "?")
+    local Cached = Ext.RubbleGoals[Blocker]
+    -- If the character was corrected to a different section of the SAME
+    -- long wall, release only the stale along-wall coordinate. Keep the
+    -- approach side tied to the current map area, never the last teleport.
+    if Cached and typeof(Cached.Goal) == "CFrame" then
+        local Here = Blocker.CFrame:PointToObjectSpace(Root.Position)
+        local H = Blocker.Size * 0.5
+        local DX = Here.X - math.clamp(Here.X, -H.X, H.X)
+        local DZ = Here.Z - math.clamp(Here.Z, -H.Z, H.Z)
+        local WallGap = math.sqrt(DX * DX + DZ * DZ)
+        if WallGap < 25 and
+            (Root.Position - Cached.Goal.Position).Magnitude > 45
+            and (os.clock() - (Ext.RubbleSafeApproachAt or 0) > 3) then
+            Ext.RubbleGoals[Blocker] = nil
+            Cached = nil
+            Ext.RubbleLastStatus = "Re-anchoring to nearby wall section"
         end
-
-        local Surface = Blocker.CFrame:PointToWorldSpace(PointLocal)
-        local Standing = Vector3.new(Surface.X, Root.Position.Y, Surface.Z)
-        local Face = Vector3.new(Blocker.Position.X, Root.Position.Y, Blocker.Position.Z)
-        if (Face - Standing).Magnitude < 0.1 then
-            Face = Standing + Vector3.new(0, 0, -1)
-        end
-        return CFrame.lookAt(Standing, Face, Vector3.yAxis)
+    end
+    if Cached and Cached.Area == Token
+        and Cached.Character == Root.Parent
+        and Cached.World == workspace:FindFirstChild("World")
+        and typeof(Cached.Goal) == "CFrame"
+    then
+        Ext.RubbleLastGoal = Cached.Goal
+        Ext.RubbleLastBlocker = Blocker
+        Ext.RubbleLastSide = Cached.Side
+        Ext.RubbleLastArea = Token
+        Ext.RubbleLastStatus = "Locked outside rubble (" .. Cached.Side .. ")"
+        return Cached.Goal
     end
 
-    if Reference then
-        local Standing = Vector3.new(Reference.X, Root.Position.Y, Reference.Z)
-        return CFrame.new(Standing) * Root.CFrame.Rotation
+    local World = workspace:FindFirstChild("World")
+    local Areas = World and World:FindFirstChild("Areas")
+    local AreaPart = Areas and Areas:FindFirstChild(Token)
+    local Half = Blocker.Size * 0.5
+
+    -- Prefer the area we just fought in: that is the near / entry side of
+    -- the rubble. Never use the character position again after locking it.
+    local From = AreaPart and AreaPart:IsA("BasePart")
+        and AreaPart.Position or Root.Position
+    local Delta = Blocker.CFrame:PointToObjectSpace(From)
+    if math.abs(Delta.X) + math.abs(Delta.Z) < 0.1 then
+        Delta = Blocker.CFrame:PointToObjectSpace(Root.Position)
     end
 
-    return nil
+    -- The blocker is usually a long, thin slab: enter along its THIN axis.
+    -- For square blockers use the axis along the direction from this area.
+    local SideAxis
+    if Half.X < Half.Z * 0.8 then
+        SideAxis = "X"
+    elseif Half.Z < Half.X * 0.8 then
+        SideAxis = "Z"
+    else
+        SideAxis = math.abs(Delta.X) >= math.abs(Delta.Z) and "X" or "Z"
+    end
+    local SideSign = (SideAxis == "X" and Delta.X or Delta.Z) >= 0 and 1 or -1
+    local StandOff = 4.5 -- Leave room for the character and the rubble mesh.
+    -- Use the CURRENT CHARACTER for the position ALONG the barrier,
+    -- while keeping the area-derived entry side locked. The old RubbleBar
+    -- marker is often at the midpoint of a very long blocker; moving to
+    -- that midpoint could send the player 100-200 studs down the barrier.
+    local Near = Blocker.CFrame:PointToObjectSpace(Root.Position)
+    local Inset = 3
+    local LocalPoint
+    if SideAxis == "X" then
+        LocalPoint = Vector3.new(
+            SideSign * (Half.X + StandOff), 0,
+            math.clamp(Near.Z, -math.max(0, Half.Z - Inset),
+                math.max(0, Half.Z - Inset))
+        )
+    else
+        LocalPoint = Vector3.new(
+            math.clamp(Near.X, -math.max(0, Half.X - Inset),
+                math.max(0, Half.X - Inset)),
+            0, SideSign * (Half.Z + StandOff)
+        )
+    end
+    local P = Blocker.CFrame:PointToWorldSpace(LocalPoint)
+    local GroundPosition = nil
+    local Params = RaycastParams.new()
+    Params.FilterType = Enum.RaycastFilterType.Exclude
+    Params.IgnoreWater = true
+    local Ignored = { Root.Parent, Blocker }
+    if Blocker.Parent then table.insert(Ignored, Blocker.Parent) end
+    if Areas then table.insert(Ignored, Areas) end
+    local Enemies = workspace:FindFirstChild("enemies")
+    if Enemies then table.insert(Ignored, Enemies) end
+
+    local Humanoid = Root.Parent:FindFirstChildOfClass("Humanoid")
+    local RootHeight = math.clamp(
+        (Humanoid and Humanoid.HipHeight or 2) + Root.Size.Y * 0.5,
+        2.6, 7
+    )
+    local StartY = math.max(
+        Blocker.Position.Y + Half.Y + 25,
+        From.Y + 55,
+        Root.Position.Y + 35
+    )
+    -- Ignore decorative, non-collidable or near-vertical hit surfaces.
+    for i = 1, 10 do
+        Params.FilterDescendantsInstances = Ignored
+        local Hit = workspace:Raycast(
+            Vector3.new(P.X, StartY, P.Z),
+            Vector3.new(0, -320, 0), Params
+        )
+        if not Hit then break end
+        local Part = Hit.Instance
+        if Hit.Normal.Y >= 0.65
+            and Hit.Position.Y <= Blocker.Position.Y + Half.Y + 15
+            and Hit.Position.Y >= Blocker.Position.Y - Half.Y - 65
+            -- A downward ray can hit a lower street / basement on Hxh.
+            -- Never select a rubble approach 50+ studs below the player.
+            and math.abs((Hit.Position.Y + RootHeight) - Root.Position.Y) <= 14
+            and (Part:IsA("Terrain") or (Part:IsA("BasePart") and Part.CanCollide))
+        then
+            GroundPosition = Vector3.new(P.X, Hit.Position.Y + RootHeight, P.Z)
+            break
+        end
+        table.insert(Ignored, Part)
+    end
+
+    if not GroundPosition then
+        Ext.RubbleLastStatus = "Ground not found outside blocker (no teleport)"
+        Ext.RubbleLastGoal = nil
+        Ext.RubbleLastArea = Token
+        return nil
+    end
+
+    -- Face the physical slab, not the HUD bar attachment.
+    local Face = Vector3.new(Blocker.Position.X, GroundPosition.Y, Blocker.Position.Z)
+    if (Face - GroundPosition).Magnitude <= 0.1 then
+        Face = GroundPosition + Blocker.CFrame.LookVector
+    end
+    local Goal = CFrame.lookAt(GroundPosition, Face, Vector3.yAxis)
+    local Side = SideAxis .. (SideSign == 1 and "+" or "-")
+    Ext.RubbleGoals[Blocker] = {
+        Goal = Goal, Side = Side, Area = Token,
+        Character = Root.Parent, World = World,
+    }
+    Ext.RubbleLastGoal = Goal
+    Ext.RubbleLastBlocker = Blocker
+    Ext.RubbleLastSide = Side
+    Ext.RubbleLastArea = Token
+    Ext.RubbleLastStatus = "Nearest outside approach (" .. Side .. ")"
+    Ext.RubbleGoalDistanceAtLock = (Root.Position - GroundPosition).Magnitude
+    Ext.RubbleMarkerDistanceAtLock = Marker and Marker:IsA("Attachment")
+        and (Root.Position - Marker.WorldPosition).Magnitude or nil
+    print("[Anime Zero][Rubble] Nearest-wall goal | area:", Token,
+        "| side:", Side, "| distance:",
+        math.floor(Ext.RubbleGoalDistanceAtLock * 10) / 10)
+    return Goal
+end
+
+GENV.__AZ_RUBBLE_STATUS = function()
+    local Ext = GENV.__AZ_FARM_EXT
+    local Character = game:GetService("Players").LocalPlayer.Character
+    local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+    local Result = {
+        farmPosition = Settings.FarmPosition,
+        farmMethod = Settings.FarmMethod,
+        farmMode = CurrentFarmMode,
+        area = Ext.RubbleLastArea,
+        side = Ext.RubbleLastSide,
+        state = Ext.RubbleLastStatus,
+        hasExteriorGoal = typeof(Ext.RubbleLastGoal) == "CFrame",
+        distanceToGoal = Root and Ext.RubbleLastGoal
+            and (Root.Position - Ext.RubbleLastGoal.Position).Magnitude or nil,
+        rubbleHealth = CurrentRubbleInfo and CurrentRubbleInfo.Health,
+        movement = Ext.RubbleMotionState,
+        movementAttempts = Ext.RubbleMoveAttempts,
+        lastMoveSecondsAgo = Ext.RubbleLastMoveAt > 0
+            and math.floor((os.clock() - Ext.RubbleLastMoveAt) * 10) / 10 or nil,
+        lastDistance = Ext.RubbleLastMoveDistance,
+        goalDistanceAtLock = Ext.RubbleGoalDistanceAtLock,
+        markerDistanceAtLock = Ext.RubbleMarkerDistanceAtLock,
+        serverArea = GENV.__AZ_FARM_EXT.ValidatedArea,
+        unsafeGoal = Ext.RubbleUnsafeGoal == true,
+        isOutsideBlocker = Ext.RubbleLastExterior,
+        autoM1Enabled = Settings.AutoM1 == true,
+        m1RequestsSent = Ext.RubbleM1Requests,
+        secondsSinceM1Request = Ext.RubbleLastM1At > 0
+            and math.floor((os.clock() - Ext.RubbleLastM1At) * 10) / 10 or nil,
+        exteriorPosition = Ext.RubbleLastGoal and Ext.RubbleLastGoal.Position,
+        characterPosition = Root and Root.Position,
+        horizontalGoalDistance = Root and Ext.RubbleLastGoal and
+            (Vector3.new(Root.Position.X, 0, Root.Position.Z) -
+            Vector3.new(Ext.RubbleLastGoal.Position.X, 0, Ext.RubbleLastGoal.Position.Z)).Magnitude or nil,
+        verticalGoalDifference = Root and Ext.RubbleLastGoal and
+            math.abs(Root.Position.Y - Ext.RubbleLastGoal.Position.Y) or nil,
+        safeApproachSteps = Ext.RubbleSafeApproachSteps,
+        safeApproachReason = Ext.RubbleApproachReason,
+    }
+    for Key, Value in pairs(Result) do
+        print("[Anime Zero][Rubble]", Key, "=", tostring(Value))
+    end
+    return Result
 end
 GENV.__AZ_FARM_EXT.AreaEntryRecoveryArea = nil
 GENV.__AZ_FARM_EXT.AreaEntryStartedAt = nil
@@ -2827,6 +3149,8 @@ local function ReleaseFarmMovement()
     LastObservedWave = nil
 
     ResetAreaEntryTarget()
+    GENV.__AZ_FARM_EXT.PendingAreaEntry = nil
+    GENV.__AZ_FARM_EXT.AreaEntryState = "Movement released"
     ResetWaveRecovery()
 
     if type(GENV.__AZ_FARM_EXT.ResetStillness) == "function" then
@@ -4791,19 +5115,6 @@ LobbyTab:CreateToggle({
     end,
 })
 
-LobbyTab:CreateToggle({
-    name = "Auto Start Vote",
-    flag = "AutoStartVote",
-    description = "Vote ready if the game's Start Vote countdown is present. Works in run places.",
-    value = Settings.AutoStartVote,
-    callback = function(Value)
-        Settings.AutoStartVote = Value == true
-        if type(Settings.SetLobbyUserPreference) == "function" then
-            Settings.SetLobbyUserPreference("AutoStartVote", Value == true)
-        end
-    end,
-})
-
 --// One-click diagnostics: does not start or alter a queue.
 LobbyTab:CreateButton({
     name = "Print Auto Join Diagnostics",
@@ -4837,12 +5148,40 @@ LobbyTab:CreateButton({
 --// FARM UI
 --//============================================================
 
+-- Start Game? YES appears at the beginning of Story/Hxh runs too.
+-- This is a match-wide vote, NOT a Trials-only feature.
+FarmTab:CreateSection({name = "Match Start"})
+FarmTab:CreateToggle({
+    name = "Auto Start Vote (Story / Trials / Raid)",
+    flag = "AutoStartVote",
+    description = "Vote Yes when the Start Game countdown appears in a run.",
+    value = Settings.AutoStartVote,
+    callback = function(Value)
+        Settings.AutoStartVote = Value == true
+        if type(Settings.SetLobbyUserPreference) == "function" then
+            Settings.SetLobbyUserPreference("AutoStartVote", Value == true)
+        end
+        print("[Anime Zero] Auto Start Vote:", Settings.AutoStartVote)
+    end,
+})
+FarmTab:CreateButton({
+    name = "Print Hxh Rubble Diagnostics",
+    callback = function()
+        local Handler = GENV.__AZ_RUBBLE_STATUS
+        if type(Handler) == "function" then
+            Handler()
+        else
+            warn("[Anime Zero][Rubble] Farm engine still initializing")
+        end
+    end,
+})
+
 FarmTab:CreateToggle({
 
     name = "Auto Farm",
     flag = "AutoFarm",
 
-    description = "Story / Endless farm. Handles enemies, rubble, and area progression.",
+    description = "Hxh / Endless only. Use Auto Trials Farm inside Trials.",
 
     value = Settings.AutoFarm,
 
@@ -4867,8 +5206,13 @@ FarmTab:CreateToggle({
             end
 
             print(
-                "[Anime Zero] Auto Farm OFF (Story / Endless)"
+                "[Anime Zero] Auto Farm OFF (Story / Endless)",
+                "| Auto Pickup Loot:", Settings.AutoPickupLoot == true,
+                "| Auto Raid Farm:", Settings.AutoRaidFarm == true
             )
+            if Settings.AutoPickupLoot then
+                print("[Anime Zero][Movement] Loot pickup is still ON and can move to drops independently.")
+            end
 
         else
 
@@ -4880,6 +5224,26 @@ FarmTab:CreateToggle({
     end,
 })
 
+
+FarmTab:CreateToggle({
+    name = "Auto Trials Farm",
+    flag = "AutoTrialsFarm",
+    description = "Dedicated Trials enemy/room farm. Uses Auto M1 / Auto Skills, and advances to the Lift when a room clears. Independent from Hxh area recovery.",
+    value = Settings.AutoTrialsFarm == true,
+    callback = function(Value)
+        Settings.AutoTrialsFarm = Value == true
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("AutoTrialsFarm", Value == true)
+        end
+        if type(GENV.__AZ_TRIALS_RUNTIME) == "table" then
+            GENV.__AZ_TRIALS_RUNTIME.LastStage = nil
+        end
+        if not Value and GENV.__AZ_IS_TRIALS_MODE() then
+            pcall(ReleaseFarmMovement)
+        end
+        print("[Anime Zero] Auto Trials Farm:", Value == true)
+    end,
+})
 
 FarmTab:CreateToggle({
 
@@ -5937,7 +6301,8 @@ FarmTab:CreateToggle({
                             local Goal = GENV.__AZ_FARM_EXT.GetCloseRubbleGoal(
                                 Root,
                                 Blocker,
-                                RubbleBar
+                                RubbleBar,
+                                ReadRunValue2("area")
                             )
 
                             if not Goal then
@@ -7601,7 +7966,9 @@ FarmTab:CreateToggle({
 
             local FarmEnabled =
                 (IsRaid and Settings.AutoRaidFarm == true)
-                or (not IsRaid and Settings.AutoFarm == true)
+                or (GENV.__AZ_IS_TRIALS_MODE() and Settings.AutoTrialsFarm == true)
+                or (not IsRaid and not GENV.__AZ_IS_TRIALS_MODE()
+                    and Settings.AutoFarm == true)
 
             local WantsHorizontalHold =
                 FarmEnabled
@@ -7643,6 +8010,7 @@ FarmTab:CreateToggle({
             -- for a few client frames after the end-of-room banner.
             if GENV.__AZ_IS_TRIALS_MODE()
                 and GENV.__AZ_IS_FLOOR_EXIT_READY()
+                and (tonumber(ReadRunValue2("remaining")) or 0) <= 0
             then
                 if Rescue.HandleRaidRoute(Root, nil) then
                     return
@@ -7653,7 +8021,8 @@ FarmTab:CreateToggle({
                 Rescue.RaidState = "Inactive"
                 Rescue.RaidDodgeState = "Idle"
 
-                if not EnemyRoot
+                if not GENV.__AZ_IS_TRIALS_MODE()
+                    and not EnemyRoot
                     and Rescue.RunNormalProgressionAssist(DeltaTime)
                 then
                     return
@@ -8039,6 +8408,7 @@ FarmTab:CreateToggle({
 
             if not EnemyRoot then
                 if not GENV.__AZ_IS_RAID_MODE()
+                    and not GENV.__AZ_IS_TRIALS_MODE()
                     and Settings.AutoFarm
                     and Settings.AutoM1
                     and Root
@@ -8891,58 +9261,91 @@ FarmTab:CreateToggle({
                 local SuccessEndAction, EndActionError =
                     pcall(Rescue.RunEndAction)
 
-                -- Trials lift must work even when the normal full engine is
-                -- active. Its movement is a narrow exception to legacy ownership.
-                if GENV.__AZ_IS_TRIALS_MODE()
-                    and GENV.__AZ_IS_FLOOR_EXIT_READY()
-                    and Settings.AutoFarm
-                then
-                    local OK, Err = pcall(function()
-                        local Root = GetRoot2()
-                        if Root then
-                            Rescue.HandleRaidRoute(Root, nil)
-                        end
-                    end)
-                    if not OK then
-                        warn("[Anime Zero][Trials Lift]", tostring(Err))
+                -- Dedicated Trials farm: resets stale room state whenever
+                -- TrialsRoom (floor index) or TrialsFloor (room 1..5) changes.
+                -- The Hxh legacy engine never moves the character in Trials.
+                if GENV.__AZ_IS_TRIALS_MODE() then
+                    local Trial = GENV.__AZ_TRIALS_RUNTIME
+                    if not Trial then
+                        Trial = { LastStage = nil, State = "Waiting" }
+                        GENV.__AZ_TRIALS_RUNTIME = Trial
                     end
+                    local Stage = tostring(workspace:GetAttribute("TrialsRoom"))
+                        .. ":" .. tostring(workspace:GetAttribute("TrialsFloor"))
+                    if Trial.LastStage ~= Stage then
+                        Trial.LastStage = Stage
+                        Trial.State = "New room " .. Stage
+                        Trial.StageChangedAt = os.clock()
+                        Rescue.NextM1 = 0
+                        Rescue.NextSkill = 0
+                        Rescue.NextUltimate = 0
+                        Rescue.RaidLastAreaAt = 0
+                        Rescue.TrialsExitSeenAt = 0
+                        Rescue.NormalProgressKey = nil
+                        Rescue.NormalProgressAt = 0
+                        Rescue.NormalFallbackStage = 0
+                        Rescue.SetHorizontalHoldActive(false)
+                        print("[Anime Zero][Trials] Room transition:", Stage)
+                    end
+                    if not Settings.AutoTrialsFarm then
+                        Trial.State = "Auto Trials Farm disabled"
+                        Rescue.SetHorizontalHoldActive(false)
+                        return
+                    end
+                    local Remaining = tonumber(ReadRunValue2("remaining")) or 0
+                    local Exit = GENV.__AZ_IS_FLOOR_EXIT_READY()
+                    if Exit and Remaining <= 0 then
+                        Trial.State = "Lift available"
+                        local OK, Err = pcall(function()
+                            local Root = GetRoot2()
+                            if Root then Rescue.HandleRaidRoute(Root, nil) end
+                        end)
+                        if not OK then warn("[Anime Zero][Trials Lift]", tostring(Err)) end
+                        return
+                    end
+                    -- Give the new room's enemy models time to replace stale
+                    -- visuals from the previous room before selecting a target.
+                    if os.clock() - (Trial.StageChangedAt or 0) < 0.45 then
+                        Trial.State = "New room settling"
+                        return
+                    end
+                    -- Do not use RunNormalProgressionAssist or Hxh area logic.
+                    Trial.State = Remaining > 0 and "Fighting" or "Waiting for wave"
+                    local MoveOK, MoveErr = pcall(MoveFarm2, DeltaTime)
+                    local CombatOK, CombatErr = pcall(RunCombat2)
+                    if not MoveOK then warn("[Anime Zero][Trials Move]", tostring(MoveErr)) end
+                    if not CombatOK then warn("[Anime Zero][Trials Combat]", tostring(CombatErr)) end
                     return
                 end
 
-                -- Outside Raid, the full legacy engine still owns enemy
-                -- movement. The rescue runtime only assists the exact pieces
-                -- that can strand Story/Endless after an update: active rubble
-                -- and entering/recovering the current area when no enemy exists.
-                -- Inside Raid modes, the rescue runtime owns movement.
+                -- SINGLE HxH / Story MOVEMENT OWNER.
+                -- The full farm engine already owns enemy movement, rubble,
+                -- area-entry recovery, and the new persistent next-area goal.
+                -- The old Rescue.RunNormalProgressionAssist also wrote CFrame
+                -- when it observed an idle/empty goal. That could force the
+                -- player back to a previous area between two legacy frames.
+                -- Never let a second movement controller run in HxH.
+                -- Keep independent end-action support above this branch.
                 if GENV.__AZ_FARM_FULL_ENGINE_ACTIVE == true
                     and not GENV.__AZ_IS_RAID_MODE()
                 then
                     GENV.__AZ_FARM_ENGINE_ACTIVE = true
 
-                    -- Only one controller may own a rubble target. The
-                    -- legacy farm is authoritative while actively targeting it.
-                    local AssistOK, AssistError = true, nil
-                    if CurrentFarmMode ~= "Rubble"
-                        and CurrentFarmMode ~= "Waiting For Rubble To Drop"
-                        and CurrentFarmMode ~= "Loot"
-                        and CurrentFarmMode ~= "Below Standby"
-                    then
-                        AssistOK, AssistError = pcall(
-                            Rescue.RunNormalProgressionAssist,
-                            DeltaTime
-                        )
-                    end
-
-                    if not AssistOK then
-                        warn(
-                            "[Anime Zero][Normal Progression Assist]",
-                            tostring(AssistError)
-                        )
+                    if not Rescue.NormalMovementPausedForLegacy then
+                        Rescue.NormalMovementPausedForLegacy = true
+                        -- Cancel any delayed re-entry pulse queued before the
+                        -- full engine took ownership of Story movement.
+                        Rescue.NormalReentryToken =
+                            (Rescue.NormalReentryToken or 0) + 1
+                        Rescue.NormalState = "Legacy Story movement owner"
+                        Rescue.NormalFallbackReason = "Second mover disabled"
+                        print("[Anime Zero][Movement] Single Story movement owner active")
                     end
 
                     return
                 end
 
+                Rescue.NormalMovementPausedForLegacy = false
                 GENV.__AZ_FARM_ENGINE_ACTIVE = true
 
                 -- Arise runs BEFORE movement so a just-spawned corpse prompt is
@@ -28368,6 +28771,7 @@ end
         AutoLeaveEndlessAtWave = { setting = "AutoLeaveEndlessAtWave", group = "lobby" },
 
         AutoFarm = { setting = "AutoFarm", group = "farm" },
+        AutoTrialsFarm = { setting = "AutoTrialsFarm", group = "farm" },
         AutoRaidFarm = { setting = "AutoRaidFarm", group = "farm" },
         AutoArise = { setting = "AutoArise", group = "farm" },
         AutoPickupLoot = { setting = "AutoPickupLoot", group = "farm" },
@@ -31012,6 +31416,27 @@ local function GetEnemyVisualData(
 end
 
 
+--// Never select a combat target outside the currently reported area.
+--// Enemy IDs can linger or move between zones; targeting those enemies
+--// before area progression is confirmed causes server/client desync.
+GENV.__AZ_FARM_EXT.IsEnemyInsideServerArea = function(EnemyId, State)
+    if GENV.__AZ_IS_TRIALS_MODE() then return true end
+    local AreaNumber = tonumber(GetRunValue("area"))
+    local World = workspace:FindFirstChild("World")
+    local Areas = World and World:FindFirstChild("Areas")
+    local Area = Areas and Areas:FindFirstChild(tostring(AreaNumber))
+    if not Area or not Area:IsA("BasePart") then return true end
+    local Visual = GetEnemyVisualData(EnemyId, State)
+    local Position = Visual and Visual.RootPosition or GetEnemyPosition(State)
+    if not Position then return false end
+    local Offset = Area.CFrame:PointToObjectSpace(Position)
+    local Half = Area.Size / 2
+    local Margin = 7
+    return math.abs(Offset.X) <= Half.X + Margin
+        and math.abs(Offset.Y) <= Half.Y + 25
+        and math.abs(Offset.Z) <= Half.Z + Margin
+end
+
 --//============================================================
 --// TARGET
 --//============================================================
@@ -31048,6 +31473,7 @@ local function GetFreshFarmTarget()
             and GetEnemyHealth(
                 FreshState
             ) > 0
+            and GENV.__AZ_FARM_EXT.IsEnemyInsideServerArea(CurrentTargetId, FreshState)
         then
 
             CurrentTargetState =
@@ -31083,6 +31509,7 @@ local function GetFreshFarmTarget()
         if GetEnemyHealth(
             EnemyState
         ) > 0
+            and GENV.__AZ_FARM_EXT.IsEnemyInsideServerArea(EnemyId, EnemyState)
         then
 
             local Visual =
@@ -31765,11 +32192,9 @@ local function IsRubblePhysicallyOpen(
     end
 
 
-    if Elapsed >= RUBBLE_MAX_WAIT then
-        return true
-    end
-
-
+    -- An empty health bar is NOT proof that the barrier has lowered.
+    -- Wait for the actual collision/geometry change (or despawn) instead.
+    -- The new game's AREA marker will be verified separately before travel.
     return false
 end
 
@@ -31790,7 +32215,8 @@ local function GetRubbleFarmCFrame(Info)
     return GENV.__AZ_FARM_EXT.GetCloseRubbleGoal(
         Root,
         Info.Blocker,
-        Info.RubbleBar
+        Info.RubbleBar,
+        Info.Area
     )
 end
 
@@ -31847,6 +32273,55 @@ local function GetAreaPart(AreaNumber)
     return nil
 end
 
+
+--//============================================================
+--// NEW 2026 AREA MARKER HANDOFF (HxH)
+--// The game's NextAreaMarker client creates workspace.NextAreaMarker.Pad
+--// ONLY when: startedAt exists, finishedAt does not, wave == 0,
+--// rubbleArmed is false, and the server's area is the new area.
+--// Don't infer the destination from an old area-center calculation.
+--//============================================================
+GENV.__AZ_FARM_EXT.GetGameAreaMarkerGoal = function(TargetArea)
+    local Ext = GENV.__AZ_FARM_EXT
+    local Current = tonumber(GetRunValue("area"))
+    if Current ~= tonumber(TargetArea) then
+        return nil, "Server has not announced the next area"
+    end
+    if tonumber(GetRunValue("wave")) ~= 0 then
+        return nil, "Waiting for new-area wave-zero window"
+    end
+    local Model = workspace:FindFirstChild("NextAreaMarker")
+    local Pad = Model and Model:FindFirstChild("Pad")
+    if not Pad or not Pad:IsA("BasePart") then
+        return nil, "Waiting for the game's AREA marker to appear"
+    end
+    local Label = Pad:FindFirstChild("Label")
+    local Title = Label and Label:FindFirstChild("Title")
+    local LabelText = Title and Title:IsA("TextLabel") and Title.Text or ""
+    local MarkerArea = tonumber(string.match(LabelText, "AREA%s+(%d+)"))
+    if MarkerArea ~= tonumber(TargetArea) then
+        return nil, "AREA marker number does not match destination"
+    end
+    local Root = GetRoot()
+    if not Root then
+        return nil, "Character not ready"
+    end
+    local Human = Root.Parent and Root.Parent:FindFirstChildOfClass("Humanoid")
+    local Height = math.clamp(
+        (Human and Human.HipHeight or 2) + Root.Size.Y * 0.5,
+        2.5, 6.5
+    )
+    local TargetPosition = Pad.Position + Vector3.new(0, Height, 0)
+    local Area = GetAreaPart(tonumber(TargetArea))
+    local LookAt = Area and Vector3.new(Area.Position.X, TargetPosition.Y, Area.Position.Z)
+        or (TargetPosition + Root.CFrame.LookVector)
+    if (LookAt - TargetPosition).Magnitude < 0.1 then
+        LookAt = TargetPosition + Root.CFrame.LookVector
+    end
+    Ext.GameAreaMarkerNumber = MarkerArea
+    Ext.GameAreaMarkerPosition = TargetPosition
+    return CFrame.lookAt(TargetPosition, LookAt), "AREA marker verified"
+end
 
 --//============================================================
 --// GROUNDED AREA TARGET
@@ -32833,6 +33308,24 @@ GENV.__AZ_FARM_EXT.RunStillnessRecovery = function()
     end
 
 
+    -- The area-entry engine owns movement until arrival is confirmed.
+    -- Stillness recovery must not overwrite its target with a random
+    -- destination when enemy replication is temporarily empty.
+    if Ext.PendingAreaEntry or TargetAreaNumber
+        or Ext.CrossingArea ~= nil
+        or Ext.ProgressionFault ~= nil
+        or CurrentFarmMode == "Area Sync Paused"
+        or CurrentFarmMode == "Waiting For Next Area"
+        or CurrentFarmMode == "Adjacent Area Crossing"
+        or CurrentFarmMode == "Rubble"
+        or CurrentFarmMode == "Waiting For Rubble To Drop"
+        or (type(Ext.AreaEntryState) == "string"
+            and string.find(Ext.AreaEntryState, "Waiting for server area", 1, true))
+    then
+        Ext.ResetStillness()
+        return false
+    end
+
     local LivingEnemies =
         GetLivingEnemyCount()
 
@@ -33483,12 +33976,28 @@ local function ApplyFarmMovement(
         )
 
 
+    -- End outstanding motion if rubble/area entry no longer owns movement.
+    local Ext = GENV.__AZ_FARM_EXT
+    if Ext.RubbleTween and (not Settings.AutoFarm
+        or CurrentFarmMode ~= "Rubble") then
+        pcall(function() Ext.RubbleTween:Cancel() end)
+        Ext.RubbleTween = nil
+    end
+    if Ext.AreaMarkerTween and (not Settings.AutoFarm
+        or not string.find(string.lower(CurrentFarmMode), "area marker", 1, true)
+        and not string.find(string.lower(CurrentFarmMode), "area entry", 1, true)) then
+        pcall(function() Ext.AreaMarkerTween:Cancel() end)
+        Ext.AreaMarkerTween = nil
+    end
+
     local UseTweenNoclip =
         MovementEnabled
         and Settings.FarmMethod
             == "Tween"
         and CurrentFarmMode ~= "Loot"
         and CurrentFarmMode ~= "Below Standby"
+        and CurrentFarmMode ~= "Rubble"
+        and CurrentFarmMode ~= "Waiting For Rubble To Drop"
         and DesiredFarmCFrame
             ~= nil
 
@@ -33600,18 +34109,9 @@ local function ApplyFarmMovement(
             ) >= 1.00
         then
 
-            Root.CFrame =
-                DesiredFarmCFrame
-
-
-            Root.AssemblyLinearVelocity =
-                Vector3.zero
-
-
-            Root.AssemblyAngularVelocity =
-                Vector3.zero
-
-
+            -- A failed area move can mean the server hasn't opened the gate.
+            -- Don't hard-snap through it and trigger later areas prematurely.
+            Ext.AreaEntryState = "Area movement stalled; waiting for server"
             Ext.LastAreaHardSnapAt =
                 Now
 
@@ -33918,6 +34418,139 @@ local function ApplyFarmMovement(
             Root.CFrame = CFrame.new(DesiredFarmCFrame.Position) * CFrame.Angles(0, math.rad(Root.Orientation.Y), 0)
             Root.AssemblyLinearVelocity = Vector3.zero
             Root.AssemblyAngularVelocity = Vector3.zero
+        end
+        return
+    end
+
+    -- RUBBLE ONLY: one approach, then STOP writing CFrame while attacking.
+    -- Before: TELEPORT_PLAYER_ERROR was 1.5 studs, so settling 1.6 studs
+    -- from the intended goal caused another teleport every 0.08 seconds.
+    -- This is a STATIONARY obstacle, not a moving enemy. A separate, wider
+    -- arrival range and a limited recovery are both needed.
+    if CurrentFarmMode == "Rubble"
+        or CurrentFarmMode == "Waiting For Rubble To Drop"
+    then
+        local Ext = GENV.__AZ_FARM_EXT
+        local Goal = DesiredFarmCFrame
+        local Blocker = Ext.RubbleLastBlocker
+        local Distance = (Root.Position - Goal.Position).Magnitude
+        local NewGoal = not Ext.RubbleMoveGoal
+            or (Ext.RubbleMoveGoal - Goal.Position).Magnitude > 1.5
+            or Ext.RubbleMoveBlocker ~= Blocker
+            or Ext.RubbleMoveCharacter ~= Root.Parent
+
+        if NewGoal then
+            Ext.RubbleMoveGoal = Goal.Position
+            Ext.RubbleMoveBlocker = Blocker
+            Ext.RubbleMoveCharacter = Root.Parent
+            Ext.RubbleMoveAttempts = 0
+            Ext.RubbleLastMoveAt = 0
+            Ext.RubbleMotionState = "New outside approach"
+        end
+
+        local Outside = true
+        if Blocker and Blocker.Parent and Blocker:IsA("BasePart") then
+            local Local = Blocker.CFrame:PointToObjectSpace(Root.Position)
+            local Side = Ext.RubbleLastSide
+            if Side == "Z+" then
+                Outside = Local.Z >= Blocker.Size.Z * 0.5 + 1
+            elseif Side == "Z-" then
+                Outside = Local.Z <= -Blocker.Size.Z * 0.5 - 1
+            elseif Side == "X+" then
+                Outside = Local.X >= Blocker.Size.X * 0.5 + 1
+            elseif Side == "X-" then
+                Outside = Local.X <= -Blocker.Size.X * 0.5 - 1
+            end
+        end
+        Ext.RubbleLastMoveDistance = Distance
+        Ext.RubbleLastExterior = Outside
+
+        -- More than 70 studs can simply mean rubble is on the far side of
+        -- the CURRENT area. Do not teleport that whole distance or freeze.
+        -- Walk it with short floor-verified same-area steps (max five).
+        if Distance > 70 then
+            local Reason = Ext.TryRubbleSafeApproach(Root, Goal, Ext.RubbleLastArea)
+            Ext.RubbleApproachReason = Reason
+            Ext.RubbleMotionState = Reason
+            Ext.RubbleUnsafeGoal = not string.find(Reason, "Safe same-area step", 1, true)
+            if os.clock() - (Ext.RubbleFarWarnAt or 0) >= 6 then
+                Ext.RubbleFarWarnAt = os.clock()
+                print("[Anime Zero][Rubble] Distant approach:", Reason,
+                    "| dist:", math.floor(Distance),
+                    "| server area:", tostring(GetRunValue("area")),
+                    "| blocker area:", tostring(Ext.RubbleLastArea))
+            end
+            return
+        end
+        Ext.RubbleUnsafeGoal = false
+        Ext.RubbleApproachReason = "Within normal rubble approach range"
+        Ext.RubbleSafeApproachLastDistance = nil
+
+        -- 5.5 studs allows normal humanoid grounding/physics corrections.
+        -- Do not pull a character back into the wall because of 1-3 studs
+        -- of harmless discrepancy. M1 still operates within 12 studs.
+        if Distance <= 5.5 and Outside then
+            Ext.RubbleMotionState = "Arrived outside: holding for attacks"
+            return
+        end
+
+        -- Even if the goal is slightly off, avoid fighting another movement
+        -- controller when the character is on the correct, exterior side and
+        -- is already within the existing rubble attack range.
+        if Outside and Distance <= 10 then
+            Ext.RubbleMotionState = "Outside within attack range: holding"
+            return
+        end
+
+        local Now = os.clock()
+        local Delay = Ext.RubbleMoveAttempts == 0 and 0 or 3
+        if Now - Ext.RubbleLastMoveAt < Delay then
+            Ext.RubbleMotionState = "Waiting between reposition attempts"
+            return
+        end
+        if Ext.RubbleMoveAttempts >= 3 then
+            -- A permanent limit strands the character if a physics push or
+            -- an unreplicated collision blocked all first three attempts.
+            -- Allow another short burst only after 12 seconds, never a
+            -- heartbeat teleport loop.
+            if Now - Ext.RubbleLastMoveAt < 12 then
+                Ext.RubbleMotionState = "Waiting for safe 12s rubble retry"
+                return
+            end
+            Ext.RubbleMoveAttempts = 0
+            Ext.RubbleMotionState = "New limited rubble retry cycle"
+        end
+
+        Ext.RubbleLastMoveAt = Now
+        Ext.RubbleMoveAttempts = Ext.RubbleMoveAttempts + 1
+        if Settings.FarmMethod == "Tween" then
+            if Ext.RubbleTween then
+                pcall(function() Ext.RubbleTween:Cancel() end)
+            end
+            local Duration = math.clamp(Distance / 65, 0.2, 1.5)
+            local Tween = game:GetService("TweenService"):Create(
+                Root, TweenInfo.new(Duration, Enum.EasingStyle.Linear),
+                {CFrame = Goal}
+            )
+            Ext.RubbleTween = Tween
+            Tween:Play()
+        else
+            local Character = GetCharacter()
+            if Character then
+                Character:PivotTo(Goal)
+            else
+                Root.CFrame = Goal
+            end
+            Root.AssemblyLinearVelocity = Vector3.zero
+            Root.AssemblyAngularVelocity = Vector3.zero
+        end
+        LastTeleportGoal = Goal
+        LastTeleportTime = Now
+        Ext.RubbleMotionState = "Exterior " .. Settings.FarmMethod .. " " .. tostring(Ext.RubbleMoveAttempts) .. "/3"
+        if Ext.RubbleMoveAttempts > 1 then
+            warn("[Anime Zero][Rubble] Reposition retry:",
+                Ext.RubbleMoveAttempts, "distance:", math.floor(Distance * 10) / 10,
+                "outside:", Outside)
         end
         return
     end
@@ -34932,246 +35565,193 @@ end
 
 
 --//============================================================
+--// SERVER-AREA SAFETY GATE
+--// Never follow a client-predicted area + 2 transition. The server's
+-- runStore is authoritative, but a sudden jump means the progression may
+-- already be out of sync; stop movement rather than amplifying the skip.
+--//============================================================
+GENV.__AZ_FARM_EXT.ValidateServerArea = function(AreaNumber)
+    local Ext = GENV.__AZ_FARM_EXT
+    local Area = tonumber(AreaNumber)
+    if not Area then
+        Ext.ProgressionFault = "Server area unavailable"
+        return false
+    end
+    if not GetAreaPart(Area) then
+        -- Other maps without area volumes keep their original logic.
+        Ext.ProgressionFault = nil
+        return true
+    end
+    local Last = Ext.ValidatedArea
+    if Last == nil then
+        if Area > 1 and not IsPlayerInsideArea(Area) then
+            Ext.ProgressionFault = "Loaded outside reported area " .. tostring(Area)
+            return false
+        end
+        Ext.ValidatedArea = Area
+        Ext.ProgressionFault = nil
+        return true
+    end
+    if Area > Last + 1 then
+        Ext.ProgressionFault = "Skipped area " .. tostring(Last)
+            .. " -> " .. tostring(Area) .. "; movement paused"
+        return false
+    end
+    if Area == Last + 1 then
+        local Previous = GetRubbleForArea(Last)
+        if Previous and Previous.Health ~= nil and Previous.Health > 0 then
+            Ext.ProgressionFault = "Next area appeared before rubble "
+                .. tostring(Last) .. " was cleared"
+            return false
+        end
+        -- Server advanced by exactly one area, so the crossing can finish.
+        Ext.ValidatedArea = Area
+        Ext.CrossingArea = nil
+        Ext.CrossingStatus = "Server confirmed area " .. tostring(Area)
+    elseif Area < Last then
+        -- Handles a legitimate fresh stage/retry reverting the area number.
+        Ext.ValidatedArea = Area
+        Ext.CrossingArea = nil
+        Ext.CrossingStatus = "Server reset to area " .. tostring(Area)
+    end
+    Ext.ProgressionFault = nil
+    return true
+end
+
+--//============================================================
 --// AREA REQUEST
 --//============================================================
 
+GENV.__AZ_FARM_EXT.HxhEntry = { Area = nil, Goal = nil, Attempts = 0,
+    LastMoveAt = 0, FirstInsideAt = nil, Confirmed = nil, Status = "Idle" }
+
 local function GetRequestedEntryArea()
-
-    local Area =
-        GetRunValue(
-            "area"
-        )
-
-
-    local Wave =
-        GetRunValue(
-            "wave"
-        )
-
-
-    local StartedAt =
-        GetRunValue(
-            "startedAt"
-        )
-
-
-    if not Area
-        or Area <= 1
-        or Wave ~= 0
-        or not StartedAt
-    then
-
+    local Area = tonumber(GetRunValue("area"))
+    if not Area or Area <= 1 or not GetRunValue("startedAt") then
         return nil
     end
-
-
-    -- Do not let transition recovery take priority while the updated client
-    -- already has live/visible enemies spawned for this area.
-    if GetLivingEnemyCount() > 0 then
+    local Ext = GENV.__AZ_FARM_EXT
+    local Entry = Ext.HxhEntry
+    if Entry.Area ~= Area then
+        Entry.Area = Area
+        Entry.Goal = nil
+        Entry.Attempts = 0
+        Entry.LastMoveAt = 0
+        Entry.FirstInsideAt = nil
+        Entry.Confirmed = nil
+        Entry.Status = "Server requested area " .. tostring(Area)
+    end
+    if Entry.Confirmed == Area then
         return nil
     end
-
-
-    local EnemyFolder =
-        workspace:FindFirstChild(
-            "enemies"
-        )
-
-
-    if EnemyFolder
-        and #EnemyFolder:GetChildren() > 0
-    then
-        return nil
+    -- Brief presence within the area is sufficient; never later un-confirm
+    -- this same area simply because the character moved to fight an enemy.
+    if IsPlayerInsideArea(Area) then
+        Entry.FirstInsideAt = Entry.FirstInsideAt or os.clock()
+        if os.clock() - Entry.FirstInsideAt >= 0.30 then
+            Entry.Confirmed = Area
+            Entry.Goal = nil
+            Entry.Status = "Confirmed area " .. tostring(Area)
+            Ext.PendingAreaEntry = nil
+            Ext.AreaEntryLastConfirmed = Area
+            return nil
+        end
+    else
+        Entry.FirstInsideAt = nil
     end
-
-
     return Area
 end
 
-
---//============================================================
---// AREA HANDLER
---//============================================================
-
-local function HandleAreaEntry(
-    TargetArea
-)
-
+local function HandleAreaEntry(TargetArea)
+    -- One server-approved destination. No guessed area-center, early skip,
+    -- escalating recoveries, or fighting a second controller during travel.
     ResetWaveRecovery()
+    CurrentTargetId = nil
+    CurrentTargetState = nil
+    TargetAreaNumber = nil
+    DesiredFarmCFrame = nil
+    local Ext = GENV.__AZ_FARM_EXT
+    local Entry = Ext.HxhEntry
+    if Entry.Area ~= TargetArea then return end
 
-
-    TargetAreaNumber =
-        TargetArea
-
-
-    CurrentTargetId =
-        nil
-
-
-    CurrentTargetState =
-        nil
-
-
-    local EntryCF =
-        GetLockedAreaEntryCFrame(
-            TargetArea
-        )
-
-
-    if HasCompletedAreaEntry(
-        TargetArea
-    )
-    then
-
-        GENV.__AZ_FARM_EXT.ResetAreaEntryRecovery()
-
-
-        ConfirmedAreaEntry =
-            true
-
-
-        if TargetArea == 5 then
-
-            DesiredFarmCFrame =
-                EntryCF
-
+    local PreviousRubble = GetRubbleForArea(TargetArea - 1)
+    if PreviousRubble and tonumber(PreviousRubble.Health)
+        and PreviousRubble.Health > 0 then
+        CurrentRubbleInfo = PreviousRubble
+        RecordRubbleHeight(PreviousRubble)
+        CurrentRubbleCFrame = GetRubbleFarmCFrame(PreviousRubble)
+        DesiredFarmCFrame = CurrentRubbleCFrame
+        Entry.Status = "Previous rubble still has health"
+        SetFarmMode("Rubble")
+        return
+    end
+    local Root = GetRoot()
+    if not Root then return end
+    -- The game's own marker only appears after rubbleArmed is cleared,
+    -- the server has advanced and wave is zero. That is the authoritative
+    -- completion signal even if the animation/height check fails to replicate.
+    local Goal, Reason = Ext.GetGameAreaMarkerGoal(TargetArea)
+    if not Goal then
+        if not IsRubblePhysicallyOpen(TargetArea - 1) then
+            Entry.Status = "Waiting for rubble to physically lower"
+            SetFarmMode("Waiting For Rubble To Drop")
         else
-
-            DesiredFarmCFrame =
-                nil
+            Entry.Status = Reason
+            SetFarmMode("Waiting For AREA Marker " .. tostring(TargetArea))
         end
-
-
-        SetFarmMode(
-            "Inside Area "
-            .. tostring(
-                TargetArea
-            )
-        )
-
-
+        Entry.Goal = nil
+        return
+    end
+    if not Entry.Goal or (Entry.Goal.Position - Goal.Position).Magnitude > 2 then
+        Entry.Goal = Goal
+        Entry.Attempts = 0
+        Entry.LastMoveAt = 0
+    end
+    if IsPlayerInsideArea(TargetArea) then
+        Entry.Status = "Arrived at AREA " .. tostring(TargetArea) .. "; confirming"
+        SetFarmMode("Area Entry Confirming " .. tostring(TargetArea))
         return
     end
 
-
-    local PreviousArea =
-        TargetArea - 1
-
-
-    local PreviousRubble =
-        GetRubbleForArea(
-            PreviousArea
-        )
-
-
-    if PreviousRubble
-        and PreviousRubble.Health
-        and PreviousRubble.Health > 0
-    then
-
-        CurrentRubbleInfo =
-            PreviousRubble
-
-
-        RecordRubbleHeight(
-            PreviousRubble
-        )
-
-
-        CurrentRubbleCFrame =
-            GetRubbleFarmCFrame(
-                PreviousRubble
-            )
-
-
-        DesiredFarmCFrame =
-            CurrentRubbleCFrame
-
-
-        SetFarmMode(
-            "Rubble"
-        )
-
-
+    local Dist = (Root.Position - Entry.Goal.Position).Magnitude
+    if Dist > 85 then
+        Entry.Status = "AREA marker " .. tostring(math.floor(Dist)) .. " studs away: paused"
+        SetFarmMode("Area Marker Too Far")
         return
     end
-
-
-    if not RubbleBreakTime[
-        PreviousArea
-    ]
-    then
-
-        RubbleBreakTime[
-            PreviousArea
-        ] = os.clock()
-    end
-
-
-    if not IsRubblePhysicallyOpen(
-        PreviousArea
-    )
-    then
-
-        CurrentRubbleInfo =
-            PreviousRubble
-
-
-        CurrentRubbleCFrame =
-            PreviousRubble
-            and GetRubbleFarmCFrame(
-                PreviousRubble
-            )
-            or nil
-
-
-        DesiredFarmCFrame =
-            CurrentRubbleCFrame
-
-
-        SetFarmMode(
-            "Waiting For Rubble To Drop"
-        )
-
-
+    if Entry.Attempts >= 2 then
+        Entry.Status = "Two entry attempts used; waiting for arrival confirmation"
+        SetFarmMode("Area Marker Waiting")
         return
     end
-
-
-    local RecoveryCF =
-        GENV.__AZ_FARM_EXT.HandleAreaEntryRecovery(
-            TargetArea
+    local Now = os.clock()
+    if Now - Entry.LastMoveAt < 3.5 then
+        Entry.Status = "AREA marker move settling"
+        SetFarmMode("Area Marker Waiting")
+        return
+    end
+    Entry.Attempts = Entry.Attempts + 1
+    Entry.LastMoveAt = Now
+    Entry.Status = "Moving to game AREA " .. tostring(TargetArea)
+        .. " marker (" .. Settings.FarmMethod .. ")"
+    if Settings.FarmMethod == "Tween" then
+        if Ext.AreaMarkerTween then
+            pcall(function() Ext.AreaMarkerTween:Cancel() end)
+        end
+        local Duration = math.clamp(Dist / 65, 0.2, 1.5)
+        local Tween = game:GetService("TweenService"):Create(
+            Root, TweenInfo.new(Duration, Enum.EasingStyle.Linear),
+            {CFrame = Entry.Goal}
         )
-
-
-    if RecoveryCF then
-
-        EntryCF =
-            RecoveryCF
-
-
-        SetFarmMode(
-            "Area Recovery "
-            .. tostring(
-                TargetArea
-            )
-        )
-
+        Ext.AreaMarkerTween = Tween
+        Tween:Play()
     else
-
-        SetFarmMode(
-            "Entering Area "
-            .. tostring(
-                TargetArea
-            )
-        )
+        Root.CFrame = Entry.Goal
+        Root.AssemblyLinearVelocity = Vector3.zero
+        Root.AssemblyAngularVelocity = Vector3.zero
     end
-
-
-    DesiredFarmCFrame =
-        EntryCF
+    SetFarmMode("Move To AREA Marker " .. tostring(TargetArea))
 end
-
 
 --//============================================================
 --// RAID EXIT
@@ -35308,12 +35888,9 @@ end
 
 local function HandleNormalFarm()
 
-    TargetAreaNumber =
-        nil
-
-
-    ResetAreaEntryTarget()
-
+    -- Do not clear the locked next-area goal every frame. Clearing it
+    -- caused the character to forget where to go after a broken wall.
+    TargetAreaNumber = nil
 
     local EnemyId,
         EnemyState =
@@ -35410,29 +35987,29 @@ local function HandleNormalFarm()
     end
 
 
-    if HandleWaveRecovery(
-        Area
-    )
-    then
-
+    -- Hxh: never cross from a predicted zero-health state.
+    -- The barrier must physically drop, then the SERVER advances the area,
+    -- then the game's own NextAreaMarker becomes visible. HandleAreaEntry
+    -- will take over only after all three events are confirmed.
+    if Info and Info.Health ~= nil and Info.Health <= 0 then
+        DesiredFarmCFrame = nil
+        CurrentRubbleCFrame = nil
+        if not IsRubblePhysicallyOpen(tonumber(Area)) then
+            SetFarmMode("Waiting For Rubble To Drop")
+        else
+            SetFarmMode("Waiting For Server AREA Marker")
+        end
+        GENV.__AZ_FARM_EXT.CrossingStatus = "Waiting for game area marker"
         return
     end
 
+    if HandleWaveRecovery(Area) then
+        return
+    end
 
-    if Info
-        and Info.Health ~= nil
-        and Info.Health <= 0
-    then
-
-        DesiredFarmCFrame =
-            nil
-
-
-        SetFarmMode(
-            "Waiting For Next Area"
-        )
-
-
+    if Info and Info.Health ~= nil and Info.Health <= 0 then
+        DesiredFarmCFrame = nil
+        SetFarmMode("Waiting For Next Area")
         return
     end
 
@@ -35484,11 +36061,35 @@ local function UpdateAutoFarm()
             )
 
 
+        -- Do not continue Hxh movement if the server reports a skipped area
+        -- or the player reloaded outside the server's current area.
+        if not GENV.__AZ_IS_TRIALS_MODE()
+            and not GENV.__AZ_FARM_EXT.ValidateServerArea(ServerArea)
+        then
+            DesiredFarmCFrame = nil
+            CurrentTargetId = nil
+            CurrentTargetState = nil
+            TargetAreaNumber = nil
+            SetFarmMode("Area Sync Paused")
+            GENV.__AZ_FARM_EXT.CrossingStatus = "Waiting for valid server state"
+            return
+        end
+
         if ServerArea ~= LastServerArea then
 
             LastServerArea =
                 ServerArea
 
+            -- Start an explicit transition on EVERY server area change.
+            -- Do not discard the destination if wave 0 advances before
+            -- the old area has been left.
+            local Ext = GENV.__AZ_FARM_EXT
+            local NewArea = tonumber(ServerArea)
+            Ext.PendingAreaEntry = (NewArea and NewArea > 1) and NewArea or nil
+            Ext.AreaEntryLastChange = os.clock()
+            Ext.AreaEntryState = Ext.PendingAreaEntry
+                and ("Server changed to area " .. tostring(NewArea))
+                or "Area 1 / idle"
 
             CurrentTargetId =
                 nil
@@ -35690,7 +36291,12 @@ local function RunCombatHeartbeat()
                 and IsNearRubble()
             then
 
-                TryM1()
+                local Sent = TryM1()
+                if Sent then
+                    GENV.__AZ_FARM_EXT.RubbleM1Requests =
+                        (GENV.__AZ_FARM_EXT.RubbleM1Requests or 0) + 1
+                    GENV.__AZ_FARM_EXT.RubbleLastM1At = os.clock()
+                end
 
 
             elseif CurrentFarmMode == "Enemy"
@@ -35910,6 +36516,64 @@ GENV.__AZ_FARM_EXT.DebugFarmState = function()
 end
 
 
+GENV.__AZ_TRIALS_STATUS = function()
+    local T = GENV.__AZ_TRIALS_RUNTIME or {}
+    local R = {
+        trials = GENV.__AZ_IS_TRIALS_MODE(),
+        autoTrialsFarm = Settings.AutoTrialsFarm == true,
+        autoM1 = Settings.AutoM1 == true,
+        autoSkills = Settings.AutoSkills == true,
+        trialsRoom = workspace:GetAttribute("TrialsRoom"),
+        trialsFloor = workspace:GetAttribute("TrialsFloor"),
+        remaining = GetRunValue("remaining"),
+        roomState = T.State,
+        stageToken = T.LastStage,
+        exitReady = GENV.__AZ_IS_FLOOR_EXIT_READY(),
+        legacyOwner = false,
+    }
+    for K, V in pairs(R) do print("[Anime Zero][Trials]", K, "=", tostring(V)) end
+    return R
+end
+
+-- Area workflow diagnostics can be printed directly from the executor.
+GENV.__AZ_AREA_STATUS = function()
+    local Ext = GENV.__AZ_FARM_EXT
+    local ServerArea = tonumber(GetRunValue("area"))
+    local Root = GetRoot()
+    local Goal = LockedAreaEntryCFrame
+    local Result = {
+        serverArea = ServerArea,
+        serverWave = GetRunValue("wave"),
+        boundedEntryStatus = (Ext.HxhEntry or {}).Status,
+        boundedEntryAttempts = (Ext.HxhEntry or {}).Attempts,
+        boundedEntryConfirmed = (Ext.HxhEntry or {}).Confirmed,
+        farmMode = CurrentFarmMode,
+        gameMarkerArea = Ext.GameAreaMarkerNumber,
+        gameMarkerPosition = Ext.GameAreaMarkerPosition,
+        markerVisible = workspace:FindFirstChild("NextAreaMarker") ~= nil,
+        pendingArea = Ext.PendingAreaEntry,
+        areaState = Ext.AreaEntryState,
+        insideServerArea = ServerArea and IsPlayerInsideArea(ServerArea) or nil,
+        confirmedEntry = ServerArea and HasCompletedAreaEntry(ServerArea) or nil,
+        lastConfirmedArea = Ext.AreaEntryLastConfirmed,
+        targetArea = TargetAreaNumber,
+        hasEntryTarget = Goal ~= nil,
+        distanceToEntry = Root and Goal and (Root.Position - Goal.Position).Magnitude or nil,
+        rubbleMode = (CurrentFarmMode == "Rubble" or CurrentFarmMode == "Waiting For Rubble To Drop"),
+        rubbleMovement = Ext.RubbleMotionState,
+        rubbleAttempts = Ext.RubbleMoveAttempts,
+        autoFarm = Settings.AutoFarm,
+        autoM1 = Settings.AutoM1,
+        validatedArea = Ext.ValidatedArea,
+        progressionFault = Ext.ProgressionFault,
+        crossingArea = Ext.CrossingArea,
+        crossingStatus = Ext.CrossingStatus,
+        crossingAttempts = Ext.CrossingAttempts,
+    }
+    for k,v in pairs(Result) do print("[Anime Zero][Area]",k,"=",tostring(v)) end
+    return Result
+end
+
 GENV.__AZ_FARM_EXT.BindFarmHeartbeat = function()
 
     local Existing =
@@ -35963,14 +36627,9 @@ GENV.__AZ_FARM_EXT.BindFarmHeartbeat = function()
                     GENV.__AZ_FARM_ENGINE_ACTIVE = true
 
 
-                    -- On a Trials floor clear, the rescue controller moves to
-                    -- Lift. The legacy engine MUST yield or it will teleport
-                    -- us back to the previous enemy/rubble every frame.
-                    if GENV.__AZ_IS_TRIALS_MODE()
-                        and GENV.__AZ_IS_FLOOR_EXIT_READY()
-                        and GENV.__AZ_FARM_RESCUE_ACTIVE == true
-                        and Settings.AutoFarm
-                    then
+                    -- Trials is entirely owned by its dedicated controller.
+                    -- Never apply Hxh area guards or recovery on a Trials room.
+                    if GENV.__AZ_IS_TRIALS_MODE() then
                         pcall(function()
                             GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false)
                         end)
@@ -36061,6 +36720,47 @@ end
 
 GENV.__AZ_FARM_EXT.BindFarmHeartbeat()
 
+-- Small movement-owner diagnostic; doesn't issue any CFrame changes.
+GENV.__AZ_MOVEMENT_STATUS = function()
+    local Ext = GENV.__AZ_FARM_EXT
+    local Mode = tostring(workspace:GetAttribute("Mode") or "Unknown")
+    local Raid = GENV.__AZ_IS_RAID_MODE()
+    local Trials = GENV.__AZ_IS_TRIALS_MODE()
+    local Full = GENV.__AZ_FARM_FULL_ENGINE_ACTIVE == true
+    local Status = {
+        mode = Mode,
+        autoFarm = Settings.AutoFarm == true,
+        autoTrialsFarm = Settings.AutoTrialsFarm == true,
+        autoRaidFarm = Settings.AutoRaidFarm == true,
+        autoPickupLoot = Settings.AutoPickupLoot == true,
+        legacyFarmRunning = Full,
+        rescueFarmRunning = GENV.__AZ_FARM_RESCUE_ACTIVE == true,
+        storyMovementOwner = (not Raid and Settings.AutoFarm and Full and "Legacy Story farm")
+            or (not Raid and Settings.AutoFarm and "Rescue fallback")
+            or (Raid and Settings.AutoRaidFarm and "Raid rescue")
+            or (Settings.AutoPickupLoot and "Loot-only movement")
+            or "None",
+        farmMode = tostring(CurrentFarmMode),
+        targetArea = TargetAreaNumber,
+        gameMarkerArea = Ext.GameAreaMarkerNumber,
+        gameMarkerPosition = Ext.GameAreaMarkerPosition,
+        markerVisible = workspace:FindFirstChild("NextAreaMarker") ~= nil,
+        pendingArea = Ext.PendingAreaEntry,
+        validatedArea = Ext.ValidatedArea,
+        crossingArea = Ext.CrossingArea,
+        progressionFault = Ext.ProgressionFault,
+        hasMovementGoal = DesiredFarmCFrame ~= nil,
+        rescueNormalState = (GENV.__AZ_FARM_RESCUE_RUNTIME or {}).NormalState,
+        rescueNormalFallback = (GENV.__AZ_FARM_RESCUE_RUNTIME or {}).NormalFallbackReason,
+        floorExitActive = Trials and GENV.__AZ_IS_FLOOR_EXIT_READY(),
+        lootOnlyTravelPossible = Settings.AutoPickupLoot == true and Settings.AutoFarm ~= true,
+    }
+    for Key, Value in pairs(Status) do
+        print("[Anime Zero][Movement]", Key, "=", tostring(Value))
+    end
+    return Status
+end
+
 
 -- Heartbeat watchdog: if an executor/teleport transition disconnects the
 -- connection while this is still the current session, recreate it.
@@ -36112,8 +36812,13 @@ GENV.__AZ_FARM_EXT.RespawnConnection =
                 ResetCombatState()
 
                 LastServerArea = nil
-
                 LastObservedWave = nil
+                GENV.__AZ_FARM_EXT.ValidatedArea = nil
+                GENV.__AZ_FARM_EXT.ProgressionFault = nil
+                GENV.__AZ_FARM_EXT.CrossingArea = nil
+                GENV.__AZ_FARM_EXT.HxhEntry = {Area = nil, Goal = nil,
+                    Attempts = 0, LastMoveAt = 0, FirstInsideAt = nil,
+                    Confirmed = nil, Status = "Respawn reset"}
             end
         )
 
