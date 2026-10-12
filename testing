@@ -9967,21 +9967,33 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
     local SendWeaponSpinOnce
 
-    -- Game-backed roll pacing from the updated RollWindowHandler.
-    -- The game enforces 1.80s between normal requests, or 1.05s when
-    -- InstantSpins is actually owned. We use the same ownership check and
-    -- absolute request timestamp instead of waiting an extra delay after
-    -- the result animation. This is faster where the game allows it and
-    -- avoids rate-limit/desync spam where it does not.
-    local WEAPON_ROLL_NORMAL_COOLDOWN = 1.80
-    local WEAPON_ROLL_INSTANT_COOLDOWN = 1.05
+    -- The current game's character-roll config uses 1.75s normally or
+    -- 1.00s for Instant Spins owners, plus its client-side 0.05s margin.
+    -- Respect the gamepass and never send another roll before that window.
+    local WEAPON_ROLL_NORMAL_COOLDOWN = 1.75
+    local WEAPON_ROLL_INSTANT_COOLDOWN = 1.00
     local WEAPON_ROLL_RETRY_GUARD = 0.05
+    -- Keep regular trait pacing when Instant Spins is not actually switched on.
     local TRAIT_ROLL_DELAY = 4.20
+    local TRAIT_INSTANT_ROLL_DELAY = 0.95
     local ROLL_REQUEST_TIMEOUT = 6.00
 
     local NextWeaponAutoSpinAt = 0
     local LastWeaponRequestAt = 0
     local ExtraInstantSpins = nil
+
+
+    -- The game's InstantSpins.IsOn() checks BOTH ownership and the player's
+    -- actual game setting. Never force an instant request for a non-owner.
+    local function IsInstantSpinOn()
+        if ExtraInstantSpins
+            and type(ExtraInstantSpins.IsOn) == "function"
+        then
+            local Success, Enabled = pcall(ExtraInstantSpins.IsOn)
+            return Success and Enabled == true
+        end
+        return false
+    end
 
 
     local function GetWeaponRollCooldown()
@@ -10017,6 +10029,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
     local SendTraitRerollOnce
     local NextTraitAutoSpinAt = 0
+    local LastTraitRequestAt = 0
 
     local RefreshEvolutionSlots
 
@@ -16610,6 +16623,30 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             )
     end)
 
+    GENV.__AZ_SPIN_SPEED_STATUS = function()
+        local Owned = false
+        if ExtraInstantSpins
+            and type(ExtraInstantSpins.IsOwned) == "function"
+        then
+            local Ok, Value = pcall(ExtraInstantSpins.IsOwned)
+            Owned = Ok and Value == true
+        end
+        local On = IsInstantSpinOn()
+        local State = {
+            gamepassOwned = Owned,
+            instantSpinsOn = On,
+            weaponRequestInterval = GetWeaponRollCooldown()
+                + WEAPON_ROLL_RETRY_GUARD,
+            traitRequestInterval = On
+                and TRAIT_INSTANT_ROLL_DELAY
+                or TRAIT_ROLL_DELAY,
+        }
+        for Key, Value in pairs(State) do
+            print("[Anime Zero][SpinSpeed]", Key, "=", Value)
+        end
+        return State
+    end
+
 
     local AccountLoaded =
         pcall(function()
@@ -17857,10 +17894,10 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                         requestId =
                             Id,
 
-                        -- New RollCharacter schema requires this flag.
-                        -- false preserves the pre-update roll behaviour.
+                        -- Match RollWindowHandler: use the real instant
+                        -- request flag only when the purchased pass is on.
                         instant =
-                            false,
+                            IsInstantSpinOn(),
                     })
             end)
 
@@ -18056,9 +18093,8 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                     )
 
 
-                    -- Result animations no longer add an unnecessary extra wait.
-                    -- The next request is scheduled from the actual send time,
-                    -- matching the updated game's 1.80s / 1.05s cooldown gate.
+                    -- Schedule from the request timestamp, so the owned
+                    -- pass's faster cooldown works without animation delays.
                     ScheduleNextWeaponRoll()
 
 
@@ -18250,15 +18286,18 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             end)
 
 
-        if not Success then
-
+        if Success then
+            LastTraitRequestAt = PendingTrait.sentAt
+        else
             PendingTrait = nil
 
-            -- Keep Auto Spin enabled for temporary send/cooldown issues.
+            -- Temporary transport error: back off rather than spam.
             NextTraitAutoSpinAt =
                 math.max(
                     NextTraitAutoSpinAt,
-                    os.clock() + TRAIT_ROLL_DELAY
+                    os.clock() + (IsInstantSpinOn()
+                        and TRAIT_INSTANT_ROLL_DELAY
+                        or TRAIT_ROLL_DELAY)
                 )
 
             warn(
@@ -18360,7 +18399,9 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                                 NextTraitAutoSpinAt =
                                     math.max(
                                         NextTraitAutoSpinAt,
-                                        os.clock() + TRAIT_ROLL_DELAY
+                                        os.clock() + (IsInstantSpinOn()
+                                            and TRAIT_INSTANT_ROLL_DELAY
+                                            or TRAIT_ROLL_DELAY)
                                     )
 
                                 print(
@@ -18403,11 +18444,18 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                     )
 
 
-                    -- The normal TraitRollAnimator path takes roughly
-                    -- 3.7-4.2s after TraitRolled, depending on its random
-                    -- spring values. Use the top of that normal range.
+                    -- With Instant Spins on, the native trait auto-reroll
+                    -- checks roughly 0.9s since the last request. Anchor to
+                    -- request time, not result/animation time. Still wait
+                    -- for traitRolled before the next request.
                     NextTraitAutoSpinAt =
-                        os.clock() + TRAIT_ROLL_DELAY
+                        math.max(
+                            os.clock(),
+                            LastTraitRequestAt
+                                + (IsInstantSpinOn()
+                                    and TRAIT_INSTANT_ROLL_DELAY
+                                    or TRAIT_ROLL_DELAY)
+                        )
 
 
                     if ExtraSettings
@@ -19505,13 +19553,14 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                     nil
 
 
-                -- Match the game's 6 second timeout. A timeout is treated
-                -- as temporary, so keep Auto Spin enabled and retry only after
-                -- the normal trait animation window.
+                -- Timeouts are temporary. Back off with the current
+                -- pass-appropriate interval before trying again.
                 NextTraitAutoSpinAt =
                     math.max(
                         NextTraitAutoSpinAt,
-                        Now + TRAIT_ROLL_DELAY
+                        Now + (IsInstantSpinOn()
+                            and TRAIT_INSTANT_ROLL_DELAY
+                            or TRAIT_ROLL_DELAY)
                     )
 
 
