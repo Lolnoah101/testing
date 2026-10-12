@@ -5,8 +5,9 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
---// 2026-10-11: HxH PERSISTENT AREA ENTRY + RUBBLE RETRY + AUTO START VOTE
---// UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + 2026-10-11 GAME UPDATE
+--// 2026-10-12: TWEEN SPEED SLIDER + FULL TWEEN NOCLIP + RUBBLE CLOSE ARRIVAL
+--// 2026-10-11: HxH RUBBLE RETRY + STAY NOCLIP + TWEEN SPEED + AREA MARKERS
+--// RUBBLE SINGLE-MOVER ISOLATION + RUBBLE AUTO-RETRY + VISIBLE-RUBBLE FACE + GAME-MARKER AREA TRANSITIONS + UPDATE-COMPATIBLE LOBBY + FARM + MOBILE RECONNECT V2 + TRUE HORIZONTAL HOLD + FAST RAID DODGE RE-ENGAGE + AUTO ARISE + SAFE AUTO RETRY + STUCK RUN RECOVERY + REMOTE AUTO EXEC + 2026-10-11 GAME UPDATE
 --//
 --// FIXED:
 --// - Lobby code starts BEFORE dungeon modules
@@ -310,6 +311,7 @@ local Settings = {
     AutoFarm = false,
     -- Trials has its own room-based farm. Hxh area guards do not run here.
     AutoTrialsFarm = false,
+    StayNoclip = true, -- Persistent noclip until disabled; independent of Tween/Teleport
 
     -- Story / Endless movement + rubble progression.
     AutoRaidFarm = false,
@@ -327,6 +329,7 @@ local Settings = {
     FarmPosition = "Behind",
 
     FarmMethod = "Teleport",
+    TweenSpeed = 95, -- studs/second; used by every Story/Endless Tween
 
     StuckRecoveryDelay = 2.5,
 
@@ -2128,6 +2131,8 @@ end)()
                 AutoM1 = Legacy.AutoM1,
                 FarmPosition = Single(Legacy.FarmPosition),
                 FarmMethod = Single(Legacy.FarmMethod),
+                TweenSpeed = Legacy.TweenSpeed,
+                StayNoclip = Legacy.StayNoclip,
                 StuckRecoveryDelay = Legacy.StuckRecoveryDelay,
                 AutoSkills = Legacy.AutoSkills,
                 SelectedSkills = Legacy.FarmSelectedSkills,
@@ -2160,6 +2165,9 @@ end)()
 
         AutoTrialsFarm =
             ReadSavedBool("AutoTrialsFarm", Settings.AutoTrialsFarm),
+
+        StayNoclip =
+            ReadSavedBool("StayNoclip", Settings.StayNoclip),
 
         AutoRaidFarm =
             ReadSavedBool("AutoRaidFarm", Settings.AutoRaidFarm),
@@ -2198,6 +2206,10 @@ end)()
             )
             and Saved.FarmMethod
             or Settings.FarmMethod,
+
+        TweenSpeed =
+            math.clamp(tonumber(Saved.TweenSpeed)
+                or Settings.TweenSpeed or 95, 20, 250),
 
         StuckRecoveryDelay =
             math.clamp(
@@ -2276,6 +2288,9 @@ end)()
         Settings.AutoTrialsFarm =
             User.AutoTrialsFarm == true
 
+        Settings.StayNoclip =
+            User.StayNoclip == true
+
         Settings.AutoRaidFarm =
             User.AutoRaidFarm == true
 
@@ -2296,6 +2311,9 @@ end)()
 
         Settings.FarmMethod =
             User.FarmMethod
+
+        Settings.TweenSpeed =
+            User.TweenSpeed
 
         Settings.StuckRecoveryDelay =
             User.StuckRecoveryDelay
@@ -2451,7 +2469,7 @@ local LockedAreaEntryMethod = nil
 if type(GENV.__AZ_FARM_EXT) == "table"
     and type(GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled) == "function"
 then
-    pcall(GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled, false)
+    pcall(GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled, false, true)
 end
 
 GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
@@ -2631,274 +2649,194 @@ GENV.__AZ_FARM_EXT.CrossingStatus = "Idle"
 -- A 70-stud cutoff alone stranded the character even for legitimate walks
 -- across a long Hxh area. This sends at most a few short, verified steps.
 -- If navigation is ambiguous, pause instead of risking a server area skip.
-GENV.__AZ_FARM_EXT.TryRubbleSafeApproach = function(Root, Goal, Token)
+-- HxH rubble approach: one route check followed by exactly one movement
+-- order. The old 24-stud safe-step routine was responsible for the repeated
+-- short teleports and mid-travel tween resets.
+GENV.__AZ_FARM_EXT.RubbleJourney = nil
+GENV.__AZ_FARM_EXT.ValidateRubbleDirectRoute = function(Root, Goal, AreaToken)
     local Ext = GENV.__AZ_FARM_EXT
-    local Now = os.clock()
-    local Pos = Root and Root.Position
-    if not Pos or typeof(Goal) ~= "CFrame" then
-        return "Missing player or goal"
+    if not Root or typeof(Goal) ~= "CFrame" then
+        return false, "Missing character or rubble goal"
     end
-
-    local ServerArea = tonumber(GENV.__AZ_FARM_EXT.ValidatedArea)
-    local RequestedArea = tonumber(Token)
-    local World = workspace:FindFirstChild("World")
-    local Areas = World and World:FindFirstChild("Areas")
-    local Area = Areas and Areas:FindFirstChild(tostring(Token))
-    local WorldMap = World and World:FindFirstChild("Map")
-    if not Area or not Area:IsA("BasePart") or not WorldMap
-        or not ServerArea or not RequestedArea
-        or ServerArea ~= RequestedArea or Ext.ProgressionFault
-    then
-        return "Unconfirmed area / map: no move"
+    if Ext.ProgressionFault then
+        return false, "Server area progression is paused"
     end
-
-    local Delta = Goal.Position - Pos
-    local Horizontal = Vector3.new(Delta.X, 0, Delta.Z)
-    if math.abs(Delta.Y) > 15 then
-        return "Ground level mismatch: no move"
+    -- The current area's border is authoritative. The world Area volume
+    -- does not necessarily include the visible rubble or its front approach.
+    local Token = tonumber(AreaToken)
+    if not Token or Token ~= tonumber(Ext.ValidatedArea) then
+        return false, "Rubble does not belong to confirmed area"
     end
-    if Horizontal.Magnitude < 4 then
-        return "Near wall horizontally: no distant move"
+    local Border = Ext.RubbleLastBorder
+    local Rubble = Ext.RubbleLastVisual
+    if not Border or not Border.Parent or not Rubble or not Rubble.Parent then
+        return false, "Visible rubble is not available"
     end
-    if Now < (Ext.RubbleSafeApproachCooldownUntil or 0) then
-        return "Waiting for approach cooldown"
+    local MaxHealth = tonumber(Border:GetAttribute("RubbleMaxHealth"))
+    local Health = tonumber(Border:GetAttribute("RubbleHealth")) or MaxHealth
+    if not Health or Health <= 0 then
+        return false, "Rubble is no longer armed"
     end
-
-    -- Same blocker goal? Continue bounded steps. Otherwise start a fresh
-    -- approach and discard the previous blocker progress.
-    if not Ext.RubbleSafeApproachGoal
-        or (Ext.RubbleSafeApproachGoal - Goal.Position).Magnitude > 3
-    then
-        Ext.RubbleSafeApproachGoal = Goal.Position
-        Ext.RubbleSafeApproachSteps = 0
-        Ext.RubbleSafeApproachLastDistance = nil
-        Ext.RubbleSafeApproachAt = 0
-    end
-    if Ext.RubbleSafeApproachSteps >= 5 then
-        return "Five approach steps reached: waiting for review"
-    end
-    if Now - (Ext.RubbleSafeApproachAt or 0) < 1.6 then
-        return "Waiting for safe approach verification"
-    end
-    local Last = Ext.RubbleSafeApproachLastDistance
-    if Last and Horizontal.Magnitude > Last - 4 then
-        Ext.RubbleSafeApproachCooldownUntil = Now + 8
-        return "Approach did not reduce distance: paused 8 seconds"
-    end
-
-    local StepLength = math.min(24, math.max(1, Horizontal.Magnitude - 10))
-    local Flat = Pos + Horizontal.Unit * StepLength
-    local Relative = Area.CFrame:PointToObjectSpace(Flat)
-    local Half = Area.Size * 0.5
-    local Inside = math.abs(Relative.X) <= Half.X + 3
-        and math.abs(Relative.Z) <= Half.Z + 3
-        and math.abs(Relative.Y) <= Half.Y + 12
-    if not Inside then
-        return "Waypoint outside current area: no move"
-    end
-
-    local Params = RaycastParams.new()
-    Params.FilterType = Enum.RaycastFilterType.Include
-    Params.FilterDescendantsInstances = {WorldMap}
-    Params.IgnoreWater = true
-    local Hit = workspace:Raycast(
-        Vector3.new(Flat.X, Pos.Y + 25, Flat.Z),
-        Vector3.new(0, -65, 0), Params
-    )
-    if not Hit or Hit.Normal.Y < 0.7 then
-        return "No safe floor at waypoint"
-    end
-    local Humanoid = Root.Parent and Root.Parent:FindFirstChildOfClass("Humanoid")
-    local Height = math.clamp((Humanoid and Humanoid.HipHeight or 2) + Root.Size.Y * 0.5, 2.5, 7)
-    local Safe = Hit.Position + Vector3.new(0, Height, 0)
-    if math.abs(Safe.Y - Pos.Y) > 11 then
-        return "Waypoint is on another elevation: no move"
-    end
-    local Character = Root.Parent
-    local NewCF = CFrame.new(Safe) * CFrame.Angles(0, math.rad(Root.Orientation.Y), 0)
-    if Settings.FarmMethod == "Tween" then
-        if Ext.RubbleTween then
-            pcall(function() Ext.RubbleTween:Cancel() end)
+    -- The landing position was already raycast onto the real ground in
+    -- GetCloseRubbleGoal. Validate it against the visual/marker, NOT the
+    -- invisible Blocker length and NOT how far the player currently is.
+    local Marker = Ext.RubbleLastMarker
+    if Marker and Marker.Parent then
+        local FlatGoal = Vector3.new(Goal.Position.X, 0, Goal.Position.Z)
+        local FlatMarker = Vector3.new(Marker.WorldPosition.X, 0, Marker.WorldPosition.Z)
+        if (FlatGoal - FlatMarker).Magnitude > 15 then
+            return false, "Landing position differs from visible rubble marker"
         end
-        local Tween = game:GetService("TweenService"):Create(
-            Root, TweenInfo.new(math.clamp(StepLength / 50, 0.3, 1.0), Enum.EasingStyle.Linear),
-            {CFrame = NewCF}
-        )
-        Ext.RubbleTween = Tween
-        Tween:Play()
-    else
-        if Character and Character:IsA("Model") then
-            Character:PivotTo(NewCF)
-        else
-            Root.CFrame = NewCF
-        end
-        Root.AssemblyLinearVelocity = Vector3.zero
-        Root.AssemblyAngularVelocity = Vector3.zero
     end
-    Ext.RubbleSafeApproachAt = Now
-    Ext.RubbleSafeApproachSteps = Ext.RubbleSafeApproachSteps + 1
-    Ext.RubbleSafeApproachLastDistance = Horizontal.Magnitude
-    return "Safe same-area step " .. tostring(Ext.RubbleSafeApproachSteps) .. "/5"
+    return true, "Verified current-area visible rubble approach"
 end
 
 GENV.__AZ_FARM_EXT.GetCloseRubbleGoal = function(Root, Blocker, Marker, AreaToken)
     local Ext = GENV.__AZ_FARM_EXT
-    if not Root or not Root.Parent or not Blocker or not Blocker:IsA("BasePart") then
-        Ext.RubbleLastStatus = "Missing root or physical rubble blocker"
+    local World = workspace:FindFirstChild("World")
+    -- Use the actual parent of the blocker: it contains the VISUAL Rubble
+    -- model and the server-owned health attributes for this border.
+    local Border = Blocker and Blocker.Parent
+    local Visual = Border and Border:FindFirstChild("Rubble")
+    local Token = tostring(AreaToken or "?")
+    if not Root or not Root.Parent or not Blocker
+        or not Blocker:IsA("BasePart") or not Visual or not Visual.Parent
+    then
+        Ext.RubbleLastStatus = "Waiting for current border and visible Rubble"
         return nil
     end
-
-    local Token = tostring(AreaToken or "?")
-    local Cached = Ext.RubbleGoals[Blocker]
-    -- If the character was corrected to a different section of the SAME
-    -- long wall, release only the stale along-wall coordinate. Keep the
-    -- approach side tied to the current map area, never the last teleport.
-    if Cached and typeof(Cached.Goal) == "CFrame" then
-        local Here = Blocker.CFrame:PointToObjectSpace(Root.Position)
-        local H = Blocker.Size * 0.5
-        local DX = Here.X - math.clamp(Here.X, -H.X, H.X)
-        local DZ = Here.Z - math.clamp(Here.Z, -H.Z, H.Z)
-        local WallGap = math.sqrt(DX * DX + DZ * DZ)
-        if WallGap < 25 and
-            (Root.Position - Cached.Goal.Position).Magnitude > 45
-            and (os.clock() - (Ext.RubbleSafeApproachAt or 0) > 3) then
-            Ext.RubbleGoals[Blocker] = nil
-            Cached = nil
-            Ext.RubbleLastStatus = "Re-anchoring to nearby wall section"
-        end
+    local VisualCF, VisualSize
+    if Visual:IsA("Model") then
+        VisualCF, VisualSize = Visual:GetBoundingBox()
+    elseif Visual:IsA("BasePart") then
+        VisualCF, VisualSize = Visual.CFrame, Visual.Size
+    else
+        Ext.RubbleLastStatus = "Unsupported visible rubble geometry"
+        return nil
     end
-    if Cached and Cached.Area == Token
-        and Cached.Character == Root.Parent
-        and Cached.World == workspace:FindFirstChild("World")
-        and typeof(Cached.Goal) == "CFrame"
+    local Cache = Ext.RubbleGoals[Blocker]
+    local LiveMarker = Marker and Marker:IsA("Attachment") and Marker.Parent
+    if Cache and Cache.Area == Token and Cache.Character == Root.Parent
+        and Cache.Visual == Visual and typeof(Cache.Goal) == "CFrame"
+        and (Cache.Marker == Marker or not LiveMarker)
     then
-        Ext.RubbleLastGoal = Cached.Goal
+        Ext.RubbleLastGoal = Cache.Goal
         Ext.RubbleLastBlocker = Blocker
-        Ext.RubbleLastSide = Cached.Side
+        Ext.RubbleLastVisual = Visual
+        Ext.RubbleLastBorder = Border
+        Ext.RubbleLastMarker = Cache.Marker
+        Ext.RubbleLastSide = Cache.Side
         Ext.RubbleLastArea = Token
-        Ext.RubbleLastStatus = "Locked outside rubble (" .. Cached.Side .. ")"
-        return Cached.Goal
+        Ext.RubbleLastStatus = "Locked front of visible rubble"
+        return Cache.Goal
     end
 
-    local World = workspace:FindFirstChild("World")
+    -- This is the SAME forward axis and approach side used by the game's
+    -- RubbleBar renderer. Its Attachment is placed 5 studs from the actual
+    -- visible rubble face; shift ~2 studs toward it for a 3-stud goal.
+    local Unit = Vector3.new(Blocker.CFrame.LookVector.X, 0,
+        Blocker.CFrame.LookVector.Z)
+    if Unit.Magnitude < 0.01 then
+        Ext.RubbleLastStatus = "Rubble front axis unavailable"
+        return nil
+    end
+    Unit = Unit.Unit
+    local Spawns = World and World:FindFirstChild("Spawns")
+    local Spawn = Spawns and Spawns:FindFirstChild(Token)
+    if Spawn and Spawn:IsA("BasePart") then
+        if (Spawn.Position - Blocker.Position):Dot(Unit) < 0 then
+            Unit = -Unit
+        end
+    elseif LiveMarker then
+        if (Marker.WorldPosition - Blocker.Position):Dot(Unit) < 0 then
+            Unit = -Unit
+        end
+    elseif (Root.Position - Blocker.Position):Dot(Unit) < 0 then
+        Unit = -Unit
+    end
+
+    local TargetXZ, AnchorY, UsedMarker
+    if LiveMarker then
+        TargetXZ = Marker.WorldPosition - Unit * 2
+        AnchorY = Marker.WorldPosition.Y - 14
+        UsedMarker = true
+    else
+        -- While the client creates RubbleBar, reproduce the game's
+        -- horizontal raycast AGAINST the visible Rubble, never the Blocker.
+        local Ray = RaycastParams.new()
+        Ray.FilterType = Enum.RaycastFilterType.Include
+        Ray.FilterDescendantsInstances = {Visual}
+        local Origin = Vector3.new(Blocker.Position.X,
+            VisualCF.Position.Y + VisualSize.Y * 0.5,
+            Blocker.Position.Z)
+        local Hit = workspace:Raycast(Origin + Unit * 150, -Unit * 300, Ray)
+        if not Hit then
+            Ext.RubbleLastStatus = "Waiting for visible rubble front raycast"
+            return nil
+        end
+        TargetXZ = Hit.Position + Unit * 3
+        AnchorY = VisualCF.Position.Y - VisualSize.Y * 0.5
+        UsedMarker = false
+    end
+
+    -- Anchor the root to the roadway near the rubble rather than using the
+    -- attachment's health-bar height (which is about 14 studs in the air).
+    local Human = Root.Parent:FindFirstChildOfClass("Humanoid")
+    local RootHeight = math.clamp((Human and Human.HipHeight or 2)
+        + Root.Size.Y * 0.5, 2.5, 6.5)
+    local Filter = {Root.Parent, Border}
     local Areas = World and World:FindFirstChild("Areas")
-    local AreaPart = Areas and Areas:FindFirstChild(Token)
-    local Half = Blocker.Size * 0.5
-
-    -- Prefer the area we just fought in: that is the near / entry side of
-    -- the rubble. Never use the character position again after locking it.
-    local From = AreaPart and AreaPart:IsA("BasePart")
-        and AreaPart.Position or Root.Position
-    local Delta = Blocker.CFrame:PointToObjectSpace(From)
-    if math.abs(Delta.X) + math.abs(Delta.Z) < 0.1 then
-        Delta = Blocker.CFrame:PointToObjectSpace(Root.Position)
-    end
-
-    -- The blocker is usually a long, thin slab: enter along its THIN axis.
-    -- For square blockers use the axis along the direction from this area.
-    local SideAxis
-    if Half.X < Half.Z * 0.8 then
-        SideAxis = "X"
-    elseif Half.Z < Half.X * 0.8 then
-        SideAxis = "Z"
-    else
-        SideAxis = math.abs(Delta.X) >= math.abs(Delta.Z) and "X" or "Z"
-    end
-    local SideSign = (SideAxis == "X" and Delta.X or Delta.Z) >= 0 and 1 or -1
-    local StandOff = 4.5 -- Leave room for the character and the rubble mesh.
-    -- Use the CURRENT CHARACTER for the position ALONG the barrier,
-    -- while keeping the area-derived entry side locked. The old RubbleBar
-    -- marker is often at the midpoint of a very long blocker; moving to
-    -- that midpoint could send the player 100-200 studs down the barrier.
-    local Near = Blocker.CFrame:PointToObjectSpace(Root.Position)
-    local Inset = 3
-    local LocalPoint
-    if SideAxis == "X" then
-        LocalPoint = Vector3.new(
-            SideSign * (Half.X + StandOff), 0,
-            math.clamp(Near.Z, -math.max(0, Half.Z - Inset),
-                math.max(0, Half.Z - Inset))
-        )
-    else
-        LocalPoint = Vector3.new(
-            math.clamp(Near.X, -math.max(0, Half.X - Inset),
-                math.max(0, Half.X - Inset)),
-            0, SideSign * (Half.Z + StandOff)
-        )
-    end
-    local P = Blocker.CFrame:PointToWorldSpace(LocalPoint)
-    local GroundPosition = nil
-    local Params = RaycastParams.new()
-    Params.FilterType = Enum.RaycastFilterType.Exclude
-    Params.IgnoreWater = true
-    local Ignored = { Root.Parent, Blocker }
-    if Blocker.Parent then table.insert(Ignored, Blocker.Parent) end
-    if Areas then table.insert(Ignored, Areas) end
+    if Areas then table.insert(Filter, Areas) end
     local Enemies = workspace:FindFirstChild("enemies")
-    if Enemies then table.insert(Ignored, Enemies) end
-
-    local Humanoid = Root.Parent:FindFirstChildOfClass("Humanoid")
-    local RootHeight = math.clamp(
-        (Humanoid and Humanoid.HipHeight or 2) + Root.Size.Y * 0.5,
-        2.6, 7
-    )
-    local StartY = math.max(
-        Blocker.Position.Y + Half.Y + 25,
-        From.Y + 55,
-        Root.Position.Y + 35
-    )
-    -- Ignore decorative, non-collidable or near-vertical hit surfaces.
-    for i = 1, 10 do
-        Params.FilterDescendantsInstances = Ignored
+    if Enemies then table.insert(Filter, Enemies) end
+    local AreaEntries = World and World:FindFirstChild("AreaEntries")
+    if AreaEntries then table.insert(Filter, AreaEntries) end
+    local RayParams = RaycastParams.new()
+    RayParams.FilterType = Enum.RaycastFilterType.Exclude
+    RayParams.IgnoreWater = true
+    local GroundY
+    for _ = 1, 8 do
+        RayParams.FilterDescendantsInstances = Filter
         local Hit = workspace:Raycast(
-            Vector3.new(P.X, StartY, P.Z),
-            Vector3.new(0, -320, 0), Params
-        )
+            Vector3.new(TargetXZ.X, AnchorY + 75, TargetXZ.Z),
+            Vector3.new(0, -165, 0), RayParams)
         if not Hit then break end
-        local Part = Hit.Instance
-        if Hit.Normal.Y >= 0.65
-            and Hit.Position.Y <= Blocker.Position.Y + Half.Y + 15
-            and Hit.Position.Y >= Blocker.Position.Y - Half.Y - 65
-            -- A downward ray can hit a lower street / basement on Hxh.
-            -- Never select a rubble approach 50+ studs below the player.
-            and math.abs((Hit.Position.Y + RootHeight) - Root.Position.Y) <= 14
-            and (Part:IsA("Terrain") or (Part:IsA("BasePart") and Part.CanCollide))
-        then
-            GroundPosition = Vector3.new(P.X, Hit.Position.Y + RootHeight, P.Z)
+        if Hit.Normal.Y >= 0.65 and math.abs(Hit.Position.Y - AnchorY) < 17
+            and Hit.Instance:IsA("BasePart") and Hit.Instance.CanCollide then
+            GroundY = Hit.Position.Y
             break
         end
-        table.insert(Ignored, Part)
+        table.insert(Filter, Hit.Instance)
     end
-
-    if not GroundPosition then
-        Ext.RubbleLastStatus = "Ground not found outside blocker (no teleport)"
-        Ext.RubbleLastGoal = nil
-        Ext.RubbleLastArea = Token
+    if not GroundY then
+        Ext.RubbleLastStatus = "No valid roadway at visible rubble front"
         return nil
     end
 
-    -- Face the physical slab, not the HUD bar attachment.
-    local Face = Vector3.new(Blocker.Position.X, GroundPosition.Y, Blocker.Position.Z)
-    if (Face - GroundPosition).Magnitude <= 0.1 then
-        Face = GroundPosition + Blocker.CFrame.LookVector
-    end
-    local Goal = CFrame.lookAt(GroundPosition, Face, Vector3.yAxis)
-    local Side = SideAxis .. (SideSign == 1 and "+" or "-")
+    local Position = Vector3.new(TargetXZ.X, GroundY + RootHeight, TargetXZ.Z)
+    local Face = Position - Unit * 3
+    local Goal = CFrame.lookAt(Position, Face, Vector3.yAxis)
     Ext.RubbleGoals[Blocker] = {
-        Goal = Goal, Side = Side, Area = Token,
-        Character = Root.Parent, World = World,
+        Goal = Goal, Area = Token, Character = Root.Parent,
+        Visual = Visual, Marker = LiveMarker and Marker or nil,
+        Side = "Visible rubble front",
     }
     Ext.RubbleLastGoal = Goal
     Ext.RubbleLastBlocker = Blocker
-    Ext.RubbleLastSide = Side
+    Ext.RubbleLastVisual = Visual
+    Ext.RubbleLastBorder = Border
+    Ext.RubbleLastMarker = LiveMarker and Marker or nil
+    Ext.RubbleLastSide = "Visible rubble front"
     Ext.RubbleLastArea = Token
-    Ext.RubbleLastStatus = "Nearest outside approach (" .. Side .. ")"
-    Ext.RubbleGoalDistanceAtLock = (Root.Position - GroundPosition).Magnitude
-    Ext.RubbleMarkerDistanceAtLock = Marker and Marker:IsA("Attachment")
+    Ext.RubbleLastStatus = UsedMarker
+        and "3 studs in front of RubbleBar's visible rubble face"
+        or "3 studs in front of raycast visible rubble face"
+    Ext.RubbleGoalDistanceAtLock = (Root.Position - Position).Magnitude
+    Ext.RubbleMarkerDistanceAtLock = LiveMarker
         and (Root.Position - Marker.WorldPosition).Magnitude or nil
-    print("[Anime Zero][Rubble] Nearest-wall goal | area:", Token,
-        "| side:", Side, "| distance:",
-        math.floor(Ext.RubbleGoalDistanceAtLock * 10) / 10)
+    print("[Anime Zero][Rubble] Visible face goal | area:", Token,
+        "| distance:", math.floor(Ext.RubbleGoalDistanceAtLock + 0.5),
+        "| source:", UsedMarker and "RubbleBar" or "Visual Raycast")
     return Goal
 end
 
@@ -2909,6 +2847,10 @@ GENV.__AZ_RUBBLE_STATUS = function()
     local Result = {
         farmPosition = Settings.FarmPosition,
         farmMethod = Settings.FarmMethod,
+        tweenSpeed = Settings.TweenSpeed,
+        stayNoclip = Settings.StayNoclip == true,
+        tweenNoclipActive = Ext.RubbleTween ~= nil
+            and Ext.RubbleTween.PlaybackState == Enum.PlaybackState.Playing,
         farmMode = CurrentFarmMode,
         area = Ext.RubbleLastArea,
         side = Ext.RubbleLastSide,
@@ -2938,8 +2880,19 @@ GENV.__AZ_RUBBLE_STATUS = function()
             Vector3.new(Ext.RubbleLastGoal.Position.X, 0, Ext.RubbleLastGoal.Position.Z)).Magnitude or nil,
         verticalGoalDifference = Root and Ext.RubbleLastGoal and
             math.abs(Root.Position.Y - Ext.RubbleLastGoal.Position.Y) or nil,
-        safeApproachSteps = Ext.RubbleSafeApproachSteps,
+        safeApproachSteps = 0, -- replaced by a single direct journey
         safeApproachReason = Ext.RubbleApproachReason,
+        directJourneyState = Ext.RubbleJourney and Ext.RubbleJourney.State or "Idle",
+        directJourneyMethod = Ext.RubbleJourney and Ext.RubbleJourney.Method or nil,
+        directJourneyReason = Ext.RubbleJourney and Ext.RubbleJourney.Reason or nil,
+        directJourneyRecoveries = math.max(0,
+            (Ext.RubbleJourney and Ext.RubbleJourney.Attempts or 0) - 1),
+        directJourneyRetryIn = Ext.RubbleJourney and Ext.RubbleJourney.NextRetryAt
+            and math.max(0, Ext.RubbleJourney.NextRetryAt - os.clock()) or nil,
+        autoRetryRubble = true,
+        lastUnexpectedDisplacement = Ext.RubbleLastDisplacement,
+        normalSecondaryMoverEnabled = GENV.__AZ_FARM_FULL_ENGINE_ACTIVE ~= true,
+        autoLootEnabled = Settings.AutoPickupLoot == true,
     }
     for Key, Value in pairs(Result) do
         print("[Anime Zero][Rubble]", Key, "=", tostring(Value))
@@ -5177,6 +5130,28 @@ FarmTab:CreateButton({
 })
 
 FarmTab:CreateToggle({
+    name = "Stay Noclip",
+    flag = "StayNoclip",
+    description = "Keeps all character parts non-collidable throughout the run, not just while Tween moves. Independent of Farm Method. Disable to restore collisions when not tweening. Be aware that you can fall through floors.",
+    value = Settings.StayNoclip == true,
+    callback = function(Value)
+        local Enabled = Value == true
+        Settings.StayNoclip = Enabled
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("StayNoclip", Enabled)
+        end
+        local Ext = GENV.__AZ_FARM_EXT
+        if type(Ext) == "table"
+            and type(Ext.SetTweenNoclipEnabled) == "function"
+        then
+            pcall(Ext.SetTweenNoclipEnabled, Enabled)
+        end
+        print("[Anime Zero] Stay Noclip:", Enabled)
+    end,
+})
+
+
+FarmTab:CreateToggle({
 
     name = "Auto Farm",
     flag = "AutoFarm",
@@ -5503,6 +5478,25 @@ FarmTab:CreateDropdown({
 
             ResetAreaEntryTarget()
         end
+    end,
+})
+
+
+FarmTab:CreateSlider({
+    name = "Tween Speed",
+    flag = "TweenSpeed",
+    description = "Studs per second for Tween farming, rubble approaches and AREA-marker travel. Takes effect on the next direct Tween.",
+    range = {20, 250},
+    increment = 5,
+    value = Settings.TweenSpeed,
+    suffix = " studs/s",
+    callback = function(Value)
+        local Speed = math.clamp(tonumber(Value) or 95, 20, 250)
+        Settings.TweenSpeed = Speed
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("TweenSpeed", Speed)
+        end
+        print("[Anime Zero] Tween Speed:", Speed, "studs/s")
     end,
 })
 
@@ -6395,7 +6389,7 @@ FarmTab:CreateToggle({
 
                 if Distance > 0.05 then
                     local Alpha = math.clamp(
-                        ((Speed or 135) * (DeltaTime or 0.016))
+                        ((Settings.TweenSpeed or 95) * (DeltaTime or 0.016))
                             / math.max(Distance, 0.001),
                         0,
                         1
@@ -15695,7 +15689,8 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
                     pcall(
                         GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled,
-                        false
+                        false,
+                        true
                     )
                 end
 
@@ -27700,12 +27695,12 @@ end
 
 
 --//============================================================
---// TWEEN NOCLIP
+--// PERSISTENT NOCLIP / TWEEN NOCLIP
 --//
---// Tweening the HumanoidRootPart alone does NOT disable Roblox
---// collision. While Tween farm movement is active, temporarily
---// disable character-part collisions and restore their original
---// values as soon as Tween movement stops.
+--// Tween uses temporary noclip by default. Stay Noclip makes it continuous
+--// across farming, rubble attacks, AREA waits, Trials and Raid. The setting
+--// controls collisions only, never character position. ForceRestore is used
+--// for script unload and re-execution so no collision state is left behind.
 --//============================================================
 
 GENV.__AZ_FARM_EXT.TweenNoclipOriginal =
@@ -27716,8 +27711,14 @@ GENV.__AZ_FARM_EXT.TweenNoclipOriginal =
 
 
 GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled = function(
-    Enabled
+    Enabled, ForceRestore
 )
+
+    if ForceRestore == true then
+        Enabled = false
+    elseif Settings.StayNoclip == true then
+        Enabled = true
+    end
 
     local OriginalParts =
         GENV.__AZ_FARM_EXT.TweenNoclipOriginal
@@ -27785,6 +27786,16 @@ GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled = function(
             nil
     end
 end
+
+
+-- Persistent control is independent of Story/Trials/Raid farm state.
+-- Stepped fires before physics so collisions remain disabled even while idle.
+GENV.__AZ_FARM_EXT.StayNoclipConnection = RunService.Stepped:Connect(function()
+    if Settings.StayNoclip == true and SessionAlive() then
+        GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(true)
+    end
+end)
+table.insert(Runtime.Connections, GENV.__AZ_FARM_EXT.StayNoclipConnection)
 
 
 local function IsAlive()
@@ -33978,10 +33989,12 @@ local function ApplyFarmMovement(
 
     -- End outstanding motion if rubble/area entry no longer owns movement.
     local Ext = GENV.__AZ_FARM_EXT
-    if Ext.RubbleTween and (not Settings.AutoFarm
-        or CurrentFarmMode ~= "Rubble") then
-        pcall(function() Ext.RubbleTween:Cancel() end)
-        Ext.RubbleTween = nil
+    if not Settings.AutoFarm or CurrentFarmMode ~= "Rubble" then
+        if Ext.RubbleTween then
+            pcall(function() Ext.RubbleTween:Cancel() end)
+            Ext.RubbleTween = nil
+        end
+        Ext.RubbleJourney = nil
     end
     if Ext.AreaMarkerTween and (not Settings.AutoFarm
         or not string.find(string.lower(CurrentFarmMode), "area marker", 1, true)
@@ -33990,16 +34003,21 @@ local function ApplyFarmMovement(
         Ext.AreaMarkerTween = nil
     end
 
-    local UseTweenNoclip =
-        MovementEnabled
-        and Settings.FarmMethod
-            == "Tween"
+    -- Keep noclip enabled while an independent Rubble/AREA Tween is PLAYING.
+    -- These tweens can run even when DesiredFarmCFrame is temporarily nil;
+    -- that must not restore collisions mid-flight.
+    local RubbleTweenPlaying = Ext.RubbleTween ~= nil
+        and Ext.RubbleTween.PlaybackState == Enum.PlaybackState.Playing
+    local MarkerTweenPlaying = Ext.AreaMarkerTween ~= nil
+        and Ext.AreaMarkerTween.PlaybackState == Enum.PlaybackState.Playing
+    local OrdinaryTweenActive = DesiredFarmCFrame ~= nil
         and CurrentFarmMode ~= "Loot"
         and CurrentFarmMode ~= "Below Standby"
         and CurrentFarmMode ~= "Rubble"
         and CurrentFarmMode ~= "Waiting For Rubble To Drop"
-        and DesiredFarmCFrame
-            ~= nil
+    local UseTweenNoclip = MovementEnabled
+        and Settings.FarmMethod == "Tween"
+        and (RubbleTweenPlaying or MarkerTweenPlaying or OrdinaryTweenActive)
 
 
     GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(
@@ -34422,114 +34440,186 @@ local function ApplyFarmMovement(
         return
     end
 
-    -- RUBBLE ONLY: one approach, then STOP writing CFrame while attacking.
-    -- Before: TELEPORT_PLAYER_ERROR was 1.5 studs, so settling 1.6 studs
-    -- from the intended goal caused another teleport every 0.08 seconds.
-    -- This is a STATIONARY obstacle, not a moving enemy. A separate, wider
-    -- arrival range and a limited recovery are both needed.
-    if CurrentFarmMode == "Rubble"
-        or CurrentFarmMode == "Waiting For Rubble To Drop"
-    then
+    -- HxH RUBBLE: A single movement owner with a non-permanent retry state.
+    -- If the game corrects our position after a move, retry the SAME visible
+    -- rubble goal after a paced cooldown. Never chase rubble from another
+    -- area, and never issue a new command while a Tween is still running.
+    if CurrentFarmMode == "Rubble" then
         local Ext = GENV.__AZ_FARM_EXT
         local Goal = DesiredFarmCFrame
         local Blocker = Ext.RubbleLastBlocker
+        local Now = os.clock()
         local Distance = (Root.Position - Goal.Position).Magnitude
-        local NewGoal = not Ext.RubbleMoveGoal
-            or (Ext.RubbleMoveGoal - Goal.Position).Magnitude > 1.5
-            or Ext.RubbleMoveBlocker ~= Blocker
-            or Ext.RubbleMoveCharacter ~= Root.Parent
-
-        if NewGoal then
-            Ext.RubbleMoveGoal = Goal.Position
-            Ext.RubbleMoveBlocker = Blocker
-            Ext.RubbleMoveCharacter = Root.Parent
-            Ext.RubbleMoveAttempts = 0
-            Ext.RubbleLastMoveAt = 0
-            Ext.RubbleMotionState = "New outside approach"
-        end
-
-        local Outside = true
-        if Blocker and Blocker.Parent and Blocker:IsA("BasePart") then
-            local Local = Blocker.CFrame:PointToObjectSpace(Root.Position)
-            local Side = Ext.RubbleLastSide
-            if Side == "Z+" then
-                Outside = Local.Z >= Blocker.Size.Z * 0.5 + 1
-            elseif Side == "Z-" then
-                Outside = Local.Z <= -Blocker.Size.Z * 0.5 - 1
-            elseif Side == "X+" then
-                Outside = Local.X >= Blocker.Size.X * 0.5 + 1
-            elseif Side == "X-" then
-                Outside = Local.X <= -Blocker.Size.X * 0.5 - 1
-            end
-        end
+        local Outside = Ext.RubbleLastVisual ~= nil
         Ext.RubbleLastMoveDistance = Distance
         Ext.RubbleLastExterior = Outside
 
-        -- More than 70 studs can simply mean rubble is on the far side of
-        -- the CURRENT area. Do not teleport that whole distance or freeze.
-        -- Walk it with short floor-verified same-area steps (max five).
-        if Distance > 70 then
-            local Reason = Ext.TryRubbleSafeApproach(Root, Goal, Ext.RubbleLastArea)
-            Ext.RubbleApproachReason = Reason
-            Ext.RubbleMotionState = Reason
-            Ext.RubbleUnsafeGoal = not string.find(Reason, "Safe same-area step", 1, true)
-            if os.clock() - (Ext.RubbleFarWarnAt or 0) >= 6 then
-                Ext.RubbleFarWarnAt = os.clock()
-                print("[Anime Zero][Rubble] Distant approach:", Reason,
-                    "| dist:", math.floor(Distance),
-                    "| server area:", tostring(GetRunValue("area")),
-                    "| blocker area:", tostring(Ext.RubbleLastArea))
-            end
-            return
-        end
-        Ext.RubbleUnsafeGoal = false
-        Ext.RubbleApproachReason = "Within normal rubble approach range"
-        Ext.RubbleSafeApproachLastDistance = nil
-
-        -- 5.5 studs allows normal humanoid grounding/physics corrections.
-        -- Do not pull a character back into the wall because of 1-3 studs
-        -- of harmless discrepancy. M1 still operates within 12 studs.
-        if Distance <= 5.5 and Outside then
-            Ext.RubbleMotionState = "Arrived outside: holding for attacks"
-            return
-        end
-
-        -- Even if the goal is slightly off, avoid fighting another movement
-        -- controller when the character is on the correct, exterior side and
-        -- is already within the existing rubble attack range.
-        if Outside and Distance <= 10 then
-            Ext.RubbleMotionState = "Outside within attack range: holding"
-            return
-        end
-
-        local Now = os.clock()
-        local Delay = Ext.RubbleMoveAttempts == 0 and 0 or 3
-        if Now - Ext.RubbleLastMoveAt < Delay then
-            Ext.RubbleMotionState = "Waiting between reposition attempts"
-            return
-        end
-        if Ext.RubbleMoveAttempts >= 3 then
-            -- A permanent limit strands the character if a physics push or
-            -- an unreplicated collision blocked all first three attempts.
-            -- Allow another short burst only after 12 seconds, never a
-            -- heartbeat teleport loop.
-            if Now - Ext.RubbleLastMoveAt < 12 then
-                Ext.RubbleMotionState = "Waiting for safe 12s rubble retry"
-                return
-            end
-            Ext.RubbleMoveAttempts = 0
-            Ext.RubbleMotionState = "New limited rubble retry cycle"
-        end
-
-        Ext.RubbleLastMoveAt = Now
-        Ext.RubbleMoveAttempts = Ext.RubbleMoveAttempts + 1
-        if Settings.FarmMethod == "Tween" then
+        local J = Ext.RubbleJourney
+        local DifferentTarget = J and (
+            J.Blocker ~= Blocker
+            or J.Character ~= Root.Parent
+            or J.Area ~= Ext.RubbleLastArea
+            or J.Method ~= Settings.FarmMethod
+            or (J.Goal.Position - Goal.Position).Magnitude > 2
+        )
+        if DifferentTarget then
             if Ext.RubbleTween then
                 pcall(function() Ext.RubbleTween:Cancel() end)
+                Ext.RubbleTween = nil
             end
-            local Duration = math.clamp(Distance / 65, 0.2, 1.5)
+            Ext.SetTweenNoclipEnabled(false)
+            Ext.RubbleJourney = nil
+            Ext.RubbleLastDisplacement = nil
+            Ext.RubbleMoveAttempts = 0
+            J = nil
+        end
+
+        -- Goal is already about 3 studs IN FRONT of the visible rubble.
+        -- Let a Tween reach the goal instead of stopping far from the wall.
+        -- Require a short stable arrival period to catch server rollbacks.
+        if Outside and Distance <= 1.8 then
+            if Ext.RubbleTween then
+                pcall(function() Ext.RubbleTween:Cancel() end)
+                Ext.RubbleTween = nil
+            end
+            Ext.SetTweenNoclipEnabled(false)
+            if not J then
+                J = {
+                    Blocker = Blocker, Character = Root.Parent,
+                    Area = Ext.RubbleLastArea, Goal = Goal,
+                    Method = Settings.FarmMethod,
+                    State = "Near rubble", NearAt = Now,
+                    Attempts = 0, StartedAt = Now,
+                    Reason = "Within rubble attack position",
+                }
+                Ext.RubbleJourney = J
+            end
+            if not J.NearAt then
+                J.NearAt = Now
+            end
+            J.State = (Now - J.NearAt >= 0.65)
+                and "Arrived" or "Confirming arrival"
+            J.Reason = J.State
+            Ext.RubbleMotionState = J.State
+            Ext.RubbleApproachReason = J.Reason
+            Ext.RubbleUnsafeGoal = false
+            return
+        end
+
+        local function ClearActiveTween()
+            if Ext.RubbleTween then
+                pcall(function() Ext.RubbleTween:Cancel() end)
+                Ext.RubbleTween = nil
+            end
+            Ext.SetTweenNoclipEnabled(false)
+        end
+
+        -- Wait for an in-flight movement to finish before scheduling a retry.
+        -- The server may correct a sudden Teleport; a Tween might be rejected
+        -- at its end. Either outcome must not permanently disable farming.
+        if J then
+            if (J.State == "Moving" or J.State == "Settling")
+                and Now < (J.FinishAt or 0)
+            then
+                Ext.RubbleMotionState =
+                    J.Method .. " approach " .. tostring(J.Attempts or 1)
+                return
+            end
+
+            if J.State == "Moving" or J.State == "Settling"
+                or J.State == "Confirming arrival"
+                or J.State == "Near rubble"
+                or J.State == "Arrived"
+            then
+                ClearActiveTween()
+                local Attempts = math.max(J.Attempts or 1, 1)
+                local Delay = math.min(1.5 * (1.7 ^ math.min(Attempts - 1, 5)), 12)
+                J.State = "Retry cooldown"
+                J.NearAt = nil
+                J.NextRetryAt = Now + Delay
+                J.Reason = "Position moved away; retrying same rubble in "
+                    .. tostring(math.floor(Delay * 10) / 10) .. "s"
+                Ext.RubbleLastDisplacement = {
+                    at = Now,
+                    distance = Distance,
+                    secondsAfterMove = Now - (J.StartedAt or Now),
+                    position = Root.Position,
+                    area = Ext.ValidatedArea,
+                    attempt = Attempts,
+                }
+                warn("[Anime Zero][Rubble] Returned from rubble | distance:",
+                    math.floor(Distance * 10) / 10,
+                    "| attempt:", Attempts,
+                    "| retry in:", math.floor(Delay * 10) / 10, "seconds")
+            end
+            if Now < (J.NextRetryAt or 0) then
+                Ext.RubbleMotionState = J.Reason
+                Ext.RubbleApproachReason = J.Reason
+                return
+            end
+        end
+
+        -- Re-check area and rubble health BEFORE EACH attempt. An area change,
+        -- cleared rubble, or invalid goal may temporarily prevent travel, but
+        -- the guard is re-evaluated instead of permanently becoming Paused.
+        local Allowed, Reason = Ext.ValidateRubbleDirectRoute(
+            Root, Goal, Ext.RubbleLastArea
+        )
+        Ext.RubbleApproachReason = Reason
+        Ext.RubbleUnsafeGoal = not Allowed
+        if not Allowed then
+            ClearActiveTween()
+            if not J then
+                J = {
+                    Blocker = Blocker, Character = Root.Parent,
+                    Area = Ext.RubbleLastArea, Goal = Goal,
+                    Method = Settings.FarmMethod,
+                    Attempts = 0, StartedAt = Now,
+                }
+                Ext.RubbleJourney = J
+            end
+            J.State = "Waiting for valid rubble"
+            J.Reason = Reason
+            J.NextRetryAt = Now + 3
+            Ext.RubbleMotionState = "Waiting for valid rubble: " .. tostring(Reason)
+            if Now >= (J.NextWarnAt or 0) then
+                warn("[Anime Zero][Rubble] Waiting:", tostring(Reason))
+                J.NextWarnAt = Now + 12
+            end
+            return
+        end
+
+        local Method = Settings.FarmMethod == "Tween" and "Tween" or "Teleport"
+        local Duration = Method == "Tween"
+            and math.max(Distance / math.max(Settings.TweenSpeed or 95, 1), 0.12)
+            or 0.8
+        if not J then
+            J = {
+                Blocker = Blocker, Character = Root.Parent,
+                Area = Ext.RubbleLastArea, Goal = Goal, Method = Method,
+                Attempts = 0,
+            }
+            Ext.RubbleJourney = J
+        end
+        J.Attempts = (J.Attempts or 0) + 1
+        J.State = Method == "Tween" and "Moving" or "Settling"
+        J.FinishAt = Now + Duration + (Method == "Tween" and 0.35 or 0)
+        J.StartedAt = Now
+        J.NearAt = nil
+        J.NextRetryAt = nil
+        J.Reason = "Approach " .. tostring(J.Attempts)
+        Ext.RubbleMoveGoal = Goal.Position
+        Ext.RubbleMoveBlocker = Blocker
+        Ext.RubbleMoveCharacter = Root.Parent
+        Ext.RubbleMoveAttempts = J.Attempts
+        Ext.RubbleLastMoveAt = Now
+        Ext.RubbleMotionState = Method .. " approach " .. tostring(J.Attempts)
+        if Method == "Tween" then
+            Ext.SetTweenNoclipEnabled(true)
             local Tween = game:GetService("TweenService"):Create(
-                Root, TweenInfo.new(Duration, Enum.EasingStyle.Linear),
+                Root,
+                TweenInfo.new(Duration, Enum.EasingStyle.Linear,
+                    Enum.EasingDirection.Out),
                 {CFrame = Goal}
             )
             Ext.RubbleTween = Tween
@@ -34546,12 +34636,6 @@ local function ApplyFarmMovement(
         end
         LastTeleportGoal = Goal
         LastTeleportTime = Now
-        Ext.RubbleMotionState = "Exterior " .. Settings.FarmMethod .. " " .. tostring(Ext.RubbleMoveAttempts) .. "/3"
-        if Ext.RubbleMoveAttempts > 1 then
-            warn("[Anime Zero][Rubble] Reposition retry:",
-                Ext.RubbleMoveAttempts, "distance:", math.floor(Distance * 10) / 10,
-                "outside:", Outside)
-        end
         return
     end
 
@@ -34634,7 +34718,7 @@ local function ApplyFarmMovement(
 
 
     local Speed =
-        TWEEN_SPEED
+        Settings.TweenSpeed or TWEEN_SPEED
 
 
     if TargetAreaNumber
@@ -34657,7 +34741,7 @@ local function ApplyFarmMovement(
     then
 
         Speed =
-            AREA_TWEEN_SPEED
+            Settings.TweenSpeed or AREA_TWEEN_SPEED
     end
 
 
@@ -35706,6 +35790,7 @@ local function HandleAreaEntry(TargetArea)
         Entry.Goal = Goal
         Entry.Attempts = 0
         Entry.LastMoveAt = 0
+        Entry.MoveFinishAt = 0
     end
     if IsPlayerInsideArea(TargetArea) then
         Entry.Status = "Arrived at AREA " .. tostring(TargetArea) .. "; confirming"
@@ -35714,19 +35799,17 @@ local function HandleAreaEntry(TargetArea)
     end
 
     local Dist = (Root.Position - Entry.Goal.Position).Magnitude
-    if Dist > 85 then
-        Entry.Status = "AREA marker " .. tostring(math.floor(Dist)) .. " studs away: paused"
-        SetFarmMode("Area Marker Too Far")
-        return
-    end
+    -- The game itself chooses this marker, often far across the current map.
+    -- No arbitrary distance cutoff: the server area and marker label were
+    -- verified in GetGameAreaMarkerGoal.
     if Entry.Attempts >= 2 then
         Entry.Status = "Two entry attempts used; waiting for arrival confirmation"
         SetFarmMode("Area Marker Waiting")
         return
     end
     local Now = os.clock()
-    if Now - Entry.LastMoveAt < 3.5 then
-        Entry.Status = "AREA marker move settling"
+    if Now < (Entry.MoveFinishAt or (Entry.LastMoveAt + 3.5)) then
+        Entry.Status = "AREA marker movement in progress"
         SetFarmMode("Area Marker Waiting")
         return
     end
@@ -35738,14 +35821,17 @@ local function HandleAreaEntry(TargetArea)
         if Ext.AreaMarkerTween then
             pcall(function() Ext.AreaMarkerTween:Cancel() end)
         end
-        local Duration = math.clamp(Dist / 65, 0.2, 1.5)
+        local Duration = math.max(Dist / math.max(Settings.TweenSpeed or 95, 1), 0.12)
+        Entry.MoveFinishAt = Now + Duration + 1.0
         local Tween = game:GetService("TweenService"):Create(
             Root, TweenInfo.new(Duration, Enum.EasingStyle.Linear),
             {CFrame = Entry.Goal}
         )
         Ext.AreaMarkerTween = Tween
+        Ext.SetTweenNoclipEnabled(true)
         Tween:Play()
     else
+        Entry.MoveFinishAt = Now + 2.0
         Root.CFrame = Entry.Goal
         Root.AssemblyLinearVelocity = Vector3.zero
         Root.AssemblyAngularVelocity = Vector3.zero
@@ -36604,7 +36690,7 @@ GENV.__AZ_FARM_EXT.BindFarmHeartbeat = function()
 
                         pcall(function()
                             GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(
-                                false
+                                false, true
                             )
                         end)
 
