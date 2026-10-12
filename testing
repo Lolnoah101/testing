@@ -3554,14 +3554,14 @@ local Window =
 
         name = "Anime Zero",
 
-        subtitle = "Automation Suite - Raid Area Route",
+        subtitle = "Control Center  |  Gen2",
 
         -- Visible recovery pill when the full Rayfield window is hidden.
         showName = "Anime Zero",
 
         sidebarLayout = true,
 
-        theme = "amethyst",
+        theme = "cobalt",
 
         configuration = {
             autoSave = true,
@@ -3621,7 +3621,7 @@ end)()
 -- Sidebar grouping keeps the main automation tabs easy to scan.
 
 Window:CreateSection({
-    name = "Main",
+    name = "PLAY",
 })
 
 
@@ -4278,7 +4278,7 @@ LobbyTab:CreateDropdown({
 
 LobbyTab:CreateToggle({
 
-    name = "Auto Join Map",
+    name = "Auto Join Story",
     flag = "AutoJoinMap",
 
     value = Settings.AutoJoinMap,
@@ -4394,8 +4394,11 @@ LobbyTab:CreateToggle({
     end
 
 
+    LobbyTab:CreateSection({name = "End Actions"})
+    local EndActionsRow = LobbyTab:CreateGroup({direction = "row"})
+
     RetryToggle =
-        LobbyTab:CreateToggle({
+        EndActionsRow:CreateToggle({
 
             name = "Auto Retry",
             flag = "AutoRetry",
@@ -4441,7 +4444,7 @@ LobbyTab:CreateToggle({
 
 
     LeaveToggle =
-        LobbyTab:CreateToggle({
+        EndActionsRow:CreateToggle({
 
             name = "Auto Leave",
             flag = "AutoLeave",
@@ -4487,9 +4490,9 @@ LobbyTab:CreateToggle({
 
 
     NextToggle =
-        LobbyTab:CreateToggle({
+        EndActionsRow:CreateToggle({
 
-            name = "Auto Next (Story / Trials)",
+            name = "Auto Next",
             flag = "AutoNext",
 
             value =
@@ -4573,7 +4576,7 @@ LobbyTab:CreateToggle({
 
 
     LeaveAfterToggle =
-        LobbyTab:CreateToggle({
+        EndActionsRow:CreateToggle({
 
             name =
                 "Auto Leave After X Matches",
@@ -4628,10 +4631,6 @@ end)()
 --//============================================================
 --// ENDLESS SECTION
 --//============================================================
-
-LobbyTab:CreateDivider({
-    spacing = 16,
-})
 
 LobbyTab:CreateSection({
     name = "Endless",
@@ -4830,7 +4829,7 @@ LobbyTab:CreateInput({
 
 LobbyTab:CreateToggle({
 
-    name = "Auto Leave Run At Wave X",
+    name = "Leave At Wave",
     flag = "AutoLeaveEndlessAtWave",
 
     value =
@@ -4865,10 +4864,6 @@ LobbyTab:CreateToggle({
 --//============================================================
 --// RAID
 --//============================================================
-
-LobbyTab:CreateDivider({
-    spacing = 16,
-})
 
 LobbyTab:CreateSection({
     name = "Raid",
@@ -5009,15 +5004,13 @@ GENV.__AZ_GET_TOP_TRIALS_FLOOR = function()
     return floorOrError, nil
 end
 
-LobbyTab:CreateDivider({spacing = 16})
-LobbyTab:CreateSection({name = "Trials (2026 Update)"})
+LobbyTab:CreateSection({name = "Trials"})
 
 -- Scoped so the UI display handle does not increase the main Luau local
 -- register count in this already very large script.
 ;(function()
     local TrialsFloorDisplay = LobbyTab:CreateStat({
-        name = "Highest Unlocked Trials Floor",
-        description = "Automatically uses your current season progress when joining Trials",
+        name = "Trials Floor",
         value = 0,
     })
 
@@ -5043,7 +5036,6 @@ end)()
 LobbyTab:CreateToggle({
     name = "Auto Join Trials",
     flag = "AutoJoinTrials",
-    description = "Join the highest unlocked seasonal Trials floor automatically. Use Auto Next for subsequent floors.",
     value = Settings.AutoJoinTrials,
     callback = function(Value)
         local On = Value == true
@@ -5071,7 +5063,7 @@ LobbyTab:CreateToggle({
 
 --// One-click diagnostics: does not start or alter a queue.
 LobbyTab:CreateButton({
-    name = "Print Auto Join Diagnostics",
+    name = "Join Diagnostics",
     callback = function()
         local Probe = GENV.__AZ_AUTOJOIN_STATUS
         if type(Probe) ~= "function" then
@@ -5104,11 +5096,11 @@ LobbyTab:CreateButton({
 
 -- Start Game? YES appears at the beginning of Story/Hxh runs too.
 -- This is a match-wide vote, NOT a Trials-only feature.
-FarmTab:CreateSection({name = "Match Start"})
-FarmTab:CreateToggle({
-    name = "Auto Start Vote (Story / Trials / Raid)",
+FarmTab:CreateSection({name = "Farm Modes"})
+GENV.__AZ_UI_FARM_MODES = FarmTab:CreateGroup({direction = "row"})
+GENV.__AZ_UI_FARM_MODES:CreateToggle({
+    name = "Auto Start Vote",
     flag = "AutoStartVote",
-    description = "Vote Yes when the Start Game countdown appears in a run.",
     value = Settings.AutoStartVote,
     callback = function(Value)
         Settings.AutoStartVote = Value == true
@@ -5119,7 +5111,7 @@ FarmTab:CreateToggle({
     end,
 })
 FarmTab:CreateButton({
-    name = "Print Hxh Rubble Diagnostics",
+    name = "Rubble Diagnostics",
     callback = function()
         local Handler = GENV.__AZ_RUBBLE_STATUS
         if type(Handler) == "function" then
@@ -5130,10 +5122,9 @@ FarmTab:CreateButton({
     end,
 })
 
-FarmTab:CreateToggle({
+GENV.__AZ_UI_FARM_MODES:CreateToggle({
     name = "Stay Noclip",
     flag = "StayNoclip",
-    description = "Keeps all character parts non-collidable throughout the run, not just while Tween moves. Independent of Farm Method. Disable to restore collisions when not tweening. Be aware that you can fall through floors.",
     value = Settings.StayNoclip == true,
     callback = function(Value)
         local Enabled = Value == true
@@ -5152,12 +5143,10 @@ FarmTab:CreateToggle({
 })
 
 
-FarmTab:CreateToggle({
+GENV.__AZ_UI_FARM_MODES:CreateToggle({
 
     name = "Auto Farm",
     flag = "AutoFarm",
-
-    description = "Hxh / Endless only. Use Auto Trials Farm inside Trials.",
 
     value = Settings.AutoFarm,
 
@@ -5201,10 +5190,9 @@ FarmTab:CreateToggle({
 })
 
 
-FarmTab:CreateToggle({
+GENV.__AZ_UI_FARM_MODES:CreateToggle({
     name = "Auto Trials Farm",
     flag = "AutoTrialsFarm",
-    description = "Dedicated Trials enemy/room farm. Uses Auto M1 / Auto Skills, and advances to the Lift when a room clears. Independent from Hxh area recovery.",
     value = Settings.AutoTrialsFarm == true,
     callback = function(Value)
         Settings.AutoTrialsFarm = Value == true
@@ -5221,12 +5209,10 @@ FarmTab:CreateToggle({
     end,
 })
 
-FarmTab:CreateToggle({
+GENV.__AZ_UI_FARM_MODES:CreateToggle({
 
     name = "Auto Raid Farm",
     flag = "AutoRaidFarm",
-
-    description = "Raid farm for Spirit's Bathtub + Shadow Gate. Handles objectives, immunity, AOE dodge, and routing.",
 
     value = Settings.AutoRaidFarm,
 
@@ -5262,12 +5248,10 @@ FarmTab:CreateToggle({
 })
 
 
-FarmTab:CreateToggle({
+GENV.__AZ_UI_FARM_MODES:CreateToggle({
 
-    name = "Auto Arise (Sung Jinwoo)",
+    name = "Auto Arise",
     flag = "AutoArise",
-
-    description = "Automatically raises eligible defeated enemies as Sung Jinwoo without leaving the farm/dodge position.",
 
     value = Settings.AutoArise == true,
 
@@ -5295,7 +5279,7 @@ FarmTab:CreateToggle({
 })
 
 
-FarmTab:CreateToggle({
+GENV.__AZ_UI_FARM_MODES:CreateToggle({
 
     name = "Auto Pickup Loot",
     flag = "AutoPickupLoot",
@@ -5335,6 +5319,8 @@ FarmTab:CreateToggle({
 })
 
 
+FarmTab:CreateSection({name = "Movement"})
+
 FarmTab:CreateSlider({
 
     name = "Farm Distance",
@@ -5363,40 +5349,6 @@ FarmTab:CreateSlider({
                 Value
             )
         end
-    end,
-})
-
-
-FarmTab:CreateToggle({
-
-    name = "Auto M1",
-    flag = "AutoM1",
-
-    value = Settings.AutoM1,
-
-    callback = function(Value)
-
-        Settings.AutoM1 =
-            Value
-
-
-        if type(Settings.SetFarmUserPreference) == "function" then
-            Settings.SetFarmUserPreference(
-                "AutoM1",
-                Value == true
-            )
-        end
-
-
-        if Value then
-            NextM1RequestAt = 0
-        end
-
-
-        print(
-            "[Anime Zero] Auto M1:",
-            Value == true
-        )
     end,
 })
 
@@ -5486,7 +5438,6 @@ FarmTab:CreateDropdown({
 FarmTab:CreateSlider({
     name = "Tween Speed",
     flag = "TweenSpeed",
-    description = "Studs per second for Tween farming, rubble approaches and AREA-marker travel. Takes effect on the next direct Tween.",
     range = {20, 250},
     increment = 5,
     value = Settings.TweenSpeed,
@@ -5539,7 +5490,44 @@ FarmTab:CreateSlider({
 })
 
 
-FarmTab:CreateToggle({
+FarmTab:CreateSection({name = "Combat"})
+GENV.__AZ_UI_FARM_COMBAT = FarmTab:CreateGroup({direction = "row"})
+
+GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
+
+    name = "Auto M1",
+    flag = "AutoM1",
+
+    value = Settings.AutoM1,
+
+    callback = function(Value)
+
+        Settings.AutoM1 =
+            Value
+
+
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference(
+                "AutoM1",
+                Value == true
+            )
+        end
+
+
+        if Value then
+            NextM1RequestAt = 0
+        end
+
+
+        print(
+            "[Anime Zero] Auto M1:",
+            Value == true
+        )
+    end,
+})
+
+
+GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
     name = "Auto Skills",
     flag = "AutoSkills",
@@ -5603,7 +5591,7 @@ FarmTab:CreateDropdown({
 })
 
 
-FarmTab:CreateToggle({
+GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
     name = "Auto Ultimate",
     flag = "AutoUltimate",
@@ -5632,7 +5620,7 @@ FarmTab:CreateToggle({
 })
 
 
-FarmTab:CreateToggle({
+GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
     name = "Auto Block",
     flag = "AutoBlock",
@@ -5696,9 +5684,9 @@ FarmTab:CreateDropdown({
 })
 
 
-FarmTab:CreateToggle({
+GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
-    name = "Auto Dodge Raid AOE",
+    name = "Auto Dodge AOE",
     flag = "AutoDodgeRaidAOE",
 
     value = Settings.AutoDodgeRaidAOE ~= false,
@@ -10106,16 +10094,11 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
     --// WEAPON SPINS UI
     --//========================================================
 
-    LobbyTab:CreateDivider({
-        spacing = 16,
+    local WeaponsTab = Window:CreateTab({
+        name = "Spins",
     })
 
-    LobbyTab:CreateSection({
-        name = "Weapon Spins",
-    })
-
-    local WeaponsTab =
-        LobbyTab
+    WeaponsTab:CreateSection({name = "Character Spins"})
 
 
     WeaponsTab:CreateDropdown({
@@ -10242,7 +10225,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
     WeaponAutoToggle =
         WeaponsTab:CreateToggle({
 
-            name = "Auto Spin Weapon",
+            name = "Auto Spin",
             flag = "AutoSpinWeapon",
 
             value = false,
@@ -10288,16 +10271,11 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
     --// ITEM CRAFTING UI
     --//========================================================
 
-    LobbyTab:CreateDivider({
-        spacing = 16,
+    local CraftingTab = Window:CreateTab({
+        name = "Gear",
     })
 
-    LobbyTab:CreateSection({
-        name = "Item Crafting",
-    })
-
-    local CraftingTab =
-        LobbyTab
+    CraftingTab:CreateSection({name = "Crafting"})
 
 
     CraftingTab:CreateDropdown({
@@ -10325,7 +10303,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
     CraftToggle =
         CraftingTab:CreateToggle({
 
-            name = "Auto Craft Selected Item",
+            name = "Auto Craft",
             flag = "AutoCraftSelectedItem",
 
             value = false,
@@ -10342,16 +10320,9 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
     --// TRAIT SPINS UI
     --//========================================================
 
-    LobbyTab:CreateDivider({
-        spacing = 16,
-    })
+    local EnchantsTab = WeaponsTab
 
-    LobbyTab:CreateSection({
-        name = "Trait Spins",
-    })
-
-    local EnchantsTab =
-        LobbyTab
+    EnchantsTab:CreateSection({name = "Trait Spins"})
 
 
     EnchantsTab:CreateDropdown({
@@ -10395,7 +10366,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
     TraitAutoToggle =
         EnchantsTab:CreateToggle({
 
-            name = "Auto Spin Traits",
+            name = "Auto Trait Spin",
             flag = "AutoSpinTraits",
 
             value = false,
@@ -10491,16 +10462,9 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
     --// EVOLVE UI
     --//========================================================
 
-    LobbyTab:CreateDivider({
-        spacing = 16,
-    })
+    local EvolutionsTab = CraftingTab
 
-    LobbyTab:CreateSection({
-        name = "Evolve",
-    })
-
-    local EvolutionsTab =
-        LobbyTab
+    EvolutionsTab:CreateSection({name = "Evolution"})
 
 
     EvolutionDropdown =
@@ -10533,7 +10497,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
     EvolutionAutoToggle =
         EvolutionsTab:CreateToggle({
 
-            name = "Auto Evolve",
+            name = "Evolve Selected Slot",
             flag = "AutoEvolve",
 
             value = false,
@@ -12092,7 +12056,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
         end)
 
         Window:CreateSection({
-            name = "Utilities",
+            name = "TOOLS",
         })
 
         local PlayerTab =
@@ -12128,11 +12092,11 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             })
 
         MiscTab:CreateSection({
-            name = "Rewards & Quests",
+            name = "Rewards",
         })
 
         MiscTab:CreateButton({
-            name = "Auto Redeem All Codes",
+            name = "Redeem Codes",
             callback = function()
                 local Handler =
                     GENV.__AZ_PLAYER_MISC_REDEEM_FUNCTION
@@ -12149,7 +12113,9 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             end,
         })
 
-        MiscTab:CreateToggle({
+        local RewardsRow = MiscTab:CreateGroup({direction = "row"})
+
+        RewardsRow:CreateToggle({
             name = "Auto Claim Milestones",
             flag = "AutoClaimMilestones",
             value =
@@ -12167,7 +12133,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             end,
         })
 
-        MiscTab:CreateToggle({
+        RewardsRow:CreateToggle({
             name = "Auto Claim Daily Quests",
             flag = "AutoClaimDailyQuests",
             value =
@@ -12185,7 +12151,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             end,
         })
 
-        MiscTab:CreateToggle({
+        RewardsRow:CreateToggle({
             name = "Auto Claim Daily Rewards",
             flag = "AutoClaimDailyRewards",
             value =
@@ -12203,7 +12169,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             end,
         })
 
-        MiscTab:CreateToggle({
+        RewardsRow:CreateToggle({
             name = "Auto Claim Achievements",
             flag = "AutoClaimAchievements",
             value =
@@ -12221,7 +12187,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             end,
         })
 
-        MiscTab:CreateToggle({
+        RewardsRow:CreateToggle({
             name = "Auto Delivery Quest",
             flag = "AutoDeliveryQuest",
             value =
@@ -12499,7 +12465,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
         GENV.__AZ_TITLE_AUTOMATION_UI_QUEUE = nil
 
         Window:CreateSection({
-            name = "Automation",
+            name = "AUTOMATION",
         })
 
         local AutomationTab =
@@ -13047,1763 +13013,291 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
 
         --//====================================================
-        --// MAIN AUTOMATION CONTROLLER
+        --// SIMPLE AUTOMATION: SELECT TARGETS + TOGGLE
+        --// The farm/craft/grinder engines remain unchanged and retain
+        --// their own cross-place persistence. No master mode, queue,
+        --// duplicate single-title switch, or hidden Run button.
         --//====================================================
 
         ;(function()
-
-            local ModeOptions = {
-                "Off",
-                "Title Grinder",
-                "Multi-Title Grinder",
-                "Accessory Farm & Craft",
-                "Full Auto Evolve",
-                "Achievement Grinder",
-                "Automation Queue",
-                "Auto Accessory Loadout",
-                "Daily Routine",
-            }
-
-
-            local ValidModes = {}
-
-
-            for _, Name in ipairs(
-                ModeOptions
-            ) do
-
-                ValidModes[Name] =
-                    true
-            end
-
-
-            if not ValidModes[
-                AdvancedAutomationSettings
-                    .AutomationMode
-            ]
-            then
-
-                AdvancedAutomationSettings
-                    .AutomationMode =
-                    "Title Grinder"
-            end
-
-
-            local Master =
-                GENV.__AZ_MASTER_AUTOMATION_SETTINGS
-                or {}
-
-
-            Master.PriorityManager =
-                true
-
-            Master.ReserveNeededMaterials =
-                true
-
-            Master.DailyRoutine =
-                false
-
-
-            GENV.__AZ_MASTER_AUTOMATION_SETTINGS =
-                Master
-
-            GENV.__AZ_MASTER_AUTOMATION_STATUS_FUNCTION =
-                nil
-
-
-            local function SaveTitleState()
-
-                local Persist =
-                    GENV.__AZ_TITLE_AUTOMATION_PERSIST_FUNCTION
-
-
-                if type(Persist) == "function" then
-                    pcall(Persist)
-                end
-
-
-                local SaveUI =
-                    GENV.__AZ_TITLE_UI_SAVE_FUNCTION
-
-
-                if type(SaveUI) == "function" then
-
-                    pcall(
-                        SaveUI,
-                        TitleAutomationSettings
-                    )
-                end
-            end
-
-
-            local function SaveAccessoryState()
-
-                local Persist =
-                    GENV.__AZ_ACCESSORY_AUTOMATION_PERSIST_FUNCTION
-
-
-                if type(Persist) == "function" then
-                    pcall(Persist)
-                end
-            end
-
-
-            local function ApplyMaterialStrategy()
-
-                local Strategy =
-                    AdvancedAutomationSettings
-                        .MaterialStrategy
-
-
-                Master.AutoBuyMissingMaterials =
-                    Strategy == "Buy Missing"
-                    or Strategy == "Buy + Convert"
-
-                Master.AutoConvertMissingMaterials =
-                    Strategy == "Convert Missing"
-                    or Strategy == "Buy + Convert"
-
-                Master.ReserveNeededMaterials =
-                    true
-
-                Master.PriorityManager =
-                    true
-            end
-
-
-            local function StopAllModes()
-
-                GENV.__AZ_MAIN_CONTROLLER_APPLYING =
-                    true
-
-
-                TitleAutomationSettings
-                    .AutoGrindTitle =
-                    false
-
-                SaveTitleState()
-
-
-                local Accessory =
-                    GENV.__AZ_ACCESSORY_AUTOMATION_SETTINGS
-
-
-                if type(Accessory) == "table" then
-
-                    Accessory.AutoCraftAccessories =
-                        false
-
-                    SaveAccessoryState()
-                end
-
-
-                AdvancedAutomationSettings
-                    .AutoFullEvolve =
-                    false
-
-                AdvancedAutomationSettings
-                    .AutoMultiTitle =
-                    false
-
-                AdvancedAutomationSettings
-                    .AutoAchievementGrinder =
-                    false
-
-                AdvancedAutomationSettings
-                    .AutoAccessoryLoadout =
-                    false
-
-                AdvancedAutomationSettings
-                    .AutoQueue =
-                    false
-
-
-                Master.DailyRoutine =
-                    false
-
-
-                local AdvancedStop =
-                    GENV.__AZ_ADVANCED_AUTOMATION_STOP_FUNCTION
-
-
-                if type(AdvancedStop) == "function" then
-                    pcall(AdvancedStop)
-                end
-
-
-                GENV.__AZ_MAIN_CONTROLLER_APPLYING =
-                    false
-
-
-                PersistAdvanced()
-            end
-
-
-            local function StartSelectedMode()
-
-                StopAllModes()
-
-                ApplyMaterialStrategy()
-
-
-                local Mode =
-                    AdvancedAutomationSettings
-                        .AutomationMode
-
-
-                if Mode == "Off" then
-
-                    AdvancedAutomationSettings
-                        .RunAutomation =
-                        false
-
-                    PersistAdvanced()
-
-
-                    local Toggle =
-                        GENV.__AZ_MAIN_AUTOMATION_RUN_TOGGLE
-
-
-                    if Toggle then
-
-                        task.defer(function()
-
-                            pcall(function()
-
-                                Toggle:Set(
-                                    false
-                                )
-                            end)
-                        end)
-                    end
-
-
-                    return false
-                end
-
-
-                GENV.__AZ_MAIN_CONTROLLER_APPLYING =
-                    true
-
-
-                if Mode == "Title Grinder" then
-
-                    TitleAutomationSettings
-                        .AutoGrindTitle =
-                        true
-
-                    SaveTitleState()
-
-
-                elseif Mode == "Multi-Title Grinder" then
-
-                    AdvancedAutomationSettings
-                        .AutoMultiTitle =
-                        true
-
-
-                elseif Mode == "Accessory Farm & Craft" then
-
-                    local Accessory =
-                        GENV.__AZ_ACCESSORY_AUTOMATION_SETTINGS
-
-
-                    if type(Accessory) == "table" then
-
-                        Accessory.AutoCraftAccessories =
-                            true
-
-                        SaveAccessoryState()
-                    end
-
-
-                elseif Mode == "Full Auto Evolve" then
-
-                    AdvancedAutomationSettings
-                        .AutoFullEvolve =
-                        true
-
-
-                elseif Mode == "Achievement Grinder" then
-
-                    AdvancedAutomationSettings
-                        .AutoAchievementGrinder =
-                        true
-
-
-                elseif Mode == "Automation Queue" then
-
-                    if (
-                        tonumber(
-                            AdvancedAutomationSettings
-                                .QueueIndex
-                        ) or 1
-                    ) > 5
-                    then
-
-                        AdvancedAutomationSettings
-                            .QueueIndex =
-                            1
-                    end
-
-
-                    AdvancedAutomationSettings
-                        .AutoQueue =
-                        true
-
-
-                elseif Mode == "Auto Accessory Loadout" then
-
-                    AdvancedAutomationSettings
-                        .AutoAccessoryLoadout =
-                        true
-
-
-                elseif Mode == "Daily Routine" then
-
-                    Master.DailyRoutine =
-                        true
-                end
-
-
-                GENV.__AZ_MAIN_CONTROLLER_APPLYING =
-                    false
-
-
-                AdvancedAutomationSettings
-                    .RunAutomation =
-                    true
-
-
-                PersistAdvanced()
-
-
-                return true
-            end
-
-
-            GENV.__AZ_MAIN_AUTOMATION_START_SELECTED =
-                StartSelectedMode
-
-            GENV.__AZ_MAIN_AUTOMATION_STOP_ALL =
-                StopAllModes
-
-
-            GENV.__AZ_MAIN_AUTOMATION_FINISHED =
-                function(Mode)
-
-                    if GENV.__AZ_MAIN_CONTROLLER_APPLYING
-                        == true
-                    then
-
-                        return
-                    end
-
-
-                    if AdvancedAutomationSettings
-                        .RunAutomation
-                        ~= true
-                        or AdvancedAutomationSettings
-                            .AutomationMode
-                            ~= Mode
-                    then
-
-                        return
-                    end
-
-
-                    AdvancedAutomationSettings
-                        .RunAutomation =
-                        false
-
-
-                    PersistAdvanced()
-
-
-                    local Toggle =
-                        GENV.__AZ_MAIN_AUTOMATION_RUN_TOGGLE
-
-
-                    if Toggle then
-
-                        task.defer(function()
-
-                            pcall(function()
-
-                                Toggle:Set(
-                                    false
-                                )
-                            end)
-                        end)
-
-                    else
-
-                        StopAllModes()
-                    end
-                end
-
-
-            AutomationTab:CreateSection({
-                name = "Controller",
-            })
-
-
-            AutomationTab:CreateDropdown({
-                name = "Automation Mode",
-                flag = "MainAutomationMode",
-                options = ModeOptions,
-                value =
-                    AdvancedAutomationSettings
-                        .AutomationMode,
-                callback = function(Value)
-
-                    local Selection =
-                        GetSingleSelection(Value)
-                        or tostring(Value)
-
-
-                    if not ValidModes[
-                        Selection
-                    ]
-                    then
-                        return
-                    end
-
-
-                    AdvancedAutomationSettings
-                        .AutomationMode =
-                        Selection
-
-
-                    if AdvancedAutomationSettings
-                        .RunAutomation
-                        == true
-                    then
-
-                        StartSelectedMode()
-
-                    else
-
-                        PersistAdvanced()
-                    end
-                end,
-            })
-
-
-            GENV.__AZ_MAIN_AUTOMATION_RUN_TOGGLE =
-                AutomationTab:CreateToggle({
-                    name = "Run Automation",
-                    flag = "MainRunAutomation",
-                    value =
-                        AdvancedAutomationSettings
-                            .RunAutomation
-                        == true,
-                    callback = function(Value)
-
-                        if Value == true then
-
-                            if not StartSelectedMode() then
-
-                                local Toggle =
-                                    GENV.__AZ_MAIN_AUTOMATION_RUN_TOGGLE
-
-
-                                if Toggle then
-
-                                    task.defer(function()
-
-                                        pcall(function()
-
-                                            Toggle:Set(
-                                                false
-                                            )
-                                        end)
-                                    end)
-                                end
-                            end
-
-                        else
-
-                            AdvancedAutomationSettings
-                                .RunAutomation =
-                                false
-
-                            StopAllModes()
-
-                            PersistAdvanced()
-                        end
-                    end,
-                })
-
-
-            AutomationTab:CreateDropdown({
-                name = "Material Handling",
-                flag = "AutomationMaterialStrategy",
-                options = {
-                    "Farm Only",
-                    "Buy Missing",
-                    "Convert Missing",
-                    "Buy + Convert",
-                },
-                value =
-                    AdvancedAutomationSettings
-                        .MaterialStrategy,
-                callback = function(Value)
-
-                    local Selection =
-                        GetSingleSelection(Value)
-                        or tostring(Value)
-
-
-                    if Selection == "Farm Only"
-                        or Selection == "Buy Missing"
-                        or Selection == "Convert Missing"
-                        or Selection == "Buy + Convert"
-                    then
-
-                        AdvancedAutomationSettings
-                            .MaterialStrategy =
-                            Selection
-
-                        ApplyMaterialStrategy()
-
-                        PersistAdvanced()
-                    end
-                end,
-            })
-
-
-            AutomationTab:CreateButton({
-                name = "Show Automation Status",
-                callback = function()
-
-                    local Mode =
-                        AdvancedAutomationSettings
-                            .AutomationMode
-
-                    local Handler = nil
-
-
-                    if Mode == "Title Grinder" then
-
-                        Handler =
-                            GENV.__AZ_TITLE_AUTOMATION_PROGRESS_FUNCTION
-
-
-                    elseif Mode == "Multi-Title Grinder" then
-
-                        Handler =
-                            GENV.__AZ_MULTI_TITLE_STATUS_FUNCTION
-
-
-                    elseif Mode == "Accessory Farm & Craft" then
-
-                        Handler =
-                            GENV.__AZ_ACCESSORY_AUTOMATION_STATUS_FUNCTION
-
-
-                    elseif Mode == "Full Auto Evolve" then
-
-                        Handler =
-                            GENV.__AZ_FULL_EVOLVE_STATUS_FUNCTION
-
-
-                    elseif Mode == "Achievement Grinder" then
-
-                        Handler =
-                            GENV.__AZ_ACHIEVEMENT_GRINDER_STATUS_FUNCTION
-
-
-                    elseif Mode == "Automation Queue" then
-
-                        Handler =
-                            GENV.__AZ_AUTOMATION_QUEUE_STATUS_FUNCTION
-
-
-                    elseif Mode == "Auto Accessory Loadout" then
-
-                        Handler =
-                            GENV.__AZ_ACCESSORY_LOADOUT_STATUS_FUNCTION
-
-
-                    elseif Mode == "Daily Routine" then
-
-                        Handler =
-                            GENV.__AZ_MASTER_AUTOMATION_STATUS_FUNCTION
-                    end
-
-
-                    if type(Handler) == "function" then
-
-                        task.spawn(
-                            Handler
-                        )
-
-                    else
-
-                        QueueNotification(
-                            "Automation",
-                            Mode == "Off"
-                                and "Automation Mode is Off."
-                                or (
-                                    tostring(Mode)
-                                    .. " is still loading."
-                                ),
-                            4
-                        )
-                    end
-                end,
-            })
-
-
-            ApplyMaterialStrategy()
-
+            local Master = GENV.__AZ_MASTER_AUTOMATION_SETTINGS or {}
+            Master.PriorityManager = true
+            Master.ReserveNeededMaterials = true
+            Master.AutoBuyMissingMaterials = false
+            Master.AutoConvertMissingMaterials = false
+            Master.DailyRoutine = false
+            GENV.__AZ_MASTER_AUTOMATION_SETTINGS = Master
+
+            -- Old master-mode persistence must not launch another automation
+            -- behind the user's new direct toggles on the next teleport.
+            AdvancedAutomationSettings.RunAutomation = false
+            AdvancedAutomationSettings.AutomationMode = "Off"
+            AdvancedAutomationSettings.AutoQueue = false
+            AdvancedAutomationSettings.AutoAccessoryLoadout = false
+            PersistAdvanced()
+
+            -- Workers that finish automatically notify their own UI queue.
+            GENV.__AZ_MAIN_AUTOMATION_START_SELECTED = nil
+            GENV.__AZ_MAIN_AUTOMATION_STOP_ALL = nil
+            GENV.__AZ_MAIN_AUTOMATION_FINISHED = function() end
         end)()
 
+        local function SaveTitleAutomation()
+            local Save = GENV.__AZ_TITLE_AUTOMATION_PERSIST_FUNCTION
+            if type(Save) == "function" then pcall(Save) end
+            Save = GENV.__AZ_TITLE_UI_SAVE_FUNCTION
+            if type(Save) == "function" then
+                pcall(Save, TitleAutomationSettings)
+            end
+        end
 
-        AutomationTab:CreateDivider({
-            spacing = 16,
-        })
-
-
-        AutomationTab:CreateSection({
-            name = "Title Grinder",
-        })
-
-        local TitleDropdown =
-            AutomationTab:CreateDropdown({
-            name = "Title",
-            flag = "TitleGrinderTitle",
-            options = {
-                "Cosmic Warrior",
-                "Rubber Man",
-                "Thunder Prodigy",
-                "Twisted Agony",
-                "Lights of Divinity",
-                "Divine Emperor",
-                "Dragon Eclipse",
-                "Kings Gambit",
-                "Immortal Sovereign",
-                "Cursed King",
-                "Cataclysm",
-                "Dungeon Legend",
-                "Hoarder",
-                "Beyond Limits",
-                "Millionaire",
-                "Paramita Pyre",
-            },
-            value = TitleAutomationSettings.SelectedTitle,
-            callback = function(Value)
-                local Selection = GetSingleSelection(Value)
-                    or tostring(Value)
-
-                if Selection and Selection ~= "" then
-                    TitleAutomationSettings.SelectedTitle = Selection
-
-                    local Persist =
-                        GENV.__AZ_TITLE_AUTOMATION_PERSIST_FUNCTION
-
-                    if type(Persist) == "function" then
-                        Persist()
-                    end
-                end
-                local SaveTitleUI =
-                    GENV.__AZ_TITLE_UI_SAVE_FUNCTION
-                
-                if type(SaveTitleUI) == "function" then
-                    SaveTitleUI(
-                        TitleAutomationSettings
-                    )
+        -- The multi-title worker updates this single active title internally;
+        -- there is no second title picker for the user to manage.
+        local TitleDropdown = {
+            Set = function(_, Value)
+                if type(Value) == "string" then
+                    TitleAutomationSettings.SelectedTitle = Value
                 end
             end,
-        })
-
-        AutomationTab:CreateDropdown({
-            name = "Title Weapon Slot",
-            flag = "TitleGrinderWeaponSlot",
-            options = {
-                "Slot 1",
-                "Slot 2",
-                "Slot 3",
-                "Slot 4",
-            },
-            value = "Slot " .. tostring(TitleAutomationSettings.WeaponSlot or 1),
-            callback = function(Value)
-                local Selection = GetSingleSelection(Value)
-                    or tostring(Value)
-
-                TitleAutomationSettings.WeaponSlot =
-                    tonumber(tostring(Selection):match("%d+")) or 1
-
-                local Persist =
-                    GENV.__AZ_TITLE_AUTOMATION_PERSIST_FUNCTION
-
-                if type(Persist) == "function" then
-                    Persist()
-                end
-                local SaveTitleUI =
-                    GENV.__AZ_TITLE_UI_SAVE_FUNCTION
-                
-                if type(SaveTitleUI) == "function" then
-                    SaveTitleUI(
-                        TitleAutomationSettings
-                    )
-                end
-            end,
-        })
-
-        AutomationTab:CreateDropdown({
-            name = "After Title Unlock",
-            flag = "TitleEquipMode",
-            options = {
-                "Equip Title",
-                "Do Not Equip",
-            },
-            value =
-                TitleAutomationSettings.AutoEquipTitle ~= false
-                and "Equip Title"
-                or "Do Not Equip",
-            callback = function(Value)
-
-                local Selection =
-                    GetSingleSelection(Value)
-                    or tostring(Value)
-
-
-                TitleAutomationSettings.AutoEquipTitle =
-                    Selection == "Equip Title"
-
-
-                local Persist =
-                    GENV.__AZ_TITLE_AUTOMATION_PERSIST_FUNCTION
-
-
-                if type(Persist) == "function" then
-                    pcall(Persist)
-                end
-
-
-                local SaveTitleUI =
-                    GENV.__AZ_TITLE_UI_SAVE_FUNCTION
-
-
-                if type(SaveTitleUI) == "function" then
-
-                    pcall(
-                        SaveTitleUI,
-                        TitleAutomationSettings
-                    )
-                end
-            end,
-        })
-
+        }
         local TitleAutoToggle = {
             Set = function(_, Value)
-
-                TitleAutomationSettings.AutoGrindTitle =
-                    Value == true
-
-
-                local Persist =
-                    GENV.__AZ_TITLE_AUTOMATION_PERSIST_FUNCTION
-
-
-                if type(Persist) == "function" then
-                    pcall(Persist)
-                end
-
-
-                local SaveTitleUI =
-                    GENV.__AZ_TITLE_UI_SAVE_FUNCTION
-
-
-                if type(SaveTitleUI) == "function" then
-
-                    pcall(
-                        SaveTitleUI,
-                        TitleAutomationSettings
-                    )
-                end
-
-
-                if Value ~= true then
-
-                    local Finished =
-                        GENV.__AZ_MAIN_AUTOMATION_FINISHED
-
-
-                    if type(Finished) == "function" then
-                        Finished("Title Grinder")
-                    end
-                end
+                TitleAutomationSettings.AutoGrindTitle = Value == true
+                SaveTitleAutomation()
             end,
         }
 
-
-        
-
-        --//====================================================
-        --// ACCESSORY AUTOMATION UI
-        --//====================================================
-
-        AutomationTab:CreateDivider({
-            spacing = 16,
+        --// TITLE GRINDER
+        AutomationTab:CreateSection({name = "Title Grinder"})
+        local TitleChoices = {
+            "Cosmic Warrior", "Rubber Man", "Thunder Prodigy",
+            "Twisted Agony", "Lights of Divinity", "Divine Emperor",
+            "Dragon Eclipse", "Kings Gambit", "Immortal Sovereign",
+            "Cursed King", "Cataclysm", "Dungeon Legend",
+            "Hoarder", "Beyond Limits", "Millionaire", "Paramita Pyre",
+        }
+        -- Migrate a previous single-title choice into the new multi-select.
+        if next(AdvancedAutomationSettings.MultiTitleTargets) == nil
+            and type(TitleAutomationSettings.SelectedTitle) == "string"
+        then
+            AdvancedAutomationSettings.MultiTitleTargets[
+                TitleAutomationSettings.SelectedTitle
+            ] = true
+        end
+        -- Migrate the legacy standalone title switch into this one toggle.
+        if TitleAutomationSettings.AutoGrindTitle == true then
+            AdvancedAutomationSettings.AutoMultiTitle = true
+        end
+        AutomationTab:CreateDropdown({
+            name = "Titles",
+            flag = "MultiTitleTargets",
+            options = TitleChoices,
+            multiSelect = true,
+            value = AdvancedSelectedArray(
+                AdvancedAutomationSettings.MultiTitleTargets, TitleChoices
+            ),
+            callback = function(Value)
+                AdvancedAutomationSettings.MultiTitleTargets = AdvancedReadMulti(Value)
+                PersistAdvanced()
+            end,
+        })
+        local MultiTitleToggle
+        MultiTitleToggle = AutomationTab:CreateToggle({
+            name = "Auto Farm Titles",
+            flag = "SimpleAutoTitles",
+            value = AdvancedAutomationSettings.AutoMultiTitle == true,
+            callback = function(Value)
+                local Enabled = Value == true
+                if Enabled and next(AdvancedAutomationSettings.MultiTitleTargets) == nil then
+                    QueueNotification("Title Grinder", "Select at least one title.", 4)
+                    task.defer(function()
+                        if MultiTitleToggle then pcall(function()
+                            MultiTitleToggle:Set(false)
+                        end) end
+                    end)
+                    return
+                end
+                AdvancedAutomationSettings.AutoMultiTitle = Enabled
+                if not Enabled then
+                    TitleAutomationSettings.AutoGrindTitle = false
+                    SaveTitleAutomation()
+                end
+                PersistAdvanced()
+            end,
         })
 
-        AutomationTab:CreateSection({
-            name = "Accessory Automation",
-        })
-
-        local PreviousAccessoryAutomationSettings =
-            GENV.__AZ_ACCESSORY_AUTOMATION_SETTINGS
-            or {}
-
+        --// ACCESSORY FARM: always craft only unowned selected accessories.
+        AutomationTab:CreateSection({name = "Accessory Farm"})
+        local PreviousAccessory = GENV.__AZ_ACCESSORY_AUTOMATION_SETTINGS or {}
         local AccessoryAutomationSettings = {
             SelectedAccessories =
-                type(PreviousAccessoryAutomationSettings.SelectedAccessories) == "table"
-                and PreviousAccessoryAutomationSettings.SelectedAccessories
-                or {},
-            AutoCraftAccessories =
-                PreviousAccessoryAutomationSettings.AutoCraftAccessories
-                == true,
-            CraftOneEach =
-                PreviousAccessoryAutomationSettings.CraftOneEach
-                ~= false,
-            Snapshot =
-                type(PreviousAccessoryAutomationSettings.Snapshot) == "table"
-                and PreviousAccessoryAutomationSettings.Snapshot
-                or nil,
+                type(PreviousAccessory.SelectedAccessories) == "table"
+                and PreviousAccessory.SelectedAccessories or {},
+            AutoCraftAccessories = PreviousAccessory.AutoCraftAccessories == true,
+            CraftOneEach = true,
+            Snapshot = type(PreviousAccessory.Snapshot) == "table"
+                and PreviousAccessory.Snapshot or nil,
         }
-
-        GENV.__AZ_ACCESSORY_AUTOMATION_SETTINGS =
-            AccessoryAutomationSettings
-
+        GENV.__AZ_ACCESSORY_AUTOMATION_SETTINGS = AccessoryAutomationSettings
         GENV.__AZ_ACCESSORY_AUTOMATION_STATUS_FUNCTION = nil
         GENV.__AZ_ACCESSORY_AUTOMATION_PERSIST_FUNCTION = nil
         GENV.__AZ_ACCESSORY_AUTOMATION_UI_QUEUE = nil
 
-        local InitialAccessorySelection = {}
-
-        for Name, Selected in pairs(
-            AccessoryAutomationSettings.SelectedAccessories
-        ) do
-            if Selected == true then
-                table.insert(
-                    InitialAccessorySelection,
-                    Name
-                )
-            end
+        local AccessoryChoices = {
+            "Leaf Shinobi Headband", "Gentleman's Top Hat", "Capsule Scarf",
+            "8th Brigade Fire Hat", "SunGlasses", "Kitsune Mask",
+            "Diva Headphones", "Panther Hollow Mask", "Light Admiral Cloak",
+            "Wind Spirit Wing", "Dark Captain Wings", "Flame Pirate Hat",
+            "Blast Archer Crown", "Blast Archer Wings",
+        }
+        local function SaveAccessoryAutomation()
+            local Save = GENV.__AZ_ACCESSORY_AUTOMATION_PERSIST_FUNCTION
+            if type(Save) == "function" then pcall(Save) end
         end
-
         AutomationTab:CreateDropdown({
             name = "Accessories",
             flag = "AccessoryAutomationTargets",
-            options = {
-                "Leaf Shinobi Headband",
-                "Gentleman's Top Hat",
-                "Capsule Scarf",
-                "8th Brigade Fire Hat",
-                "SunGlasses",
-                "Kitsune Mask",
-                "Diva Headphones",
-                "Panther Hollow Mask",
-                "Light Admiral Cloak",
-                "Wind Spirit Wing",
-                "Dark Captain Wings",
-                "Flame Pirate Hat",
-                "Blast Archer Crown",
-                "Blast Archer Wings",
-            },
+            options = AccessoryChoices,
             multiSelect = true,
-            value = InitialAccessorySelection,
+            value = AdvancedSelectedArray(
+                AccessoryAutomationSettings.SelectedAccessories, AccessoryChoices
+            ),
             callback = function(Value)
-                local Selected = {}
+                AccessoryAutomationSettings.SelectedAccessories = AdvancedReadMulti(Value)
+                SaveAccessoryAutomation()
+            end,
+        })
+        local AccessoryAutoToggle
+        AccessoryAutoToggle = AutomationTab:CreateToggle({
+            name = "Auto Farm & Craft",
+            flag = "SimpleAutoAccessories",
+            value = AccessoryAutomationSettings.AutoCraftAccessories == true,
+            callback = function(Value)
+                local Enabled = Value == true
+                if Enabled and next(AccessoryAutomationSettings.SelectedAccessories) == nil then
+                    QueueNotification("Accessory Farm", "Select accessories first.", 4)
+                    task.defer(function()
+                        if AccessoryAutoToggle then pcall(function()
+                            AccessoryAutoToggle:Set(false)
+                        end) end
+                    end)
+                    return
+                end
+                AccessoryAutomationSettings.CraftOneEach = true
+                AccessoryAutomationSettings.AutoCraftAccessories = Enabled
+                SaveAccessoryAutomation()
+            end,
+        })
 
-                if typeof(Value) == "table" then
-                    for Key, Entry in pairs(Value) do
-                        if typeof(Key) == "number"
-                            and typeof(Entry) == "string"
-                        then
-                            Selected[Entry] = true
-                        elseif typeof(Key) == "string"
-                            and Entry == true
-                        then
-                            Selected[Key] = true
+        --// ACHIEVEMENTS: the grinder reads every supported objective from
+        -- the game's actual achievementConfig, not a manually managed list.
+        AutomationTab:CreateSection({name = "Achievement Grinder"})
+        AdvancedAutomationSettings.AutoClaimAchievementRewards = true
+        local AchievementGrinderToggle
+        AchievementGrinderToggle = AutomationTab:CreateToggle({
+            name = "Auto Grind Achievements",
+            flag = "SimpleAutoAchievements",
+            value = AdvancedAutomationSettings.AutoAchievementGrinder == true,
+            callback = function(Value)
+                AdvancedAutomationSettings.AutoAchievementGrinder = Value == true
+                AdvancedAutomationSettings.AutoClaimAchievementRewards = true
+                PersistAdvanced()
+            end,
+        })
+
+        --// AUTO EVOLVE: one toggle. It automatically selects owned,
+        --// unevolved characters; no character-slot/dropdown required.
+        AutomationTab:CreateSection({name = "Auto Evolve"})
+        -- Never turn on character acquisition from an old saved option.
+        AdvancedAutomationSettings.EvolutionAcquireMissing = false
+        local EvolutionChoices = {
+            "Rubber Man", "Cosmic Warrior", "Thunder Prodigy",
+            "Twisted Agony", "Kings Gambit", "Lights of Divinity",
+            "Dragon Eclipse", "Immortal Sovereign", "Cursed King",
+            "Divine Emperor", "Cataclysm", "Paramita Pyre",
+        }
+        local FullEvolveToggle
+        FullEvolveToggle = AutomationTab:CreateToggle({
+            name = "Auto Evolve",
+            flag = "SimpleAutoEvolve",
+            value = AdvancedAutomationSettings.AutoFullEvolve == true,
+            callback = function(Value)
+                local Enabled = Value == true
+                -- Achievement Grinder sometimes delegates just one evolution
+                -- target. Don't override its selection during delegation.
+                if Enabled and not AdvancedAutomationSettings.AutoAchievementGrinder then
+                    local Targets = {}
+                    for _, Name in ipairs(EvolutionChoices) do Targets[Name] = true end
+                    AdvancedAutomationSettings.EvolutionTargets = Targets
+                    -- Do not automatically spend spins to unlock new units.
+                    AdvancedAutomationSettings.EvolutionAcquireMissing = false
+                end
+                AdvancedAutomationSettings.AutoFullEvolve = Enabled
+                PersistAdvanced()
+            end,
+        })
+
+        -- Hidden legacy modes are deliberately off. These small adapters
+        -- only handle late status requests from preserved background engines.
+        local AccessoryLoadoutToggle = {
+            Set = function() AdvancedAutomationSettings.AutoAccessoryLoadout = false end,
+        }
+        local AutomationQueueToggle = {
+            Set = function() AdvancedAutomationSettings.AutoQueue = false end,
+        }
+
+        -- Update the visible switches when an automation completes or when
+        -- a dungeon/lobby teleport restores a worker's saved state.
+        task.spawn(function()
+            while GENV.__AZ_TITLE_AUTOMATION_SETTINGS == TitleAutomationSettings do
+                local Single = GENV.__AZ_TITLE_AUTOMATION_UI_QUEUE
+                if Single ~= nil then
+                    GENV.__AZ_TITLE_AUTOMATION_UI_QUEUE = nil
+                    TitleAutoToggle:Set(Single)
+                end
+                local Acc = GENV.__AZ_ACCESSORY_AUTOMATION_UI_QUEUE
+                if Acc ~= nil then
+                    GENV.__AZ_ACCESSORY_AUTOMATION_UI_QUEUE = nil
+                    pcall(function() AccessoryAutoToggle:Set(Acc) end)
+                end
+                local Requests = GENV.__AZ_ADVANCED_UI_QUEUE
+                if type(Requests) == "table" then
+                    for Key, Toggle in pairs({
+                        FullEvolve = FullEvolveToggle,
+                        MultiTitle = MultiTitleToggle,
+                        Achievement = AchievementGrinderToggle,
+                        AccessoryLoadout = AccessoryLoadoutToggle,
+                        AutomationQueue = AutomationQueueToggle,
+                    }) do
+                        if Requests[Key] ~= nil then
+                            local State = Requests[Key]
+                            Requests[Key] = nil
+                            pcall(function() Toggle:Set(State) end)
                         end
                     end
-                end
-
-                AccessoryAutomationSettings.SelectedAccessories =
-                    Selected
-
-                local Persist =
-                    GENV.__AZ_ACCESSORY_AUTOMATION_PERSIST_FUNCTION
-
-                if type(Persist) == "function" then
-                    Persist()
-                end
-            end,
-        })
-
-        AutomationTab:CreateDropdown({
-            name = "Craft Mode",
-            flag = "AccessoryCraftMode",
-            options = {
-                "One Of Each",
-                "Repeat Selected",
-            },
-            value =
-                AccessoryAutomationSettings.CraftOneEach ~= false
-                and "One Of Each"
-                or "Repeat Selected",
-            callback = function(Value)
-
-                local Selection =
-                    GetSingleSelection(Value)
-                    or tostring(Value)
-
-
-                AccessoryAutomationSettings.CraftOneEach =
-                    Selection == "One Of Each"
-
-
-                local Persist =
-                    GENV.__AZ_ACCESSORY_AUTOMATION_PERSIST_FUNCTION
-
-
-                if type(Persist) == "function" then
-                    pcall(Persist)
-                end
-            end,
-        })
-
-        local AccessoryAutoToggle = {
-            Set = function(_, Value)
-
-                AccessoryAutomationSettings.AutoCraftAccessories =
-                    Value == true
-
-
-                local Persist =
-                    GENV.__AZ_ACCESSORY_AUTOMATION_PERSIST_FUNCTION
-
-
-                if type(Persist) == "function" then
-                    pcall(Persist)
-                end
-
-
-                if Value ~= true then
-
-                    local Finished =
-                        GENV.__AZ_MAIN_AUTOMATION_FINISHED
-
-
-                    if type(Finished) == "function" then
-                        Finished("Accessory Farm & Craft")
+                    if Requests.TitleSelection ~= nil then
+                        local Name = Requests.TitleSelection
+                        Requests.TitleSelection = nil
+                        TitleDropdown:Set(Name)
+                    end
+                    if Requests.SingleTitleToggle ~= nil then
+                        local State = Requests.SingleTitleToggle
+                        Requests.SingleTitleToggle = nil
+                        TitleAutoToggle:Set(State)
                     end
                 end
-            end,
-        }
-
-
-        
-
-
-        --//====================================================
-        --// FULL AUTO EVOLVE
-        --//====================================================
-
-        AutomationTab:CreateDivider({
-            spacing = 16,
-        })
-
-        AutomationTab:CreateSection({
-            name = "Full Auto Evolve",
-        })
-
-
-        local AdvancedCharacterOptions = {
-            "Rubber Man",
-            "Cosmic Warrior",
-            "Thunder Prodigy",
-            "Twisted Agony",
-            "Kings Gambit",
-            "Lights of Divinity",
-            "Dragon Eclipse",
-            "Immortal Sovereign",
-            "Cursed King",
-            "Divine Emperor",
-            "Cataclysm",
-            "Paramita Pyre",
-        }
-
-
-        AutomationTab:CreateDropdown({
-            name = "Evolution Targets",
-            flag = "AdvancedEvolutionTargets",
-            options = AdvancedCharacterOptions,
-            multiSelect = true,
-            value =
-                AdvancedSelectedArray(
-                    AdvancedAutomationSettings
-                        .EvolutionTargets,
-                    AdvancedCharacterOptions
-                ),
-            callback = function(Value)
-
-                AdvancedAutomationSettings
-                    .EvolutionTargets =
-                    AdvancedReadMulti(
-                        Value
-                    )
-
-                PersistAdvanced()
-            end,
-        })
-
-
-        AutomationTab:CreateDropdown({
-            name = "Acquire Missing Characters",
-            flag = "AdvancedEvolutionAcquireMode",
-            options = {
-                "No",
-                "Yes",
-            },
-            value =
-                AdvancedAutomationSettings.EvolutionAcquireMissing
-                == true
-                and "Yes"
-                or "No",
-            callback = function(Value)
-
-                local Selection =
-                    GetSingleSelection(Value)
-                    or tostring(Value)
-
-
-                AdvancedAutomationSettings.EvolutionAcquireMissing =
-                    Selection == "Yes"
-
-                PersistAdvanced()
-            end,
-        })
-
-
-        AutomationTab:CreateDropdown({
-            name = "Evolution Roll Slot",
-            flag = "AdvancedEvolutionRollSlot",
-            options = {
-                "Slot 1",
-                "Slot 2",
-                "Slot 3",
-                "Slot 4",
-            },
-            value =
-                "Slot "
-                .. tostring(
-                    AdvancedAutomationSettings
-                        .EvolutionRollSlot
-                    or 1
-                ),
-            callback = function(Value)
-
-                local Selection =
-                    GetSingleSelection(Value)
-                    or tostring(Value)
-
-
-                AdvancedAutomationSettings
-                    .EvolutionRollSlot =
-                    tonumber(
-                        tostring(Selection)
-                            :match("%d+")
-                    ) or 1
-
-                PersistAdvanced()
-            end,
-        })
-
-
-        local FullEvolveToggle = {
-            Set = function(_, Value)
-
-                AdvancedAutomationSettings.AutoFullEvolve =
-                    Value == true
-
-                PersistAdvanced()
-
-
-                if Value ~= true then
-
-                    local Finished =
-                        GENV.__AZ_MAIN_AUTOMATION_FINISHED
-
-
-                    if type(Finished) == "function" then
-                        Finished("Full Auto Evolve")
-                    end
-                end
-            end,
-        }
-
-
-
-        
-
-        --//====================================================
-        --// MULTI-TITLE GRINDER
-        --//====================================================
-
-        AutomationTab:CreateDivider({
-            spacing = 16,
-        })
-
-        AutomationTab:CreateSection({
-            name = "Multi-Title Grinder",
-        })
-
-
-        local AdvancedTitleOptions = {
-            "Cosmic Warrior",
-            "Rubber Man",
-            "Thunder Prodigy",
-            "Twisted Agony",
-            "Lights of Divinity",
-            "Divine Emperor",
-            "Dragon Eclipse",
-            "Kings Gambit",
-            "Immortal Sovereign",
-            "Cursed King",
-            "Cataclysm",
-            "Dungeon Legend",
-            "Hoarder",
-            "Beyond Limits",
-            "Millionaire",
-            "Paramita Pyre",
-        }
-
-
-        AutomationTab:CreateDropdown({
-            name = "Title Queue",
-            flag = "MultiTitleTargets",
-            options = AdvancedTitleOptions,
-            multiSelect = true,
-            value =
-                AdvancedSelectedArray(
-                    AdvancedAutomationSettings
-                        .MultiTitleTargets,
-                    AdvancedTitleOptions
-                ),
-            callback = function(Value)
-
-                AdvancedAutomationSettings
-                    .MultiTitleTargets =
-                    AdvancedReadMulti(
-                        Value
-                    )
-
-                PersistAdvanced()
-            end,
-        })
-
-
-        local MultiTitleToggle = {
-            Set = function(_, Value)
-
-                AdvancedAutomationSettings.AutoMultiTitle =
-                    Value == true
-
-                PersistAdvanced()
-
-
-                if Value ~= true then
-
-                    local Finished =
-                        GENV.__AZ_MAIN_AUTOMATION_FINISHED
-
-
-                    if type(Finished) == "function" then
-                        Finished("Multi-Title Grinder")
-                    end
-                end
-            end,
-        }
-
-
-
-        
-
-        --//====================================================
-        --// ACHIEVEMENT GRINDER
-        --//====================================================
-
-        AutomationTab:CreateDivider({
-            spacing = 16,
-        })
-
-        AutomationTab:CreateSection({
-            name = "Achievement Grinder",
-        })
-
-
-        local AdvancedAchievementOptions = {
-            "First Step",
-            "Dungeon Rookie",
-            "Dungeon Hunter",
-            "Dungeon Veteran",
-            "Dungeon Master",
-            "Dungeon Legend",
-
-            "Boss Challenger",
-            "Boss Hunter",
-            "Boss Slayer",
-            "Boss Executioner",
-            "Boss Reaper",
-
-            "Speedrunner",
-            "Survivor",
-            "Untouchable",
-
-            "Awakened",
-            "Evolution Expert",
-            "Evolution Master",
-
-            "First Craft",
-            "Crafter",
-            "Master Crafter",
-            "Collector's Workshop",
-
-            "Scavenger",
-            "Collector",
-            "Treasure Seeker",
-            "Treasure Hunter",
-            "Hoarder",
-
-            "First Summon",
-            "Summoner",
-            "Lucky Puller",
-            "Summon Veteran",
-            "Gacha Master",
-
-            "Wave Rider",
-            "Endless Fighter",
-            "Infinite Challenger",
-            "Infinite Champion",
-            "Beyond Limits",
-
-            "Pocket Money",
-            "Rich",
-            "Millionaire",
-        }
-
-
-        AutomationTab:CreateDropdown({
-            name = "Achievement Targets",
-            flag = "AchievementTargets",
-            options = AdvancedAchievementOptions,
-            multiSelect = true,
-            value =
-                AdvancedSelectedArray(
-                    AdvancedAutomationSettings
-                        .AchievementTargets,
-                    AdvancedAchievementOptions
-                ),
-            callback = function(Value)
-
-                AdvancedAutomationSettings
-                    .AchievementTargets =
-                    AdvancedReadMulti(
-                        Value
-                    )
-
-                PersistAdvanced()
-            end,
-        })
-
-
-        AutomationTab:CreateDropdown({
-            name = "Achievement Rewards",
-            flag = "AchievementRewardMode",
-            options = {
-                "Auto Claim",
-                "Do Not Claim",
-            },
-            value =
-                AdvancedAutomationSettings.AutoClaimAchievementRewards
-                ~= false
-                and "Auto Claim"
-                or "Do Not Claim",
-            callback = function(Value)
-
-                local Selection =
-                    GetSingleSelection(Value)
-                    or tostring(Value)
-
-
-                AdvancedAutomationSettings.AutoClaimAchievementRewards =
-                    Selection == "Auto Claim"
-
-                PersistAdvanced()
-            end,
-        })
-
-
-        local AchievementGrinderToggle = {
-            Set = function(_, Value)
-
-                AdvancedAutomationSettings.AutoAchievementGrinder =
-                    Value == true
-
-                PersistAdvanced()
-
-
-                if Value ~= true then
-
-                    local Finished =
-                        GENV.__AZ_MAIN_AUTOMATION_FINISHED
-
-
-                    if type(Finished) == "function" then
-                        Finished("Achievement Grinder")
-                    end
-                end
-            end,
-        }
-
-
-
-        
-
-        --//====================================================
-        --// ACCESSORY LOADOUT
-        --//====================================================
-
-        AutomationTab:CreateDivider({
-            spacing = 16,
-        })
-
-        AutomationTab:CreateSection({
-            name = "Accessory Loadout",
-        })
-
-
-        local AccessoryLoadoutModes = {
-            "Damage",
-            "Drop Rate",
-            "Coins",
-            "EXP",
-            "Crit",
-            "Survival",
-            "Cooldown",
-            "Balanced",
-        }
-
-
-        AutomationTab:CreateDropdown({
-            name = "Accessory Loadout",
-            flag = "AccessoryLoadoutMode",
-            options = AccessoryLoadoutModes,
-            value =
-                AdvancedAutomationSettings
-                    .AccessoryLoadoutMode,
-            callback = function(Value)
-
-                local Selection =
-                    GetSingleSelection(Value)
-                    or tostring(Value)
-
-
-                if Selection
-                    and Selection ~= ""
-                then
-
-                    AdvancedAutomationSettings
-                        .AccessoryLoadoutMode =
-                        Selection
-
-                    PersistAdvanced()
-                end
-            end,
-        })
-
-
-        local AccessoryLoadoutToggle = {
-            Set = function(_, Value)
-
-                AdvancedAutomationSettings.AutoAccessoryLoadout =
-                    Value == true
-
-                PersistAdvanced()
-
-
-                if Value ~= true then
-
-                    local Finished =
-                        GENV.__AZ_MAIN_AUTOMATION_FINISHED
-
-
-                    if type(Finished) == "function" then
-                        Finished("Auto Accessory Loadout")
-                    end
-                end
-            end,
-        }
-
-
-
-        AutomationTab:CreateButton({
-            name = "Equip Best Accessory Now",
-            callback = function()
-
-                local Handler =
-                    GENV.__AZ_ACCESSORY_LOADOUT_APPLY_ONCE_FUNCTION
-
-
-                if type(Handler) == "function" then
-                    task.spawn(
-                        Handler
-                    )
-                else
-                    QueueNotification(
-                        "Accessory Loadout",
-                        "Accessory loadout engine is still loading.",
-                        4
-                    )
-                end
-            end,
-        })
-
-
-        
-
-        --//====================================================
-        --// AUTOMATION QUEUE
-        --//====================================================
-
-        AutomationTab:CreateDivider({
-            spacing = 16,
-        })
-
-        AutomationTab:CreateSection({
-            name = "Automation Queue",
-        })
-
-
-        local AutomationQueueOptions = {
-            "None",
-            "Multi-Title Grinder",
-            "Full Auto Evolve",
-            "Auto Achievement Grinder",
-            "Accessory Farm & Craft",
-            "Auto Accessory Loadout",
-        }
-
-
-        local QueueDropdowns = {}
-
-
-        for QueueIndex = 1, 5 do
-
-            QueueDropdowns[QueueIndex] =
-                AutomationTab:CreateDropdown({
-                    name =
-                        "Queue Step "
-                        .. tostring(
-                            QueueIndex
-                        ),
-
-                    flag =
-                        "AutomationQueueStep"
-                        .. tostring(
-                            QueueIndex
-                        ),
-
-                    options =
-                        AutomationQueueOptions,
-
-                    value =
-                        AdvancedAutomationSettings
-                            .QueueSteps[
-                                QueueIndex
-                            ]
-                        or "None",
-
-                    callback = function(Value)
-
-                        local Selection =
-                            GetSingleSelection(Value)
-                            or tostring(Value)
-
-
-                        AdvancedAutomationSettings
-                            .QueueSteps[
-                                QueueIndex
-                            ] =
-                            Selection ~= ""
-                            and Selection
-                            or "None"
-
-
-                        PersistAdvanced()
-                    end,
-                })
-        end
-
-
-        AutomationTab:CreateDropdown({
-            name = "Queue Loop",
-            flag = "AutomationQueueLoopMode",
-            options = {
-                "Off",
-                "On",
-            },
-            value =
-                AdvancedAutomationSettings.QueueLoop
-                == true
-                and "On"
-                or "Off",
-            callback = function(Value)
-
-                local Selection =
-                    GetSingleSelection(Value)
-                    or tostring(Value)
-
-
-                AdvancedAutomationSettings.QueueLoop =
-                    Selection == "On"
-
-                PersistAdvanced()
-            end,
-        })
-
-
-        local AutomationQueueToggle = {
-            Set = function(_, Value)
-
-                AdvancedAutomationSettings.AutoQueue =
-                    Value == true
-
-
-                if Value
-                    and (
-                        tonumber(
-                            AdvancedAutomationSettings.QueueIndex
-                        ) or 1
-                    ) > 5
-                then
-
-                    AdvancedAutomationSettings.QueueIndex =
-                        1
-                end
-
-
-                PersistAdvanced()
-
-
-                if Value ~= true then
-
-                    local Finished =
-                        GENV.__AZ_MAIN_AUTOMATION_FINISHED
-
-
-                    if type(Finished) == "function" then
-                        Finished("Automation Queue")
-                    end
-                end
-            end,
-        }
-
-
-
-        AutomationTab:CreateButton({
-            name = "Reset Queue Progress",
-            callback = function()
-
-                AdvancedAutomationSettings
-                    .QueueIndex =
-                    1
-
-                PersistAdvanced()
-
-                QueueNotification(
-                    "Automation Queue",
-                    "Queue progress reset to Step 1.",
-                    4
-                )
-            end,
-        })
-
-
-        
-
-        -- Keep Rayfield UI writes on a thread created before game module
-        -- requires. Some game modules strip the current thread's UI/Plugin
-        -- capability, which is why late Rayfield calls can fail.
-        task.spawn(function()
-            while GENV.__AZ_TITLE_AUTOMATION_SETTINGS
-                    == TitleAutomationSettings
-            do
-                local Requested =
-                    GENV.__AZ_TITLE_AUTOMATION_UI_QUEUE
-
-                if Requested ~= nil then
-                    GENV.__AZ_TITLE_AUTOMATION_UI_QUEUE = nil
-
-                    pcall(function()
-                        TitleAutoToggle:Set(Requested)
-                    end)
-                end
-
-                local AccessoryRequested =
-                    GENV.__AZ_ACCESSORY_AUTOMATION_UI_QUEUE
-
-                if AccessoryRequested ~= nil then
-                    GENV.__AZ_ACCESSORY_AUTOMATION_UI_QUEUE = nil
-
-                    pcall(function()
-                        AccessoryAutoToggle:Set(AccessoryRequested)
-                    end)
-                end
-
-
-                local AdvancedRequests =
-                    GENV.__AZ_ADVANCED_UI_QUEUE
-
-
-                if type(AdvancedRequests) == "table" then
-
-                    if AdvancedRequests.FullEvolve ~= nil then
-
-                        local State =
-                            AdvancedRequests.FullEvolve
-
-                        AdvancedRequests.FullEvolve =
-                            nil
-
-
-                        pcall(function()
-                            FullEvolveToggle:Set(
-                                State
-                            )
-                        end)
-                    end
-
-
-                    if AdvancedRequests.MultiTitle ~= nil then
-
-                        local State =
-                            AdvancedRequests.MultiTitle
-
-                        AdvancedRequests.MultiTitle =
-                            nil
-
-
-                        pcall(function()
-                            MultiTitleToggle:Set(
-                                State
-                            )
-                        end)
-                    end
-
-
-                    if AdvancedRequests.Achievement ~= nil then
-
-                        local State =
-                            AdvancedRequests.Achievement
-
-                        AdvancedRequests.Achievement =
-                            nil
-
-
-                        pcall(function()
-                            AchievementGrinderToggle:Set(
-                                State
-                            )
-                        end)
-                    end
-
-
-                    if AdvancedRequests.AccessoryLoadout ~= nil then
-
-                        local State =
-                            AdvancedRequests.AccessoryLoadout
-
-                        AdvancedRequests.AccessoryLoadout =
-                            nil
-
-
-                        pcall(function()
-                            AccessoryLoadoutToggle:Set(
-                                State
-                            )
-                        end)
-                    end
-
-
-                    if AdvancedRequests.AutomationQueue ~= nil then
-
-                        local State =
-                            AdvancedRequests.AutomationQueue
-
-                        AdvancedRequests.AutomationQueue =
-                            nil
-
-
-                        pcall(function()
-                            AutomationQueueToggle:Set(
-                                State
-                            )
-                        end)
-                    end
-
-
-                    if AdvancedRequests.TitleSelection ~= nil then
-
-                        local State =
-                            AdvancedRequests.TitleSelection
-
-                        AdvancedRequests.TitleSelection =
-                            nil
-
-
-                        pcall(function()
-                            TitleDropdown:Set(
-                                State
-                            )
-                        end)
-                    end
-
-
-                    if AdvancedRequests.SingleTitleToggle ~= nil then
-
-                        local State =
-                            AdvancedRequests.SingleTitleToggle
-
-                        AdvancedRequests.SingleTitleToggle =
-                            nil
-
-
-                        pcall(function()
-                            TitleAutoToggle:Set(
-                                State
-                            )
-                        end)
-                    end
-                end
-
-
-                task.wait(0.05)
+                task.wait(0.10)
             end
         end)
 
+        PersistAdvanced()
 
         --//====================================================
         --// SETTINGS UI
         --//====================================================
 
         Window:CreateSection({
-            name = "Settings",
+            name = "SYSTEM",
         })
 
         local SettingsTab =
@@ -14826,7 +13320,6 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             SettingsTab:CreateToggle({
                 name = "Enable Match Webhook",
                 flag = "WebhookEnabled",
-                description = "Send a Discord embed when a run finishes.",
                 value = Settings.WebhookEnabled,
                 callback = function(Value)
 
@@ -14946,7 +13439,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
         })
 
         SettingsTab:CreateToggle({
-            name = "Auto Execute On Teleport",
+            name = "Auto Execute",
             flag = "AutoExecuteOnTeleport",
             value = Settings.AutoExecuteOnTeleport,
             callback = function(Value)
@@ -15176,7 +13669,6 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             SettingsTab:CreateToggle({
                 name = "Auto Reconnect",
                 flag = "AutoReconnect",
-                description = "Mobile-safe reconnect: retries the current server twice for network drops, then falls back to the lobby.",
                 value = Settings.AutoReconnect,
                 callback = function(Value)
 
@@ -15235,7 +13727,6 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
             SettingsTab:CreateButton({
                 name = "Reconnect Now",
-                description = "Manually test the reconnect flow without waiting for a disconnect.",
                 callback = function()
 
                     local Reconnect =
@@ -15262,7 +13753,6 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
             SettingsTab:CreateButton({
                 name = "Print Reconnect Status",
-                description = "Print the reconnect runtime state to the Delta console.",
                 callback = function()
 
                     local Getter =
@@ -22713,8 +21203,8 @@ task.spawn(function()
             Automation.AutoCraftAccessories =
                 Saved.AutoCraftAccessories == true
 
-            Automation.CraftOneEach =
-                Saved.CraftOneEach ~= false
+            -- Simple UI: never farm a second copy of an owned accessory.
+            Automation.CraftOneEach = true
 
             if type(Saved.Snapshot) == "table" then
                 Automation.Snapshot = Saved.Snapshot
@@ -25062,6 +23552,10 @@ task.spawn(function()
             if Advanced.EvolutionTargets[
                 Display
             ] == true
+                and (
+                    Advanced.EvolutionAcquireMissing == true
+                    or FindOwnedSlot(Data, Character) ~= nil
+                )
                 and not IsEvolved(
                     Data,
                     Character
@@ -26136,6 +24630,19 @@ task.spawn(function()
     end
 
 
+    local SupportedAchievementKinds = {
+        DungeonCompleted = true,
+        BossDefeated = true,
+        MaterialCollected = true,
+        InfiniteWaveReached = true,
+        CurrencyEarned = true,
+        DistinctCharactersEvolved = true,
+        AccessoryCrafted = true,
+        DistinctAccessoriesCrafted = true,
+        AllLaunchAccessoriesCrafted = true,
+        CharacterRolled = true,
+    }
+
     local function NextAchievement(
         Data
     )
@@ -26162,6 +24669,9 @@ task.spawn(function()
 
 
             if Definition
+                and SupportedAchievementKinds[
+                    tostring((Definition.Objective or {}).Kind or "")
+                ] == true
                 and Advanced.AchievementTargets[
                     Definition.Title
                 ] == true
@@ -26385,6 +24895,20 @@ task.spawn(function()
             return
         end
 
+
+        -- The simplified Achievement toggle covers every objective the
+        -- current automation knows how to farm. No selection dropdown.
+        if AchievementConfig and type(AchievementConfig.order) == "table" then
+            Advanced.AchievementTargets = Advanced.AchievementTargets or {}
+            for _, Id in ipairs(AchievementConfig.order) do
+                local Definition = AchievementConfig.achievements[Id]
+                if Definition and type(Definition.Title) == "string" then
+                    -- Select all titles for reward claiming. NextAchievement
+                    -- independently skips kinds the grinder cannot automate.
+                    Advanced.AchievementTargets[Definition.Title] = true
+                end
+            end
+        end
 
         CaptureRunSnapshot()
 
