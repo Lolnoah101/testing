@@ -335,6 +335,7 @@ local Settings = {
     StuckRecoveryDelay = 2.5,
 
     AutoSkills = false,
+    SkillMethod = "Use Skills Remote", -- or "Use Skill Keys"
 
     SelectedSkills = {
         ["Skill 1"] = true,
@@ -371,6 +372,118 @@ local Settings = {
 
 
 --//============================================================
+--//============================================================
+--// SKILL INPUT METHOD (shared by Story, Trials, Raid)
+--// The old game's keybindController maps 1/2/3, G (Ultimate),
+--// and 4 (optional standalone fifth skill). Real bindings may change.
+--//============================================================
+GENV.__AZ_SKILL_KEY_INPUT = {
+    LastKey = "none",
+    LastBackend = "none",
+    LastPressAt = 0,
+    LastError = "none",
+    Presses = 0,
+    Failed = 0,
+    LastBySlot = {},
+    Warned = false,
+}
+
+GENV.__AZ_SEND_SKILL_KEY = function(Slot)
+    local State = GENV.__AZ_SKILL_KEY_INPUT
+    local Keys = {
+        [1] = { Enum.KeyCode.One, 0x31, "1" },
+        [2] = { Enum.KeyCode.Two, 0x32, "2" },
+        [3] = { Enum.KeyCode.Three, 0x33, "3" },
+        [4] = { Enum.KeyCode.G,   0x47, "G" },
+        [5] = { Enum.KeyCode.Four, 0x34, "4" },
+    }
+    local Entry = Keys[tonumber(Slot)]
+    if not Entry or Settings.SkillMethod ~= "Use Skill Keys" then
+        return false
+    end
+
+    -- Key input acts on the focused Roblox window, not an open text field.
+    local UIS = game:GetService("UserInputService")
+    if UIS:GetFocusedTextBox() then return false end
+
+    local Now = os.clock()
+    local Last = State.LastBySlot[Slot] or 0
+    local Interval = Slot == 4 and 0.36 or 0.19
+    if Now - Last < Interval then return false end
+
+    local Pressed = false
+    local Backend, ErrorValue = "none", nil
+    local OK, Manager = pcall(function()
+        return game:GetService("VirtualInputManager")
+    end)
+    if OK and Manager then
+        local Success, Err = pcall(function()
+            Manager:SendKeyEvent(true, Entry[1], false, game)
+        end)
+        if Success then
+            Pressed = true
+            Backend = "VirtualInputManager"
+            task.delay(0.055, function()
+                pcall(function()
+                    Manager:SendKeyEvent(false, Entry[1], false, game)
+                end)
+            end)
+        else
+            ErrorValue = tostring(Err)
+        end
+    end
+
+    -- Some executors expose keypress/keyrelease but restrict VIM.
+    if not Pressed and type(keypress) == "function"
+        and type(keyrelease) == "function" then
+        local Success, Err = pcall(keypress, Entry[2])
+        if Success then
+            Pressed = true
+            Backend = "keypress"
+            task.delay(0.055, function()
+                pcall(keyrelease, Entry[2])
+            end)
+        else
+            ErrorValue = tostring(Err)
+        end
+    end
+
+    State.LastKey = Entry[3]
+    State.LastPressAt = Now
+    State.LastBackend = Backend
+    State.LastError = ErrorValue or "none"
+    if Pressed then
+        State.LastBySlot[Slot] = Now
+        State.Presses += 1
+    else
+        State.Failed += 1
+        if not State.Warned then
+            State.Warned = true
+            warn("[Anime Zero][Skill Keys] No usable key input backend. Select Use Skills Remote or check executor input support.", State.LastError)
+        end
+    end
+    return Pressed
+end
+
+GENV.__AZ_SKILL_METHOD_STATUS = function()
+    local State = GENV.__AZ_SKILL_KEY_INPUT
+    local Info = {
+        method = Settings.SkillMethod,
+        autoSkills = Settings.AutoSkills,
+        autoUltimate = Settings.AutoUltimate,
+        lastKey = State.LastKey,
+        lastBackend = State.LastBackend,
+        lastPressSecondsAgo = State.LastPressAt > 0 and os.clock() - State.LastPressAt or "never",
+        keyPressesIssued = State.Presses,
+        failedKeyPresses = State.Failed,
+        lastError = State.LastError,
+    }
+    for K, V in pairs(Info) do
+        print("[Anime Zero][Skill Method]", K, "=", tostring(V))
+    end
+    return Info
+end
+
 --// SETTINGS TAB STATE PERSISTENCE
 --//
 --// Load Auto Execute + Anti AFK before the Settings UI is created so
@@ -2136,6 +2249,7 @@ end)()
                 StayNoclip = Legacy.StayNoclip,
                 StuckRecoveryDelay = Legacy.StuckRecoveryDelay,
                 AutoSkills = Legacy.AutoSkills,
+                SkillMethod = Legacy.SkillMethod,
                 SelectedSkills = Legacy.FarmSelectedSkills,
                 AutoUltimate = Legacy.AutoUltimate,
                 AutoBlock = Legacy.AutoBlock,
@@ -2223,6 +2337,12 @@ end)()
 
         AutoSkills =
             ReadSavedBool("AutoSkills", Settings.AutoSkills),
+
+        SkillMethod =
+            (Saved.SkillMethod == "Use Skill Keys"
+                or Saved.SkillMethod == "Use Skills Remote")
+            and Saved.SkillMethod
+            or "Use Skills Remote",
 
         SelectedSkills = {
             ["Skill 1"] = true,
@@ -2321,6 +2441,9 @@ end)()
 
         Settings.AutoSkills =
             User.AutoSkills == true
+
+        Settings.SkillMethod =
+            User.SkillMethod
 
         Settings.SelectedSkills =
             Copy(User.SelectedSkills)
@@ -5562,6 +5685,29 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
 
 FarmTab:CreateDropdown({
+    name = "Skill Method",
+    flag = "FarmSkillMethod",
+    options = { "Use Skill Keys", "Use Skills Remote" },
+    multiSelect = false,
+    value = Settings.SkillMethod,
+    callback = function(Value)
+        local Method = GetSingleSelection(Value)
+        if Method ~= "Use Skill Keys" and Method ~= "Use Skills Remote" then
+            return
+        end
+        Settings.SkillMethod = Method
+        PendingSkillRequestId = nil
+        SkillBusyUntil = 0
+        SkillRetryAfter = 0
+        GENV.__AZ_SKILL_KEY_INPUT.LastBySlot = {}
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("SkillMethod", Method)
+        end
+        print("[Anime Zero] Skill Method:", Method)
+    end,
+})
+
+FarmTab:CreateDropdown({
 
     name = "Skills",
     flag = "FarmSelectedSkills",
@@ -8376,6 +8522,10 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 then
                     return false
                 end
+            end
+
+            if Settings.SkillMethod == "Use Skill Keys" then
+                return GENV.__AZ_SEND_SKILL_KEY(Slot)
             end
 
             Rescue.Sequence =
@@ -33946,6 +34096,27 @@ local function TrySkill(
     local Now =
         workspace:GetServerTimeNow()
 
+
+    if Settings.SkillMethod == "Use Skill Keys" then
+        local CooldownOK, Effective, CharName = SkillCooldownReady(Store, SkillNumber)
+        local CharacterInfo = CharName and CharacterConstants.charactersByName[CharName]
+        if not CooldownOK or not Effective or not CharacterInfo
+            or not CharacterInfo.skills or not CharacterInfo.skills[Effective] then
+            return false
+        end
+        if Effective == 4 then
+            local Good, Progress = pcall(function()
+                return Store.state.ultProgress:get()
+            end)
+            if not Good or (tonumber(Progress) or 0) < 100
+                or LocalPlayer:GetAttribute("UltimateLocked") == true then
+                return false
+            end
+        end
+        -- G is the normal Ultimate binding; native controller handles a
+        -- temporary bonus Ultimate on G when that window is available.
+        return GENV.__AZ_SEND_SKILL_KEY(SkillNumber)
+    end
 
     if PendingSkillRequestId then
 
