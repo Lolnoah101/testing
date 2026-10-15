@@ -349,6 +349,10 @@ local Settings = {
 
     BlockMode = "Perfect Parry",
 
+    ParryLeadMs = 120,
+
+    BlockGuardReserve = 20,
+
     -- Raid-specific movement safety. Enabled by default so auto-farm can
     -- react to No-Face ground AOEs without requiring another saved setting.
     AutoDodgeRaidAOE = true,
@@ -2318,6 +2322,7 @@ end)()
             (
                 Saved.FarmMethod == "Teleport"
                 or Saved.FarmMethod == "Tween"
+                or Saved.FarmMethod == "Legit"
             )
             and Saved.FarmMethod
             or Settings.FarmMethod,
@@ -2360,9 +2365,17 @@ end)()
             (
                 Saved.BlockMode == "Perfect Parry"
                 or Saved.BlockMode == "Hold Block"
+                or Saved.BlockMode == "Reactive Block"
+                or Saved.BlockMode == "Smart Block"
             )
             and Saved.BlockMode
             or Settings.BlockMode,
+
+        ParryLeadMs =
+            math.clamp(tonumber(Saved.ParryLeadMs) or 120, 60, 250),
+
+        BlockGuardReserve =
+            math.clamp(tonumber(Saved.BlockGuardReserve) or 20, 0, 70),
     }
 
 
@@ -2456,6 +2469,12 @@ end)()
 
         Settings.BlockMode =
             User.BlockMode
+
+        Settings.ParryLeadMs =
+            User.ParryLeadMs
+
+        Settings.BlockGuardReserve =
+            User.BlockGuardReserve
     end
 
 
@@ -2598,6 +2617,346 @@ end
 
 GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
 
+--//============================================================
+--// LEGIT FARM METHOD: game-native Humanoid walking + pathfinding.
+--// Update (2026-10-15): The game's StarterCharacterScripts.Animate is empty.
+--// Its custom movementController detects Humanoid.MoveDirection to play run.
+--// Drive Humanoid:Move AFTER Roblox's default controls each render frame,
+--// instead of intermittent MoveTo calls that can be overwritten by controls.
+--// A failed path must NEVER turn into blind straight-line movement into walls.
+--//============================================================
+;(function()
+    local RunService = game:GetService("RunService")
+    local PathfindingService = game:GetService("PathfindingService")
+    local PlayersService = game:GetService("Players")
+    local BindName = "AnimeZeroLegitMovement"
+    pcall(function() RunService:UnbindFromRenderStep(BindName) end)
+
+    local Nav = {
+        State = "Idle", Owner = nil, Target = nil, Waypoints = nil,
+        Index = 1, Token = 0, Computing = false, LastPathAt = 0,
+        NextPathAt = 0, LastProgressAt = 0, LastProgressPos = nil,
+        LastError = nil, Character = nil, Human = nil,
+        DrivePoint = nil, DriveJump = false, LastRequestAt = 0,
+        PathBlockConnection = nil, Path = nil, PathsComputed = 0,
+        PathFailures = 0, StuckRepaths = 0, UsedAlternateGoal = false,
+    }
+
+    local function ClearPath()
+        if Nav.PathBlockConnection then
+            pcall(function() Nav.PathBlockConnection:Disconnect() end)
+            Nav.PathBlockConnection = nil
+        end
+        Nav.Path = nil
+        Nav.Waypoints = nil
+        Nav.Index = 1
+    end
+
+    local function StopWalking()
+        Nav.DrivePoint = nil
+        Nav.DriveJump = false
+        local Human = Nav.Human
+        if Human and Human.Parent then
+            pcall(function() Human:Move(Vector3.zero, false) end)
+        end
+    end
+
+    function Nav.Reset(Reason)
+        Nav.Token = Nav.Token + 1
+        ClearPath()
+        StopWalking()
+        Nav.Target = nil
+        Nav.Owner = nil
+        Nav.Computing = false
+        Nav.LastProgressPos = nil
+        Nav.LastProgressAt = os.clock()
+        Nav.State = tostring(Reason or "Idle")
+        Nav.LastError = nil
+    end
+
+    -- PlayerModule can overwrite MoveTo's MoveDirection every render frame.
+    -- Feed walking direction after the controls, allowing the game to play
+    -- its OWN character run/idle animations, not an injected animation ID.
+    RunService:BindToRenderStep(BindName,
+        Enum.RenderPriority.Character.Value + 1,
+        function()
+            local Human = Nav.Human
+            local Char = Nav.Character
+            local Root = Char and Char:FindFirstChild("HumanoidRootPart")
+            if Settings.FarmMethod ~= "Legit"
+                or not Nav.DrivePoint
+                or os.clock() - Nav.LastRequestAt > 0.80
+                or not Human or not Human.Parent or Human.Health <= 0
+                or not Root or not Root.Parent
+            then
+                return
+            end
+            if Human.WalkSpeed <= 0 then
+                -- Respect stun, blocking and skill movement locks.
+                Human:Move(Vector3.zero, false)
+                return
+            end
+            local Delta = Nav.DrivePoint - Root.Position
+            local Flat = Vector3.new(Delta.X, 0, Delta.Z)
+            if Flat.Magnitude >= 1.0 then
+                Human:Move(Flat.Unit, false)
+                if Nav.DriveJump and Human.FloorMaterial ~= Enum.Material.Air then
+                    Human.Jump = true
+                end
+            else
+                Human:Move(Vector3.zero, false)
+            end
+        end
+    )
+
+    local function ClearRayToGoal(Root, Goal, Char)
+        local Difference = Goal - Root.Position
+        local Flat = Vector3.new(Difference.X, 0, Difference.Z)
+        if Flat.Magnitude < 2 then return true end
+        local Parameters = RaycastParams.new()
+        Parameters.FilterType = Enum.RaycastFilterType.Exclude
+        local Ignore = {Char}
+        local EnemyFolder = workspace:FindFirstChild("enemies")
+        if EnemyFolder then table.insert(Ignore, EnemyFolder) end
+        Parameters.FilterDescendantsInstances = Ignore
+        pcall(function() Parameters.RespectCanCollide = true end)
+        -- Check at the character's waist height, not against the floor.
+        local Hit = workspace:Raycast(Root.Position, Flat.Unit * math.max(Flat.Magnitude - 1, 0), Parameters)
+        return Hit == nil
+    end
+
+    local function GroundTarget(Pos, Root, Human, Char)
+        local Parameters = RaycastParams.new()
+        Parameters.FilterType = Enum.RaycastFilterType.Exclude
+        local Ignore = { Char }
+        local EnemyFolder = workspace:FindFirstChild("enemies")
+        if EnemyFolder then table.insert(Ignore, EnemyFolder) end
+        Parameters.FilterDescendantsInstances = Ignore
+        local Ray = workspace:Raycast(Pos + Vector3.new(0, 16, 0),
+            Vector3.new(0, -75, 0), Parameters)
+        if Ray and math.abs(Ray.Position.Y - Root.Position.Y) < 24 then
+            return Vector3.new(Pos.X, Ray.Position.Y + Human.HipHeight + Root.Size.Y * 0.5, Pos.Z)
+        end
+        return Pos
+    end
+
+    local function ComputePath(Start, Goal, CandidateRoot, Human, Char)
+        -- Try the exact goal first; only sample nearby grounded positions if
+        -- the target happens to be inside a solid rubble/building collision.
+        local FromTarget = Start - Goal
+        local Flat = Vector3.new(FromTarget.X, 0, FromTarget.Z)
+        local Direction = Flat.Magnitude > 0.1 and Flat.Unit or Vector3.zAxis
+        local Side = Vector3.new(-Direction.Z, 0, Direction.X)
+        local Candidates = {
+            Goal,
+            Goal + Direction * 4,
+            Goal + Side * 4,
+            Goal - Side * 4,
+            Goal + Direction * 8,
+        }
+        for i, Candidate in ipairs(Candidates) do
+            if i > 1 then
+                Candidate = GroundTarget(Candidate, CandidateRoot, Human, Char)
+            end
+            for _, AgentRadius in ipairs({2, 1.5}) do
+                local OK, Result = pcall(function()
+                    local Path = PathfindingService:CreatePath({
+                        AgentRadius = AgentRadius,
+                        AgentHeight = 5,
+                        AgentCanJump = true,
+                        AgentCanClimb = true,
+                        WaypointSpacing = 4,
+                    })
+                    Path:ComputeAsync(Start, Candidate)
+                    if Path.Status == Enum.PathStatus.Success then
+                        local Points = Path:GetWaypoints()
+                        if #Points >= 2 then return { Path, Points, Candidate } end
+                    end
+                    return nil
+                end)
+                if OK and Result then return Result end
+            end
+        end
+        return nil
+    end
+
+    function Nav.Go(Target, Radius, Owner)
+        if Settings.FarmMethod ~= "Legit" then return false end
+        local Player = PlayersService.LocalPlayer
+        local Char = Player and Player.Character
+        local Root = Char and Char:FindFirstChild("HumanoidRootPart")
+        local Human = Char and Char:FindFirstChildOfClass("Humanoid")
+        if not Root or not Human or Human.Health <= 0 then
+            Nav.State = "Waiting for character"
+            StopWalking()
+            return false
+        end
+        if Char ~= Nav.Character then
+            Nav.Reset("Character changed")
+            Nav.Character = Char
+        end
+        Nav.Human = Human
+        Nav.LastRequestAt = os.clock()
+        -- Switching from Above/Below previously disabled AutoRotate.
+        -- Restore the farm's old hold, but don't override ability-specific
+        -- rotation locks applied by the game's own character controller.
+        local Ext = GENV.__AZ_FARM_EXT
+        if Ext.HorizontalHoldActive then
+            if Ext.HorizontalAutoRotateWas ~= nil then
+                Human.AutoRotate = Ext.HorizontalAutoRotateWas
+            end
+            Ext.HorizontalHoldActive = false
+            Ext.HorizontalAutoRotateWas = nil
+        end
+        local Pos = typeof(Target) == "CFrame" and Target.Position or Target
+        if typeof(Pos) ~= "Vector3" then return false end
+        Radius = math.clamp(tonumber(Radius) or 3, 1.5, 12)
+        Owner = tostring(Owner or "Farm")
+        Pos = GroundTarget(Pos, Root, Human, Char)
+        local Distance = (Root.Position - Pos).Magnitude
+        if Distance <= Radius then
+            -- Reaching a new owner must also cancel any previous movement.
+            -- Otherwise a stale Enemy path can pull us away from rubble/AREA.
+            if Nav.Owner ~= nil then
+                Nav.Token = Nav.Token + 1
+                ClearPath()
+                StopWalking()
+                Nav.Computing = false
+                Nav.Owner = Owner
+                Nav.Target = Pos
+                Nav.State = "Arrived " .. Owner
+            end
+            return true
+        end
+
+        local Now = os.clock()
+        local Changed = Nav.Owner ~= Owner or Nav.Target == nil
+            or (Nav.Target - Pos).Magnitude > 5
+        if Changed then
+            Nav.Token = Nav.Token + 1
+            ClearPath()
+            StopWalking()
+            Nav.Computing = false
+            Nav.Owner = Owner
+            Nav.Target = Pos
+            Nav.LastProgressPos = Root.Position
+            Nav.LastProgressAt = Now
+            Nav.NextPathAt = 0
+            Nav.State = "Finding path to " .. Owner
+        end
+
+        if Nav.LastProgressPos == nil then
+            Nav.LastProgressPos = Root.Position
+            Nav.LastProgressAt = Now
+        elseif (Root.Position - Nav.LastProgressPos).Magnitude > 2.0 then
+            Nav.LastProgressPos = Root.Position
+            Nav.LastProgressAt = Now
+        elseif Nav.DrivePoint and Now - Nav.LastProgressAt > 2.5 then
+            -- Navigation stalled. Throw away this path and find another.
+            Nav.Token = Nav.Token + 1
+            ClearPath()
+            StopWalking()
+            Nav.Computing = false
+            Nav.StuckRepaths = Nav.StuckRepaths + 1
+            Nav.LastProgressAt = Now
+            Nav.NextPathAt = Now + 0.3
+            Nav.State = "Blocked; rerouting around obstacle"
+        end
+
+        if not Nav.Computing and not Nav.Waypoints
+            and Now >= (Nav.NextPathAt or 0)
+        then
+            Nav.Computing = true
+            Nav.LastPathAt = Now
+            Nav.State = "Calculating path to " .. Owner
+            local Token = Nav.Token
+            local From = Root.Position
+            local To = Pos
+            task.spawn(function()
+                local PathResult = ComputePath(From, To, Root, Human, Char)
+                if Nav.Token ~= Token then return end
+                Nav.Computing = false
+                Nav.PathsComputed = Nav.PathsComputed + 1
+                if PathResult then
+                    ClearPath()
+                    local Path, Waypoints, Chosen = table.unpack(PathResult)
+                    Nav.Path = Path
+                    Nav.Waypoints = Waypoints
+                    Nav.Index = 1
+                    Nav.UsedAlternateGoal = (Chosen - To).Magnitude > 2
+                    Nav.LastError = nil
+                    Nav.State = "Following path: " .. Owner
+                    Nav.LastProgressPos = Root.Position
+                    Nav.LastProgressAt = os.clock()
+                    Nav.PathBlockConnection = Path.Blocked:Connect(function(BlockedIndex)
+                        if Nav.Path == Path and BlockedIndex >= Nav.Index then
+                            Nav.Token = Nav.Token + 1
+                            ClearPath()
+                            StopWalking()
+                            Nav.NextPathAt = os.clock() + 0.25
+                            Nav.State = "Path blocked; finding alternate route"
+                        end
+                    end)
+                else
+                    ClearPath()
+                    StopWalking()
+                    Nav.PathFailures = Nav.PathFailures + 1
+                    Nav.NextPathAt = os.clock() + 1.5
+                    Nav.LastError = "No walkable path to target"
+                    Nav.State = "No valid route: " .. Owner
+                    -- Only allow direct walking when there is actually a
+                    -- clear line of sight. Never charge into a building.
+                    if ClearRayToGoal(Root, Pos, Char) then
+                        Nav.DrivePoint = Pos
+                        Nav.State = "Clear direct walk: " .. Owner
+                    end
+                end
+            end)
+        end
+
+        local Waypoints = Nav.Waypoints
+        if Waypoints and #Waypoints > 0 then
+            while Nav.Index < #Waypoints do
+                local Point = Waypoints[Nav.Index].Position
+                local Delta = Point - Root.Position
+                if Vector3.new(Delta.X, 0, Delta.Z).Magnitude > 2.2 then
+                    break
+                end
+                Nav.Index = Nav.Index + 1
+            end
+            local Point = Waypoints[Nav.Index]
+            if Point then
+                Nav.DrivePoint = Point.Position
+                Nav.DriveJump = Point.Action == Enum.PathWaypointAction.Jump
+            end
+        end
+        return false
+    end
+
+    GENV.__AZ_LEGIT_NAV = Nav
+    GENV.__AZ_LEGIT_STATUS = function()
+        local H = Nav.Human
+        local R = {
+            method = Settings.FarmMethod, state = Nav.State,
+            owner = Nav.Owner, target = Nav.Target,
+            waypoint = Nav.Index, waypointCount = Nav.Waypoints and #Nav.Waypoints or 0,
+            movingToward = Nav.DrivePoint,
+            computing = Nav.Computing, lastError = Nav.LastError,
+            walkSpeed = H and H.WalkSpeed or nil,
+            moveDirection = H and H.MoveDirection.Magnitude or nil,
+            pathsComputed = Nav.PathsComputed,
+            pathFailures = Nav.PathFailures, stuckRepaths = Nav.StuckRepaths,
+            alternateGoal = Nav.UsedAlternateGoal,
+            stayNoclipSuspended = Settings.FarmMethod == "Legit",
+        }
+        for k,v in pairs(R) do
+            print("[Anime Zero][Legit]", k, "=", tostring(v))
+        end
+        return R
+    end
+end)()
+
+
 -- BELOW WAIT / LOOT TELEPORT SHARED MOVEMENT
 -- Shared by the normal farm controller and the rescue/Trials controller.
 -- The location is a raycast-confirmed WALKABLE surface, never a fixed Y height.
@@ -2692,6 +3051,11 @@ GENV.__AZ_FARM_EXT.TeleportToLootOnce = function(Root, Goal)
     local Token = Ext.LootTargetToken
     if not Root or typeof(Goal) ~= "CFrame" or Token == nil then
         return false
+    end
+    if Settings.FarmMethod == "Legit" then
+        local Arrived = GENV.__AZ_LEGIT_NAV.Go(Goal, 7.0, "Loot " .. tostring(Token))
+        Ext.LootStatus = Arrived and "At loot pickup range" or "Walking to loot"
+        return Arrived
     end
     if (Root.Position - Goal.Position).Magnitude <= 10 then
         return true
@@ -5520,6 +5884,7 @@ FarmTab:CreateDropdown({
     options = {
         "Teleport",
         "Tween",
+        "Legit",
     },
 
     value = Settings.FarmMethod,
@@ -5543,6 +5908,13 @@ FarmTab:CreateDropdown({
                 )
             end
 
+
+            if type(GENV.__AZ_LEGIT_NAV) == "table" then
+                GENV.__AZ_LEGIT_NAV.Reset("Farm Method changed")
+            end
+            if Selection == "Legit" and type(GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled) == "function" then
+                GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+            end
 
             LastTeleportGoal =
                 nil
@@ -5801,7 +6173,9 @@ FarmTab:CreateDropdown({
     flag = "FarmBlockMode",
 
     options = {
+        "Smart Block",
         "Perfect Parry",
+        "Reactive Block",
         "Hold Block",
     },
 
@@ -5825,6 +6199,37 @@ FarmTab:CreateDropdown({
                     Selection
                 )
             end
+        end
+    end,
+})
+
+
+FarmTab:CreateSlider({
+    name = "Parry Timing",
+    flag = "FarmParryLeadMs",
+    range = {60, 250},
+    increment = 10,
+    value = Settings.ParryLeadMs,
+    suffix = " ms",
+    callback = function(Value)
+        Settings.ParryLeadMs = math.clamp(tonumber(Value) or 120, 60, 250)
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("ParryLeadMs", Settings.ParryLeadMs)
+        end
+    end,
+})
+
+FarmTab:CreateSlider({
+    name = "Guard Reserve",
+    flag = "FarmBlockGuardReserve",
+    range = {0, 70},
+    increment = 5,
+    value = Settings.BlockGuardReserve,
+    suffix = "%",
+    callback = function(Value)
+        Settings.BlockGuardReserve = math.clamp(tonumber(Value) or 20, 0, 70)
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("BlockGuardReserve", Settings.BlockGuardReserve)
         end
     end,
 })
@@ -6529,6 +6934,9 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
         Rescue.MoveToGoal = function(Root, Goal, DeltaTime, Speed)
             if not Root or not Goal then
                 return false
+            end
+            if Settings.FarmMethod == "Legit" then
+                return GENV.__AZ_LEGIT_NAV.Go(Goal, 3.0, "Rescue")
             end
 
             if Settings.FarmMethod == "Tween" then
@@ -7878,8 +8286,12 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                             if typeof(LootGoal) == "CFrame" then
                                 -- Same one-teleport-per-drop logic as normal
                                 -- farming; then wait for pickup/store removal.
-                                GENV.__AZ_FARM_EXT.TeleportToLootOnce(Root, LootGoal)
-                                Rescue.RaidState = "Trials Exit Locked Loot Teleport"
+                                if Settings.FarmMethod == "Legit" then
+                                    GENV.__AZ_LEGIT_NAV.Go(LootGoal, 3, "Trials Loot")
+                                else
+                                    GENV.__AZ_FARM_EXT.TeleportToLootOnce(Root, LootGoal)
+                                end
+                                Rescue.RaidState = "Trials Exit Loot"
                                 return true
                             elseif Elapsed < 1.85 then
                                 Rescue.RaidState = "Waiting For Fresh Drop"
@@ -7934,9 +8346,15 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                         Destination.Z
                     )
                     if (Root.Position - GoalPosition).Magnitude > 1.8 then
-                        Root.CFrame = CFrame.new(GoalPosition) * Root.CFrame.Rotation
-                        Root.AssemblyLinearVelocity = Vector3.zero
-                        Root.AssemblyAngularVelocity = Vector3.zero
+                        if Settings.FarmMethod == "Legit" then
+                            GENV.__AZ_LEGIT_NAV.Go(GoalPosition, 1.7, "Elevator")
+                        else
+                            Root.CFrame = CFrame.new(GoalPosition) * Root.CFrame.Rotation
+                        end
+                        if Settings.FarmMethod ~= "Legit" then
+                            Root.AssemblyLinearVelocity = Vector3.zero
+                            Root.AssemblyAngularVelocity = Vector3.zero
+                        end
                         Rescue.RaidState = "Moving To Elevator Center"
                     else
                         Rescue.RaidState = "Elevator Center Ready"
@@ -7986,7 +8404,11 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                         - CenterGoal.Position
                     ).Magnitude > 2
                 then
-                    Root.CFrame = CenterGoal
+                    if Settings.FarmMethod == "Legit" then
+                        GENV.__AZ_LEGIT_NAV.Go(CenterGoal, 2.0, "Raid Center")
+                    else
+                        Root.CFrame = CenterGoal
+                    end
                 end
 
                 return true
@@ -8021,7 +8443,11 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 then
                     local Center = Rescue.GetRaidAreaGoal(Root, Area)
                     if Center and (Root.Position - Center.Position).Magnitude > 2.5 then
-                        Root.CFrame = Center
+                        if Settings.FarmMethod == "Legit" then
+                            GENV.__AZ_LEGIT_NAV.Go(Center, 2.2, "Raid Wave")
+                        else
+                            Root.CFrame = Center
+                        end
                         Rescue.RaidState = "Area Center / Next Wave"
                     else
                         Rescue.RaidState = "Area Center Ready"
@@ -8055,7 +8481,11 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 -- Area activation should be reliable and immediate. This mirrors
                 -- the Story/Join-map behavior of moving inside the real area
                 -- volume rather than chasing individual enemy spawn positions.
-                Root.CFrame = Goal
+                if Settings.FarmMethod == "Legit" then
+                    GENV.__AZ_LEGIT_NAV.Go(Goal, 2.5, "Raid Area")
+                else
+                    Root.CFrame = Goal
+                end
             else
                 Rescue.RaidState = "AreaGoalMissing"
             end
@@ -8130,7 +8560,8 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 NearestEnemy2()
 
             Rescue.SetHorizontalHoldActive(
-                WantsHorizontalHold and EnemyRoot ~= nil
+                Settings.FarmMethod ~= "Legit"
+                and WantsHorizontalHold and EnemyRoot ~= nil
                 and not GENV.__AZ_IS_FLOOR_EXIT_READY()
             )
 
@@ -8193,7 +8624,9 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     local DodgeDistance =
                         (Root.Position - DodgeGoal.Position).Magnitude
 
-                    if DodgeDistance > 0.05 then
+                    if DodgeDistance > 0.05 and Settings.FarmMethod == "Legit" then
+                        GENV.__AZ_LEGIT_NAV.Go(DodgeGoal, 2.0, "Raid Dodge")
+                    elseif DodgeDistance > 0.05 then
                         local DodgeAlpha =
                             math.clamp(
                                 (240 * DeltaTime)
@@ -8213,8 +8646,10 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                             * Root.CFrame.Rotation
                     end
 
-                    Root.AssemblyLinearVelocity = Vector3.zero
-                    Root.AssemblyAngularVelocity = Vector3.zero
+                    if Settings.FarmMethod ~= "Legit" then
+                        Root.AssemblyLinearVelocity = Vector3.zero
+                        Root.AssemblyAngularVelocity = Vector3.zero
+                    end
 
                     -- Movement runs before combat every heartbeat. As soon as
                     -- we have reached the safe point, allow ranged/remote skills
@@ -8282,8 +8717,12 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     and Ext.GetLootTargetCFrame()
                     or nil
                 if Goal then
-                    GENV.__AZ_FARM_EXT.TeleportToLootOnce(Root, Goal)
-                    Rescue.RaidState = "Locked loot teleport / pickup confirmation"
+                    if Settings.FarmMethod == "Legit" then
+                        GENV.__AZ_LEGIT_NAV.Go(Goal, 3, "Raid Loot")
+                    else
+                        GENV.__AZ_FARM_EXT.TeleportToLootOnce(Root, Goal)
+                    end
+                    Rescue.RaidState = "Loot pickup confirmation"
                     return
                 end
             end
@@ -8300,7 +8739,8 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             end
 
             if not EnemyRoot then
-                if not IsRaid and Settings.FarmPosition == "Below"
+                if Settings.FarmMethod ~= "Legit"
+                    and not IsRaid and Settings.FarmPosition == "Below"
                     and not GENV.__AZ_IS_FLOOR_EXIT_READY()
                 then
                     local Ext = GENV.__AZ_FARM_EXT
@@ -8328,6 +8768,15 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 )
 
             if not Goal then
+                return
+            end
+
+            if Settings.FarmMethod == "Legit" then
+                -- Above/Below are aerial holds; walking uses a grounded
+                -- approach regardless of the selected farm position.
+                GENV.__AZ_LEGIT_NAV.Go(Goal,
+                    math.clamp(Settings.FarmDistance or 7, 4, 10),
+                    GENV.__AZ_IS_TRIALS_MODE() and "Trials Enemy" or "Raid Enemy")
                 return
             end
 
@@ -8536,12 +8985,17 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 char = CharacterName,
                 character = LocalPlayerObject.Character,
                 skill = EffectiveSlot,
-                expiresAt = ServerNow + 5,
+                expiresAt = ServerNow + 1,
             }
 
             local Success = pcall(function()
                 CharacterPackets2.performSkill:fire(Request)
             end)
+            if Success then
+                GENV.__AZ_FARM_EXT.LastSkillSentAt = ServerNow
+                GENV.__AZ_FARM_EXT.LastSkillSentSlot = EffectiveSlot
+                GENV.__AZ_FARM_EXT.LastSkillSentRequestId = Request.id
+            end
             if Success and Slot == 4 then
                 Rescue.LastUltimateRequestSlot = EffectiveSlot
                 Rescue.LastUltimateRequestAt = ServerNow
@@ -8563,6 +9017,10 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             local DodgeSkillOnly =
                 GENV.__AZ_IS_RAID_MODE()
                 and Rescue.RaidDodgeActive
+
+            if type(GENV.__AZ_FARM_EXT.TickAutoBlock) == "function" then
+                GENV.__AZ_FARM_EXT.TickAutoBlock(DodgeSkillOnly == true)
+            end
 
             if DodgeSkillOnly
                 and not Rescue.RaidDodgeCombatReady
@@ -8653,47 +9111,11 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 return
             end
 
-            if Settings.AutoBlock
-                and CharacterPackets2.performBlock
-            then
-                if Settings.BlockMode == "Hold Block" then
-                    if Now >= Rescue.NextBlock then
-                        Rescue.NextBlock = Now + 0.30
-                        Rescue.BlockSent = true
+            -- Auto Block has one shared engine for Story, Trials and Raids.
+            -- This former loop spammed hold requests and attempted blind parries
+            -- merely because an enemy was close; the shared engine handles
+            -- guard, cooldowns, true target + attack timing and release.
 
-                        pcall(function()
-                            CharacterPackets2.performBlock:fire(true)
-                        end)
-                    end
-                elseif EnemyDistance <= 14
-                    and Now >= Rescue.NextBlock
-                then
-                    Rescue.NextBlock = Now + 0.45
-                    Rescue.BlockSent = true
-
-                    pcall(function()
-                        CharacterPackets2.performBlock:fire(true)
-                    end)
-
-                    task.delay(0.10, function()
-                        if Rescue.Active
-                            and CharacterPackets2.performBlock
-                        then
-                            pcall(function()
-                                CharacterPackets2.performBlock:fire(false)
-                            end)
-                        end
-                    end)
-                end
-            elseif Rescue.BlockSent
-                and CharacterPackets2.performBlock
-            then
-                Rescue.BlockSent = false
-
-                pcall(function()
-                    CharacterPackets2.performBlock:fire(false)
-                end)
-            end
         end
 
 
@@ -26771,6 +27193,10 @@ GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled = function(
 
     if ForceRestore == true then
         Enabled = false
+    elseif Settings.FarmMethod == "Legit" then
+        -- Legit walks on the ground; suspend persistent noclip without
+        -- changing the user's saved Stay Noclip preference.
+        Enabled = false
     elseif Settings.StayNoclip == true then
         Enabled = true
     end
@@ -26846,7 +27272,7 @@ end
 -- Persistent control is independent of Story/Trials/Raid farm state.
 -- Stepped fires before physics so collisions remain disabled even while idle.
 GENV.__AZ_FARM_EXT.StayNoclipConnection = RunService.Stepped:Connect(function()
-    if Settings.StayNoclip == true and SessionAlive() then
+    if Settings.StayNoclip == true and SessionAlive() and Settings.FarmMethod ~= "Legit" then
         GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(true)
     end
 end)
@@ -33152,7 +33578,10 @@ local function ApplyFarmMovement(
     if not MovementEnabled
         or not DesiredFarmCFrame
     then
-
+        if Settings.FarmMethod == "Legit" and not MovementEnabled
+            and type(GENV.__AZ_LEGIT_NAV) == "table" then
+            GENV.__AZ_LEGIT_NAV.Reset("Farm disabled")
+        end
         return
     end
 
@@ -33165,6 +33594,21 @@ local function ApplyFarmMovement(
         return
     end
 
+    if Settings.FarmMethod == "Legit" then
+        -- A separate owner handles AREA markers; regular farm supplies
+        -- enemies, rubble and the remaining grounded destinations.
+        if CurrentFarmMode == "Rubble" then
+            GENV.__AZ_LEGIT_NAV.Go(DesiredFarmCFrame, 1.8, "Rubble")
+        elseif CurrentFarmMode == "Enemy" then
+            GENV.__AZ_LEGIT_NAV.Go(DesiredFarmCFrame,
+                math.clamp(Settings.FarmDistance or 7, 4, 10), "Enemy")
+        elseif CurrentFarmMode == "Loot" then
+            GENV.__AZ_LEGIT_NAV.Go(DesiredFarmCFrame, 3.0, "Loot")
+        else
+            GENV.__AZ_LEGIT_NAV.Go(DesiredFarmCFrame, 2.5, CurrentFarmMode)
+        end
+        return
+    end
 
     -- Emergency stuck recovery for area transitions. The normal selected
     -- farm method gets the first chance to move. If the character is not
@@ -34207,7 +34651,7 @@ local function TrySkill(
 
 
     local Expires =
-        Now + 5
+        Now + 1
 
 
     local Request = {
@@ -34231,7 +34675,9 @@ local function TrySkill(
 
     PendingSkillRequestId =
         RequestId
-
+    GENV.__AZ_FARM_EXT.LastSkillSentAt = Now
+    GENV.__AZ_FARM_EXT.LastSkillSentSlot = EffectiveSkill
+    GENV.__AZ_FARM_EXT.LastSkillSentRequestId = RequestId
 
     PendingSkillExpiresAt =
         Expires
@@ -34317,6 +34763,9 @@ pcall(function()
             PendingSkillRequestId =
                 nil
 
+            GENV.__AZ_FARM_EXT.LastSkillResponseAt = workspace:GetServerTimeNow()
+            GENV.__AZ_FARM_EXT.LastSkillResponseAccepted = Data.accepted
+            GENV.__AZ_FARM_EXT.LastSkillResponseReason = tostring(Data.reason or Data.error or "not provided")
 
             if Data.accepted == false then
 
@@ -34351,6 +34800,24 @@ pcall(function()
 end)
 
 
+
+
+GENV.__AZ_SKILL_REQUEST_STATUS = function()
+    local E = GENV.__AZ_FARM_EXT or {}
+    local R = {
+        method = Settings.SkillMethod,
+        expiresWindow = "1 second (game client)",
+        lastSentAt = E.LastSkillSentAt,
+        lastSentSlot = E.LastSkillSentSlot,
+        lastSentId = E.LastSkillSentRequestId,
+        lastReplyAt = E.LastSkillResponseAt,
+        lastReplyAccepted = E.LastSkillResponseAccepted,
+        lastReplyReason = E.LastSkillResponseReason,
+        lastError = E.LastSkillError,
+    }
+    for k,v in pairs(R) do print("[Anime Zero][Skill Requests]",k,"=",tostring(v)) end
+    return R
+end
 
 -- Diagnose the primary Ultimate and any bonus ability in the active moveset.
 -- The UI toggle is unchanged: "Auto Ultimate" controls both stages.
@@ -34794,6 +35261,227 @@ end
 
 
 --//============================================================
+--// SHARED BLOCK CONTROLLER — Story / Trials / Raid
+--// Only one controller sends performBlock.  No proximity-only parry spam.
+--// Server enemy timing, guard meter, cooldown, and attack targeting decide.
+--//============================================================
+do
+    local Ext = GENV.__AZ_FARM_EXT
+    local B = {
+        Mode = Settings.BlockMode,
+        State = "Idle",
+        Reason = "Waiting",
+        HoldUntil = 0,
+        LastSentAt = 0,
+        LastSentValue = nil,
+        LastAttackKey = nil,
+        RecentKeys = {},
+        LastThreatAt = 0,
+        LastThreatDistance = nil,
+        LastTimeToHit = nil,
+        GuardPercent = 100,
+        Requests = 0,
+        ParryAttempts = 0,
+        ReactiveAttempts = 0,
+    }
+    Ext.BlockRuntime = B
+
+    local function SendBlock(Want, Store, Now)
+        local Current = IsBlocking(Store)
+        if Current == Want then
+            B.LastSentValue = Want
+            return
+        end
+        -- A server refusal should not produce block packets every Heartbeat.
+        if Now - B.LastSentAt < 0.13 then return end
+        if B.LastSentValue == Want and Now - B.LastSentAt < 0.65 then return end
+        B.LastSentAt = Now
+        B.LastSentValue = Want
+        B.Requests = B.Requests + 1
+        RequestBlock(Want)
+    end
+
+    local function BestIncomingAttack(Now)
+        local Root = GetRoot()
+        if not Root then return nil end
+        local Best = nil
+        local Count = 0
+        for Id, Enemy in pairs(GetAllEnemies()) do
+            if GetEnemyHealth(Enemy) > 0 and IsEnemyTargetingUs(Enemy) then
+                local Start = tonumber(EnemyGet(Enemy, "attackStartedAt"))
+                local Pos = GetEnemyPosition(Enemy)
+                local Dist = Pos and (Pos - Root.Position).Magnitude or math.huge
+                if Start and Dist <= 40 and Start <= Now + 0.1 then
+                    local Index = tonumber(EnemyGet(Enemy, "attackIndex"))
+                    local Name = GetEnemyName(Enemy)
+                    local Config = Name and GetEnemyConfig(Name)
+                    local Attacks = Config and Config.attacks
+                    local Attack = Attacks and Index and
+                        (Attacks[Index] or Attacks[Index + 1])
+                    local HitTime = Attack and tonumber(Attack.hitTime)
+                    local Speed = Config and tonumber(Config.attackSpeed) or 1
+                    if Speed <= 0 then Speed = 1 end
+                    local Until = HitTime and HitTime / Speed - (Now - Start) or nil
+                    local Key = tostring(Id) .. ":" .. tostring(Start) .. ":" .. tostring(Index)
+                    -- Only consider attacks within their plausible active window.
+                    if not Until or (Until >= -0.22 and Until <= 4) then
+                        Count = Count + 1
+                        if not Best or
+                            ((Until or 0.3) < (Best.TimeToHit or 0.3))
+                        then
+                            Best = {
+                                Key = Key,
+                                Distance = Dist,
+                                TimeToHit = Until,
+                                Name = Name,
+                            }
+                        end
+                    end
+                end
+            end
+        end
+        return Best, Count
+    end
+
+    Ext.TickAutoBlock = function(SuppressForDodge)
+        local Now = workspace:GetServerTimeNow()
+        local Store = GetPlayerStore()
+        local Mode = Settings.BlockMode or "Perfect Parry"
+        B.Mode = Mode
+        B.LastTimeToHit = nil
+        B.LastThreatDistance = nil
+
+        if not Store or not IsAlive() then
+            B.HoldUntil = 0
+            B.State = "Idle"
+            B.Reason = "Character not ready"
+            return
+        end
+
+        local Guard = tonumber(LocalPlayer:GetAttribute("BlockGuard"))
+        local Max = math.max(1, tonumber(LocalPlayer:GetAttribute("BlockGuardMax")) or 100)
+        local Percent = Guard and math.clamp(Guard / Max * 100, 0, 100) or 100
+        B.GuardPercent = math.floor(Percent + 0.5)
+        local Broken = LocalPlayer:GetAttribute("GuardBroken") == true
+        local Cooldown = CooldownReady(Store, "block")
+
+        if not Settings.AutoBlock or SuppressForDodge or not Ext.IsRunActive() then
+            B.HoldUntil = 0
+            B.State = "Idle"
+            B.Reason = not Settings.AutoBlock and "Toggle off"
+                or SuppressForDodge and "Dodging" or "Run inactive"
+            SendBlock(false, Store, Now)
+            return
+        end
+        if Broken or Percent <= (tonumber(Settings.BlockGuardReserve) or 20) then
+            B.HoldUntil = 0
+            B.State = "Guard recovery"
+            B.Reason = Broken and "Guard broken" or "Guard reserve"
+            SendBlock(false, Store, Now)
+            return
+        end
+
+        local Threat = BestIncomingAttack(Now)
+        B.State = Threat and "Tracking" or "Waiting"
+        B.Reason = Threat and "Checking incoming attack" or "No targeted attack"
+        if Threat then
+            B.LastThreatAt = Now
+            B.LastThreatDistance = Threat.Distance
+            B.LastTimeToHit = Threat.TimeToHit
+        end
+        local Want = Now < B.HoldUntil
+        local Busy = Ext.IsLocalClientBusy()
+        local Lead = (tonumber(Settings.ParryLeadMs) or 120) / 1000
+        local CanStart = Cooldown and not Busy and Now - B.LastSentAt >= 0.12
+
+        if Threat and CanStart then
+            local Time = Threat.TimeToHit
+            local ParryWindow = Time and Time >= -0.09 and Time <= Lead
+            local UnknownTiming = Time == nil
+            local NewAttack = B.RecentKeys[Threat.Key] == nil
+
+            if NewAttack and (Mode == "Perfect Parry" or Mode == "Smart Block") and ParryWindow then
+                B.RecentKeys[Threat.Key] = Now
+                B.LastAttackKey = Threat.Key
+                B.HoldUntil = Now + 0.15
+                B.ParryAttempts = B.ParryAttempts + 1
+                Want = true
+                B.State = "Parry window"
+                B.Reason = "Predicted enemy hit"
+            elseif NewAttack and (Mode == "Reactive Block" or
+                (Mode == "Smart Block" and UnknownTiming)) then
+                B.RecentKeys[Threat.Key] = Now
+                B.LastAttackKey = Threat.Key
+                B.HoldUntil = Now + 0.38
+                B.ReactiveAttempts = B.ReactiveAttempts + 1
+                Want = true
+                B.State = "Reactive"
+                B.Reason = UnknownTiming and "Enemy attack (unknown hit time)" or "Enemy attack started"
+            elseif Mode == "Hold Block" then
+                B.HoldUntil = Now + 0.22
+                Want = true
+                B.State = "Holding"
+                B.Reason = "Enemy targeting player"
+            end
+        elseif Threat and Mode == "Hold Block" and not Broken then
+            -- Keep an existing guard up through the remainder of an attack.
+            if IsBlocking(Store) then
+                B.HoldUntil = Now + 0.18
+                Want = true
+            end
+        end
+
+        if not Threat and Now >= B.HoldUntil then
+            B.State = "Waiting"
+            B.Reason = "No targeted attack"
+        elseif Threat and B.State ~= "Parry window" and B.State ~= "Reactive" and B.State ~= "Holding" then
+            B.State = "Tracking"
+            B.Reason = Threat.TimeToHit and "Waiting for hit timing" or "No hit timing available"
+        end
+        if not Cooldown and not Want then
+            B.Reason = "Block cooldown"
+        end
+        if Now < B.HoldUntil then Want = true end
+        if Now >= B.HoldUntil then Want = false end
+        SendBlock(Want, Store, Now)
+
+        -- Prevent unbounded memory growth during long Endless/Trials sessions.
+        if Now - (B.LastCleanedAt or 0) > 12 then
+            B.LastCleanedAt = Now
+            for Key, T in pairs(B.RecentKeys) do
+                if Now - T > 20 then B.RecentKeys[Key] = nil end
+            end
+        end
+    end
+
+    GENV.__AZ_BLOCK_STATUS = function()
+        local R = {
+            mode = Settings.BlockMode,
+            enabled = Settings.AutoBlock,
+            state = B.State,
+            reason = B.Reason,
+            guardPercent = B.GuardPercent,
+            reservePercent = Settings.BlockGuardReserve,
+            parryLeadMs = Settings.ParryLeadMs,
+            enemyDistance = B.LastThreatDistance,
+            timeToHit = B.LastTimeToHit,
+            blockRequested = B.LastSentValue,
+            blockObserved = IsBlocking(GetPlayerStore()),
+            lastAttackKey = B.LastAttackKey,
+            attemptsParry = B.ParryAttempts,
+            attemptsReactive = B.ReactiveAttempts,
+            recordedPerfectBlocks = LocalPlayer:GetAttribute("perfectBlocks"),
+            recordedBlocks = LocalPlayer:GetAttribute("blocks"),
+            requests = B.Requests,
+        }
+        for K, V in pairs(R) do
+            print("[Anime Zero][Block]", K, "=", tostring(V))
+        end
+        return R
+    end
+end
+
+--//============================================================
 --// RUBBLE COMBAT
 --//============================================================
 
@@ -35129,6 +35817,16 @@ local function HandleAreaEntry(TargetArea)
     if Now - (Entry.MarkerObservedAt or Now) < 0.55 then
         Entry.Status = "AREA marker settling"
         SetFarmMode("Waiting For AREA Marker " .. tostring(TargetArea))
+        return
+    end
+
+    if Settings.FarmMethod == "Legit" then
+        local Arrived = GENV.__AZ_LEGIT_NAV.Go(Entry.Goal, 1.7,
+            "AREA " .. tostring(TargetArea))
+        Entry.Status = Arrived and "At AREA inset; waiting for wave"
+            or "Walking to game AREA " .. tostring(TargetArea)
+        SetFarmMode(Arrived and "Waiting For AREA Wave " .. tostring(TargetArea)
+            or "Move To AREA Marker " .. tostring(TargetArea))
         return
     end
 
@@ -35769,28 +36467,12 @@ local function RunCombatHeartbeat()
     end
 
 
-    if Settings.AutoBlock then
-
-        if Settings.BlockMode
-            == "Hold Block"
-        then
-
-            RequestBlock(
-                ShouldHoldBlock()
-            )
-
-        else
-
-            RunPerfectParry()
-        end
-
-
+    if type(GENV.__AZ_FARM_EXT.TickAutoBlock) == "function" then
+        GENV.__AZ_FARM_EXT.TickAutoBlock(false)
     else
-
-        RequestBlock(
-            false
-        )
+        RequestBlock(false)
     end
+
 end
 
 
