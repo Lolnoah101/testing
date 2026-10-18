@@ -307,6 +307,8 @@ local Settings = {
     -- Trials now uses floor progression in the queue payload.
     SelectedTrialsRoom = 1,
     AutoJoinTrials = false,
+    AutoJoinTidal = false, -- Escape queue: Tidal High Rise (server map ID still Flood)
+    SelectedMoltenDifficulty = "Nightmare", -- keeps the previous difficulty=4 default
     AutoStartVote = false,
 
     EndlessLeaveWave = 10,
@@ -323,9 +325,11 @@ local Settings = {
 
     -- Story / Endless movement + rubble progression.
     AutoRaidFarm = false,
-    AutoTidalCombat = false, -- Beta: combat only, never blind climb/teleport
+    AutoTidalFarm = false, -- Tidal High Rise progression (fight, gates, lever, floors, roof)
     AutoFateBlessings = false, -- Pick from current official Fate offer
     FateBlessingCategory = "Random", -- Damage / Health / Defense / Utility / Random
+    AutoMoltenBlessings = false, -- Same official picker, independently controlled for Tidal
+    MoltenBlessingCategory = "Random", -- Independent Tidal blessing priority
 
     -- Sung Jinwoo: automatically raise eligible defeated enemies when the
     -- Shadow Gate Arise prompt appears. This never takes movement ownership.
@@ -2388,8 +2392,8 @@ end)()
         AutoRaidFarm =
             ReadSavedBool("AutoRaidFarm", Settings.AutoRaidFarm),
 
-        AutoTidalCombat =
-            ReadSavedBool("AutoTidalCombat", Settings.AutoTidalCombat),
+        AutoTidalFarm =
+            ReadSavedBool("AutoTidalFarm", Settings.AutoTidalFarm),
 
         AutoFateBlessings =
             ReadSavedBool("AutoFateBlessings", Settings.AutoFateBlessings),
@@ -2401,6 +2405,17 @@ end)()
                 or Saved.FateBlessingCategory == "Defense"
                 or Saved.FateBlessingCategory == "Utility")
                 and Saved.FateBlessingCategory or "Random",
+
+        AutoMoltenBlessings =
+            ReadSavedBool("AutoMoltenBlessings", Settings.AutoMoltenBlessings),
+
+        MoltenBlessingCategory =
+            (Saved.MoltenBlessingCategory == "Random"
+                or Saved.MoltenBlessingCategory == "Damage"
+                or Saved.MoltenBlessingCategory == "Health"
+                or Saved.MoltenBlessingCategory == "Defense"
+                or Saved.MoltenBlessingCategory == "Utility")
+                and Saved.MoltenBlessingCategory or "Random",
 
         AutoArise =
             ReadSavedBool("AutoArise", Settings.AutoArise),
@@ -2542,14 +2557,20 @@ end)()
         Settings.AutoRaidFarm =
             User.AutoRaidFarm == true
 
-        Settings.AutoTidalCombat =
-            User.AutoTidalCombat == true
+        Settings.AutoTidalFarm =
+            User.AutoTidalFarm == true
 
         Settings.AutoFateBlessings =
             User.AutoFateBlessings == true
 
         Settings.FateBlessingCategory =
             User.FateBlessingCategory
+
+        Settings.AutoMoltenBlessings =
+            User.AutoMoltenBlessings == true
+
+        Settings.MoltenBlessingCategory =
+            User.MoltenBlessingCategory
 
         Settings.AutoArise =
             User.AutoArise == true
@@ -2976,6 +2997,7 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
         Radius = math.clamp(tonumber(Radius) or 3, 1.5, 12)
         Owner = tostring(Owner or "Farm")
         Nav.StairAssist = workspace:GetAttribute("Mode") == "fateraid"
+            or workspace:GetAttribute("Mode") == "floodescape"
             and string.sub(Owner, 1, 5) == "Fate "
         Pos = GroundTarget(Pos, Root, Human, Char)
         local Distance = (Root.Position - Pos).Magnitude
@@ -4533,6 +4555,8 @@ end
                     or Single(Legacy.SelectedRaidMap),
                 AutoJoinRaid = Legacy.AutoJoinRaid,
                 AutoJoinTrials = Legacy.AutoJoinTrials,
+                AutoJoinTidal = Legacy.AutoJoinTidal,
+                SelectedMoltenDifficulty = Legacy.SelectedMoltenDifficulty,
                 SelectedTrialsRoom = Legacy.SelectedTrialsRoom,
                 AutoStartVote = Legacy.AutoStartVote,
                 EndlessLeaveWave = Legacy.EndlessWaveToLeave,
@@ -4650,6 +4674,17 @@ end
         AutoJoinTrials =
             ReadSavedBool("AutoJoinTrials", Settings.AutoJoinTrials),
 
+        AutoJoinTidal =
+            ReadSavedBool("AutoJoinTidal", Settings.AutoJoinTidal),
+
+        SelectedMoltenDifficulty =
+            (Saved.SelectedMoltenDifficulty == "Easy"
+                or Saved.SelectedMoltenDifficulty == "Medium"
+                or Saved.SelectedMoltenDifficulty == "Hard"
+                or Saved.SelectedMoltenDifficulty == "Nightmare")
+                and Saved.SelectedMoltenDifficulty
+                or Settings.SelectedMoltenDifficulty,
+
         AutoStartVote =
             ReadSavedBool("AutoStartVote", Settings.AutoStartVote),
 
@@ -4723,6 +4758,12 @@ end
 
         Settings.AutoJoinTrials =
             User.AutoJoinTrials == true
+
+        Settings.AutoJoinTidal =
+            User.AutoJoinTidal == true
+
+        Settings.SelectedMoltenDifficulty =
+            User.SelectedMoltenDifficulty
 
         Settings.AutoStartVote =
             User.AutoStartVote == true
@@ -5752,6 +5793,8 @@ LobbyTab:CreateToggle({
             Settings.AutoJoinMap = false
             Settings.AutoJoinEndless = false
             Settings.AutoJoinRaid = false
+            Settings.AutoJoinTidal = false
+            pcall(function() Window:Set("AutoJoinTidal", false) end)
             pcall(function() Window:Set("AutoJoinMap", false) end)
             pcall(function() Window:Set("AutoJoinEndless", false) end)
             pcall(function() Window:Set("AutoJoinRaid", false) end)
@@ -5759,13 +5802,96 @@ LobbyTab:CreateToggle({
         if type(Settings.SetLobbyUserPreference) == "function" then
             Settings.SetLobbyUserPreference("AutoJoinTrials", On)
             if On then
-                for _, Name in ipairs({"AutoJoinMap", "AutoJoinEndless", "AutoJoinRaid"}) do
+                for _, Name in ipairs({"AutoJoinMap", "AutoJoinEndless", "AutoJoinRaid", "AutoJoinTidal"}) do
                     Settings.SetLobbyUserPreference(Name, false)
                 end
             end
         end
         ResetLobbyState()
         print("[Anime Zero] Auto Join Trials:", On)
+    end,
+})
+
+--//============================================================
+--// TIDAL HIGH RISE: OFFICIAL ESCAPE QUEUE
+--//============================================================
+LobbyTab:CreateSection({name = "Tidal High Rise"})
+LobbyTab:CreateDropdown({
+    name = "Tidal Difficulty",
+    flag = "SelectedMoltenDifficulty",
+    options = {"Easy", "Medium", "Hard", "Nightmare"},
+    value = Settings.SelectedMoltenDifficulty,
+    callback = function(Value)
+        local Choice = GetSingleSelection(Value)
+        if Choice == "Easy" or Choice == "Medium" or Choice == "Hard"
+            or Choice == "Nightmare" then
+            Settings.SelectedMoltenDifficulty = Choice
+            if type(Settings.SetLobbyUserPreference) == "function" then
+                Settings.SetLobbyUserPreference("SelectedMoltenDifficulty", Choice)
+            end
+            print("[Anime Zero][Tidal] Difficulty:", Choice)
+        end
+    end,
+})
+LobbyTab:CreateToggle({
+    name = "Auto Join Tidal High Rise",
+    flag = "AutoJoinTidal",
+    value = Settings.AutoJoinTidal == true,
+    callback = function(Value)
+        local Enabled = Value == true
+        Settings.AutoJoinTidal = Enabled
+        if Enabled then
+            for _, Other in ipairs({
+                "AutoJoinMap", "AutoJoinEndless", "AutoJoinRaid", "AutoJoinTrials"
+            }) do
+                Settings[Other] = false
+                pcall(function() Window:Set(Other, false) end)
+                if type(Settings.SetLobbyUserPreference) == "function" then
+                    Settings.SetLobbyUserPreference(Other, false)
+                end
+            end
+        end
+        if type(Settings.SetLobbyUserPreference) == "function" then
+            Settings.SetLobbyUserPreference("AutoJoinTidal", Enabled)
+        end
+        ResetLobbyState()
+        print("[Anime Zero][Tidal] Auto Join Escape:", Enabled)
+    end,
+})
+
+--// Tidal uses the SAME official FateBlessingPicker UI/remote as Fate Raid,
+--// but separate settings and separate offer runtime keep preferences independent.
+LobbyTab:CreateDropdown({
+    name = "Tidal Blessings Priority",
+    flag = "MoltenBlessingCategory",
+    options = {"Random", "Damage", "Health", "Defense", "Utility"},
+    value = Settings.MoltenBlessingCategory,
+    callback = function(Value)
+        local Selection = GetSingleSelection(Value)
+        if Selection == "Random" or Selection == "Damage"
+            or Selection == "Health" or Selection == "Defense"
+            or Selection == "Utility" then
+            Settings.MoltenBlessingCategory = Selection
+            if type(Settings.SetFarmUserPreference) == "function" then
+                Settings.SetFarmUserPreference("MoltenBlessingCategory", Selection)
+            end
+            print("[Anime Zero][Tidal] Blessing priority:", Selection)
+        end
+    end,
+})
+
+LobbyTab:CreateToggle({
+    name = "Auto Tidal Blessings",
+    flag = "AutoMoltenBlessings",
+    value = Settings.AutoMoltenBlessings == true,
+    callback = function(Value)
+        local Enabled = Value == true
+        Settings.AutoMoltenBlessings = Enabled
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("AutoMoltenBlessings", Enabled)
+        end
+        print("[Anime Zero][Tidal] Auto Blessings:", Enabled,
+            "| priority:", Settings.MoltenBlessingCategory)
     end,
 })
 
@@ -5957,16 +6083,29 @@ GENV.__AZ_UI_FARM_MODES:CreateToggle({
 
 
 GENV.__AZ_UI_FARM_MODES:CreateToggle({
-    name = "Tidal Combat (Beta)",
-    flag = "AutoTidalCombat",
-    value = Settings.AutoTidalCombat == true,
+    name = "Auto Tidal Farm",
+    flag = "AutoTidalFarm",
+    value = Settings.AutoTidalFarm == true,
     callback = function(Value)
-        Settings.AutoTidalCombat = Value == true
+        local Enabled = Value == true
+        Settings.AutoTidalFarm = Enabled
         if type(Settings.SetFarmUserPreference) == "function" then
-            Settings.SetFarmUserPreference("AutoTidalCombat", Value == true)
+            Settings.SetFarmUserPreference("AutoTidalFarm", Enabled)
         end
-        print("[Anime Zero][Tidal] Combat assist:", Value == true,
-            "| Climbing/gates still require mapped route")
+        if not Enabled and GENV.__AZ_IS_FLOOD_ESCAPE() then
+            local T = GENV.__AZ_TIDAL_RUNTIME
+            if type(T) == "table" then
+                T.stage = "Disabled"
+                T.goal = nil
+            end
+            if GENV.__AZ_LEGIT_NAV then
+                GENV.__AZ_LEGIT_NAV.Reset("Tidal disabled")
+            end
+            if GENV.__AZ_FARM_EXT then
+                GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+            end
+        end
+        print("[Anime Zero][Tidal] Full Auto Farm:", Enabled)
     end,
 })
 GENV.__AZ_UI_FARM_MODES:CreateToggle({
@@ -7589,7 +7728,15 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 -- guardedAt is exactly what the game's boss bar uses to show
                 -- [IMMUNE]. Never tunnel into an immune No-Face while summons
                 -- or the Shadow clone are the real objective.
-                if not Info.Guarded then
+                local MoltenMode = GENV.__AZ_IS_FLOOD_ESCAPE()
+                local RootNow = MoltenMode and GetRoot2() or nil
+                local HealthLeaf = Info.State and Info.State.health
+                local Health = HealthLeaf and tonumber(ReadLeaf(HealthLeaf)) or nil
+                if not Info.Guarded
+                    and (Health == nil or Health > 0)
+                    and (not MoltenMode or not RootNow
+                        or math.abs(Info.Root.Position.Y - RootNow.Position.Y) <= 26)
+                then
                     local Score = Info.Distance
 
                     local Mode =
@@ -7695,6 +7842,17 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
         local function DesiredEnemyCFrame2(EnemyRoot)
             if not EnemyRoot then
                 return nil
+            end
+
+            -- Flood Escape registers players on solid floor surfaces.
+            -- Applying Above/Below here can push the avatar into the lava or
+            -- through the floor. Keep those preferences intact for other modes.
+            if GENV.__AZ_IS_FLOOD_ESCAPE() then
+                local Flat = math.clamp(tonumber(Settings.FarmDistance) or 7, 3, 12)
+                local Pos = (EnemyRoot.CFrame * CFrame.new(0, 0, Flat)).Position
+                Pos = Vector3.new(Pos.X, EnemyRoot.Position.Y, Pos.Z)
+                return CFrame.lookAt(Pos, Vector3.new(EnemyRoot.Position.X, Pos.Y,
+                    EnemyRoot.Position.Z))
             end
 
             local Distance =
@@ -9128,7 +9286,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             local FarmEnabled =
                 (IsRaid and Settings.AutoRaidFarm == true)
                 or (GENV.__AZ_IS_TRIALS_MODE() and Settings.AutoTrialsFarm == true)
-                or (GENV.__AZ_IS_FLOOD_ESCAPE() and Settings.AutoTidalCombat == true)
+                or (GENV.__AZ_IS_FLOOD_ESCAPE() and Settings.AutoTidalFarm == true)
                 or (not IsRaid and not GENV.__AZ_IS_TRIALS_MODE()
                     and not GENV.__AZ_IS_FLOOD_ESCAPE()
                     and Settings.AutoFarm == true)
@@ -9183,6 +9341,17 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 EnemyRoot
                 and DesiredEnemyCFrame2(EnemyRoot)
                 or nil
+
+            if GENV.__AZ_IS_FLOOD_ESCAPE() and EnemyFarmGoal then
+                local Project = GENV.__AZ_TIDAL_SAFE_COMBAT_GOAL
+                local Safe = type(Project) == "function"
+                    and Project(EnemyFarmGoal.Position, Root) or nil
+                if not Safe then
+                    Rescue.RaidState = "Tidal: no walkable combat surface"
+                    return
+                end
+                EnemyFarmGoal = Safe
+            end
 
             -- In Fate Raid, a Below-offset enemy goal would pass beneath the
             -- raised platform. Keep that goal at a verified floor height.
@@ -9397,7 +9566,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 return
             end
 
-            if Settings.FarmMethod == "Legit" or GENV.__AZ_IS_FLOOD_ESCAPE() then
+            if Settings.FarmMethod == "Legit" then
                 -- Above/Below are aerial holds; walking uses a grounded
                 -- approach regardless of the selected farm position.
                 GENV.__AZ_LEGIT_NAV.Go(Goal,
@@ -10470,9 +10639,19 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 floor = workspace:GetAttribute("FloodFloor"),
                 phase = workspace:GetAttribute("FloodPhase"),
                 locked = game:GetService("Players").LocalPlayer:GetAttribute("FloodLocked"),
-                water = workspace:GetAttribute("FloodLevel"),
+                lavaHeight = workspace:GetAttribute("FloodLevel"),
+                lavaCountdown = (function()
+                    local At = tonumber(workspace:GetAttribute("FloodAt"))
+                    return At and math.max(0, At - workspace:GetServerTimeNow()) or nil
+                end)(),
                 gateProgress = workspace:GetAttribute("FloodGate"),
                 leverAt = workspace:GetAttribute("FloodLeverAt"),
+                autoTidalFarm = Settings.AutoTidalFarm,
+                method = Settings.FarmMethod,
+                currentGoal = GENV.__AZ_TIDAL_RUNTIME
+                    and GENV.__AZ_TIDAL_RUNTIME.goal or nil,
+                stage = GENV.__AZ_TIDAL_RUNTIME
+                    and GENV.__AZ_TIDAL_RUNTIME.stage or "Not started",
                 characterPosition = Root and tostring(Root.Position) or "none",
                 nearby = {},
             }
@@ -10515,17 +10694,29 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
         GENV.__AZ_NEW_MODES_STATUS = function()
             local F, T = GENV.__AZ_FATE_RUNTIME, GENV.__AZ_TIDAL_RUNTIME
             local Result = {mode = workspace:GetAttribute("Mode"),
+                tidalEnabled = Settings.AutoTidalFarm,
+                tidalJoinEnabled = Settings.AutoJoinTidal,
                 tidal = T and T.stage or "inactive", tidalFloor = T and T.floor,
-                tidalPhase = T and T.phase, tidalWater = T and T.water,
+                tidalPhase = T and T.phase, moltenLava = T and T.water,
+                moltenDifficulty = Settings.SelectedMoltenDifficulty,
                 tidalGate = T and T.gate, tidalLever = T and T.lever,
-                tidalCombat = Settings.AutoTidalCombat,
+                autoTidalFarm = Settings.AutoTidalFarm,
+                tidalGoal = T and T.goal or "none",
+                tidalMethod = Settings.FarmMethod,
+                tidalJoin = Settings.AutoJoinTidal,
                 fate = F and F.state or "inactive",
                 fateBlessings = Settings.AutoFateBlessings,
                 fatePriority = Settings.FateBlessingCategory,
                 fateLastPick = F and F.choice or "none",
                 fateLastPickSource = F and F.choiceSource or "none",
                 fateRaidFarm = Settings.AutoRaidFarm,
-                fateOffer = game:GetService("Players").LocalPlayer:GetAttribute("FateOffer")}
+                fateOffer = game:GetService("Players").LocalPlayer:GetAttribute("FateOffer"),
+                moltenBlessings = Settings.AutoMoltenBlessings,
+                moltenPriority = Settings.MoltenBlessingCategory,
+                moltenBlessingState = GENV.__AZ_MOLTEN_BLESSING_RUNTIME
+                    and GENV.__AZ_MOLTEN_BLESSING_RUNTIME.state or "inactive",
+                moltenLastPick = GENV.__AZ_MOLTEN_BLESSING_RUNTIME
+                    and GENV.__AZ_MOLTEN_BLESSING_RUNTIME.choice or "none"}
             for Key, Value in pairs(Result) do
                 print("[Anime Zero][Mode]", Key, "=", tostring(Value))
             end
@@ -10545,14 +10736,23 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
         -- The categories are a user preference; the server still decides
         -- which three cards are offered and validates the selected ID.
         local FateBlessingCategories = {
-            Damage = { Sharp = true, ChainShatter = true },
-            Health = { BigHeart = true, ShardSnack = true, SpareHeart = true },
+            Damage = {
+                Sharp = true, ChainShatter = true,
+                GlassCannon = true, TwinBreaker = true,
+            },
+            Health = {
+                BigHeart = true, ShardSnack = true,
+                SpareHeart = true, MirrorLeech = true,
+            },
             Defense = { MirrorArmor = true },
             Utility = { Swift = true },
         }
+        -- All IDs in the patched FateBlessings config. Some have Raid-only
+        -- effects; those are ONLY chosen if the official server offers them.
         local ValidFateBlessingIds = {
-            Sharp = true, ChainShatter = true,
-            BigHeart = true, ShardSnack = true, SpareHeart = true,
+            Sharp = true, ChainShatter = true, GlassCannon = true,
+            TwinBreaker = true, BigHeart = true, ShardSnack = true,
+            SpareHeart = true, MirrorLeech = true,
             MirrorArmor = true, Swift = true,
         }
 
@@ -10584,6 +10784,586 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             return nil, "No recognized offered blessings"
         end
 
+        --//========================================================
+        --// MOLTEN HIGH RISE: ONE PHASE-AWARE MOVEMENT OWNER
+        --// Uses FloorN.Respawn as a safe landing marker; FloorN.Barrier
+        --// exists but is invisible/non-collidable and is only a gate marker.
+        --// Lever prompts and ramps/stairs handle other stages.
+        --// Never mutates Flood* attributes or pretends a local stage is
+        --// server-confirmed. It waits for the actual state to advance.
+        --//========================================================
+        local TidalHeight = { [0] = 0.75, [1] = 123.5, [2] = 170.5,
+            [3] = 217.5, [4] = 264.5, [5] = 311.5, [6] = 358.5,
+            [7] = 405.5, [8] = 452.5, [9] = 499.5,
+            [10] = 585.5, [11] = 632.5, [12] = 678.5 }
+
+        local function TidalPoint(Part)
+            if Part and Part:IsA("BasePart") then return Part.Position end
+            return nil
+        end
+
+        local function TidalMap()
+            local World = workspace:FindFirstChild("World")
+            return World, World and World:FindFirstChild("Map"),
+                World and World:FindFirstChild("Markers")
+        end
+
+        local function TidalFloorMarker(Floor)
+            local _, _, Markers = TidalMap()
+            if not Markers then return nil end
+            if Floor >= 12 then return Markers:FindFirstChild("BossSpawn") end
+            local Group = Markers:FindFirstChild("Floor" .. tostring(Floor))
+            -- Respawn marks a landing. Barrier exists as a non-solid gate
+            -- target; using it as a standing floor caused underground paths.
+            return Group and (Group:FindFirstChild("Respawn")
+                or Group:FindFirstChild("Barrier"))
+        end
+
+        local function TidalGroundGoal(Point, Root, ExactRadius, Floor)
+            if typeof(Point) ~= "Vector3" or not Root then return nil end
+            local _, Map = TidalMap()
+            if not Map then return nil end
+            local Parameters = RaycastParams.new()
+            Parameters.FilterType = Enum.RaycastFilterType.Include
+            Parameters.FilterDescendantsInstances = {Map}
+            Parameters.IgnoreWater = true
+            Parameters.RespectCanCollide = true
+            local Directions = ExactRadius and {
+                Vector3.zero, Vector3.new(3,0,0), Vector3.new(-3,0,0),
+                Vector3.new(0,0,3), Vector3.new(0,0,-3),
+            } or {
+                Vector3.zero, Vector3.new(5,0,0), Vector3.new(-5,0,0),
+                Vector3.new(0,0,5), Vector3.new(0,0,-5),
+                Vector3.new(8,0,0), Vector3.new(0,0,8),
+                Vector3.new(-8,0,0), Vector3.new(0,0,-8),
+                Vector3.new(12,0,0), Vector3.new(-12,0,0),
+                Vector3.new(0,0,12), Vector3.new(0,0,-12),
+            }
+            local Human = Root.Parent and Root.Parent:FindFirstChildOfClass("Humanoid")
+            local Height = math.clamp((Human and Human.HipHeight or 2)
+                + Root.Size.Y / 2, 2.5, 7)
+            local Best, BestScore = nil, math.huge
+            for _, Offset in ipairs(Directions) do
+                local Test = Point + Offset
+                local Hit = workspace:Raycast(Test + Vector3.new(0, 17, 0),
+                    Vector3.new(0, -40, 0), Parameters)
+                if Hit and Hit.Normal.Y >= 0.62
+                    and math.abs(Hit.Position.Y - Point.Y) <= (Floor and 8 or 15)
+                    and (not Floor or (TidalHeight[Floor]
+                        and math.abs(Hit.Position.Y - TidalHeight[Floor]) <= 8))
+                then
+                    local Pos = Hit.Position + Vector3.new(0, Height, 0)
+                    local Score = Offset.Magnitude + math.abs(Pos.Y - Point.Y) * 0.07
+                    if Score < BestScore then
+                        Best, BestScore = CFrame.new(Pos) * Root.CFrame.Rotation, Score
+                    end
+                end
+            end
+            return Best
+        end
+
+        -- A close-by lever or marker is NOT proof that Roblox considers us
+        -- on the current walkable floor. Confirm the visible surface beneath
+        -- the HumanoidRootPart, and its height relative to FloorN.Respawn.
+        local function TidalOnFloor(Root, Floor)
+            local Level = TidalHeight[Floor]
+            local _, Map = TidalMap()
+            if not Root or not Level or not Map then
+                return false, "Map/floor not loaded"
+            end
+            if math.abs(Root.Position.Y - Level) > 9 then
+                return false, "Wrong height (" .. math.floor(Root.Position.Y) .. ")"
+            end
+            local RayParams = RaycastParams.new()
+            RayParams.FilterType = Enum.RaycastFilterType.Include
+            RayParams.FilterDescendantsInstances = {Map}
+            RayParams.RespectCanCollide = true
+            RayParams.IgnoreWater = true
+            local Hit = workspace:Raycast(Root.Position + Vector3.new(0, 1.5, 0),
+                Vector3.new(0, -12, 0), RayParams)
+            if not Hit or Hit.Normal.Y < 0.55 then
+                return false, "No solid floor under character"
+            end
+            if math.abs(Hit.Position.Y - Level) > 8
+                or Root.Position.Y < Hit.Position.Y + 1.5
+                or Root.Position.Y > Hit.Position.Y + 9
+            then
+                return false, "Not standing on floor surface"
+            end
+            return true, "Verified standing on floor"
+        end
+
+        local TidalLeverCache = {Map = nil, Prompts = {}}
+        local function TidalLever(Floor, RequireEnabled)
+            local _, Map = TidalMap()
+            if not Map then return nil, nil end
+            local ExpectedY = TidalHeight[Floor]
+            if not ExpectedY then return nil, nil end
+            if TidalLeverCache.Map ~= Map then
+                TidalLeverCache.Map = Map
+                TidalLeverCache.Prompts = {}
+                for _, Object in ipairs(Map:GetDescendants()) do
+                    if Object:IsA("ProximityPrompt")
+                        and Object.Name == "FloodLeverPrompt" then
+                        table.insert(TidalLeverCache.Prompts, Object)
+                    end
+                end
+            end
+            local Best, BestPart, BestDiff = nil, nil, 25
+            for _, Object in ipairs(TidalLeverCache.Prompts) do
+                if Object.Parent and (RequireEnabled ~= true or Object.Enabled) then
+                    local Parent = Object.Parent
+                    local Part = Parent:IsA("BasePart") and Parent
+                        or Parent:FindFirstChildWhichIsA("BasePart", true)
+                    if Part then
+                        local Delta = math.abs(Part.Position.Y - ExpectedY - 4.5)
+                        if Delta < BestDiff then
+                            Best, BestPart, BestDiff = Object, Part, Delta
+                        end
+                    end
+                end
+            end
+            return Best, BestPart
+        end
+
+        local function TidalClimbAnchor(Root, Floor, TargetFloor, Method)
+            local _, Map = TidalMap()
+            if not Map then return nil, "Map loading" end
+            if TargetFloor == 1 and Root.Position.Y < 115 then
+                local Parking = Map:FindFirstChild("PARKING_LOT")
+                if Parking then
+                    local A = Parking:FindFirstChild("PRK_LOT_RAMP_A")
+                    local B = Parking:FindFirstChild("PRK_LOT_RAMP_B")
+                    if Root.Position.Y < 35 and TidalPoint(A) then
+                        return A.Position, "Parking ramp A"
+                    elseif Root.Position.Y < 94 and TidalPoint(B) then
+                        return B.Position, "Parking ramp B"
+                    end
+                end
+            end
+            -- Alternate the winding staircase at the halfway elevation
+            -- between the current and next stage. Exact stair parts are
+            -- discovered at runtime, not inferred from FloorNav (Y=-4).
+            if Method ~= "Teleport" then
+                local NextY = TidalHeight[TargetFloor]
+                local Low = TidalHeight[math.max(TargetFloor - 1, 0)] or 0
+                if NextY and Root.Position.Y < NextY - 15 then
+                    local Best, BestScore
+                    for _, Part in ipairs(Map:GetChildren()) do
+                        if Part.Name == "STAIR_COLL" and Part:IsA("BasePart")
+                            and Part.Position.Y > Low + 8
+                            and Part.Position.Y < NextY - 6
+                            and Root.Position.Y < Part.Position.Y + 1
+                        then
+                            local Vertical = math.abs(Part.Position.Y - (Low + NextY) / 2)
+                            local Distance = (Vector3.new(Part.Position.X, 0, Part.Position.Z)
+                                - Vector3.new(Root.Position.X, 0, Root.Position.Z)).Magnitude
+                            local Score = Vertical + Distance * 0.025
+                            if not BestScore or Score < BestScore then
+                                Best, BestScore = Part, Score
+                            end
+                        end
+                    end
+                    if Best then return Best.Position, "Stair transition" end
+                end
+            end
+            local Next = TidalFloorMarker(TargetFloor)
+            if Next and Next:IsA("BasePart") then
+                return Next.Position, TargetFloor >= 12
+                    and "Rooftop entrance" or "Next floor landing"
+            end
+            return nil, "Next floor marker loading"
+        end
+
+        local function TidalMove(T, Root, Goal, DeltaTime, Label, Radius)
+            if not Goal then
+                T.stage = "No verified ground: " .. tostring(Label)
+                T.goal = nil
+                return false
+            end
+            local Method = Settings.FarmMethod
+            if T.method ~= Method then
+                T.method, T.lastMoveAt, T.lastGoal = Method, 0, nil
+                if GENV.__AZ_LEGIT_NAV then
+                    GENV.__AZ_LEGIT_NAV.Reset("Tidal movement method changed")
+                end
+                if GENV.__AZ_FARM_EXT then
+                    GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                end
+            end
+            T.goal = Goal.Position
+            T.stage = tostring(Label) .. " (" .. tostring(Method) .. ")"
+            local Distance = (Root.Position - Goal.Position).Magnitude
+            local HorizontalDistance = (Vector3.new(Root.Position.X, 0, Root.Position.Z)
+                - Vector3.new(Goal.Position.X, 0, Goal.Position.Z)).Magnitude
+            local VerticalDistance = math.abs(Root.Position.Y - Goal.Position.Y)
+            if HorizontalDistance <= (Radius or 5) and VerticalDistance <= 2.5 then
+                if Method == "Legit" then
+                    GENV.__AZ_LEGIT_NAV.Go(Goal, Radius or 5, "Tidal " .. Label)
+                end
+                if Method == "Tween" and GENV.__AZ_FARM_EXT then
+                    GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                end
+                return true
+            end
+            if Method == "Legit" then
+                GENV.__AZ_LEGIT_NAV.Go(Goal, Radius or 5, "Tidal " .. Label)
+            elseif Method == "Tween" then
+                GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(true)
+                local Speed = math.clamp(tonumber(Settings.TweenSpeed) or 95, 20, 250)
+                local Fraction = math.clamp(Speed * math.clamp(DeltaTime or 0.016, 0, 0.1)
+                    / math.max(Distance, 0.001), 0, 1)
+                local Position = Root.Position:Lerp(Goal.Position, Fraction)
+                Root.CFrame = CFrame.new(Position) * Goal.Rotation
+                Root.AssemblyLinearVelocity = Vector3.zero
+            else
+                -- Only retrigger for a different destination or after the
+                -- player leaves the destination; no per-frame CFrame spam.
+                local Now = os.clock()
+                if Now - (T.lastMoveAt or 0) >= 0.5 then
+                    Root.CFrame = Goal
+                    Root.AssemblyLinearVelocity = Vector3.zero
+                    Root.AssemblyAngularVelocity = Vector3.zero
+                    T.lastMoveAt = Now
+                end
+            end
+            return false
+        end
+
+        local function TidalTryLever(T, Root, Prompt, Part)
+            if not Prompt or not Part then return end
+            local Now = os.clock()
+            local MaxDist = math.max(tonumber(Prompt.MaxActivationDistance) or 10, 2)
+            if (Root.Position - Part.Position).Magnitude > MaxDist + 1
+                or Now - (T.lastLeverAt or 0) < 2.5
+                or T.leverBusy
+            then return end
+            T.lastLeverAt = Now
+            T.leverBusy = true
+            T.stage = "Pulling lever (await server)"
+            task.spawn(function()
+                if type(fireproximityprompt) == "function" then
+                    pcall(fireproximityprompt, Prompt)
+                else
+                    pcall(function()
+                        Prompt:InputHoldBegin()
+                        task.wait(math.max(tonumber(Prompt.HoldDuration) or 1, 0) + 0.15)
+                        Prompt:InputHoldEnd()
+                    end)
+                end
+                T.leverBusy = false
+            end)
+        end
+
+        local function TidalReachRegisteredFloor(T, Root, Floor, DeltaTime)
+            local OnFloor, Why = TidalOnFloor(Root, Floor)
+            T.registeredFloor = OnFloor and Floor or nil
+            T.floorReason = Why
+            if OnFloor then
+                return true
+            end
+            local FloorMarker = TidalFloorMarker(Floor)
+            if not FloorMarker then
+                T.stage = "Waiting for real floor " .. tostring(Floor) .. " landing marker"
+                return false
+            end
+            local FloorGoal = TidalGroundGoal(FloorMarker.Position, Root, false, Floor)
+            if not FloorGoal then
+                T.stage = "Floor " .. tostring(Floor)
+                    .. ": no confirmed landing surface; not using marker as ground"
+                T.goal = nil
+                return false
+            end
+            -- A floor marker is not physical ground. Landing selection is
+            -- based on a collidable, upward-facing map raycast near that marker.
+            -- Never fall back to a naked CFrame on a marker or gate barrier.
+            -- Normal ascents may start down by the parking ramps. Use them for
+            -- Legit/Tween, but never allow an objective before ground verifies.
+            if Settings.FarmMethod ~= "Teleport"
+                and Root.Position.Y < (TidalHeight[Floor] or 0) - 12 then
+                local Point, Label = TidalClimbAnchor(Root, Floor - 1, Floor,
+                    Settings.FarmMethod)
+                if Point then
+                    local Candidate = TidalGroundGoal(Point, Root)
+                    if Candidate then
+                        TidalMove(T, Root, Candidate, DeltaTime,
+                            "Reach floor " .. Floor .. " / " .. Label, 3)
+                        return false
+                    end
+                end
+            end
+            TidalMove(T, Root, FloorGoal, DeltaTime,
+                "Stand on floor " .. tostring(Floor) .. " / " .. Why, 2.5)
+            -- Don't report floor registration on a successful movement command;
+            -- wait until the next heartbeat's physical floor raycast confirms it.
+            return false
+        end
+
+        -- Reproject every Flood combat destination onto the active level's
+        -- real geometry. Never use an enemy's Below offset under the map.
+        GENV.__AZ_TIDAL_SAFE_COMBAT_GOAL = function(Pos, Root)
+            local Level = workspace:GetAttribute("FloodRoof") == true and 12
+                or math.clamp(math.floor(tonumber(workspace:GetAttribute("FloodFloor")) or 0), 0, 12)
+            return TidalGroundGoal(Pos, Root, false, Level)
+        end
+
+        GENV.__AZ_TIDAL_FLOOR_STATUS = function()
+            local Root = GetRoot2()
+            local Floor = math.clamp(math.floor(tonumber(workspace:GetAttribute("FloodFloor")) or 0), 0, 12)
+            local OnFloor, Reason = TidalOnFloor(Root, Floor)
+            local T = GENV.__AZ_TIDAL_RUNTIME
+            local Status = {
+                floor = Floor, phase = workspace:GetAttribute("FloodPhase"),
+                onFloor = OnFloor, reason = Reason,
+                character = Root and Root.Position or nil,
+                landing = TidalFloorMarker(Floor) and TidalFloorMarker(Floor).Position or nil,
+                stage = T and T.stage or "unavailable",
+                goal = T and T.goal or nil,
+                method = Settings.FarmMethod,
+                locked = game:GetService("Players").LocalPlayer:GetAttribute("FloodLocked") == true,
+                lavaHeight = workspace:GetAttribute("FloodLevel"),
+                secondsUntilLava = (function()
+                    local At = tonumber(workspace:GetAttribute("FloodAt"))
+                    return At and math.max(0, At - workspace:GetServerTimeNow()) or nil
+                end)(),
+                leverRequested = workspace:GetAttribute("FloodLeverAt") ~= nil,
+                gateContested = workspace:GetAttribute("FloodGateContested") == true,
+                floorEnemies = T and T.floorEnemies or nil,
+                combatPriority = T and T.gateCombatLock == true or false,
+                gateClearSeconds = T and T.gateClearSince
+                    and os.clock() - T.gateClearSince or nil,
+                gateTargetSource = T and T.gateTargetSource or "none",
+                gateZoneAvailable = (function()
+                    local World = workspace:FindFirstChild("World")
+                    local Objects = World and World:FindFirstChild("MapObjects")
+                    local Zone = Objects and Objects:FindFirstChild("FloodGateZone")
+                    return Zone ~= nil and Zone:IsA("BasePart")
+                end)(),
+                lavaEnabled = workspace:GetAttribute("FloodLava"),
+            }
+            for K,V in pairs(Status) do
+                print("[Anime Zero][Tidal Floor]", K, "=", tostring(V))
+            end
+            return Status
+        end
+
+        -- Track CURRENT floor enemies, not FloodGateCrowd (player occupancy).
+        -- The lobby/other raids still use their original enemy selection.
+        local function TidalLivingFloorEnemies(Floor)
+            local FloorY = TidalHeight[Floor]
+            if not FloorY then return 0 end
+            local Snapshot = GetEnemySnapshot2()
+            local Count = 0
+            for _, Enemy in ipairs(Snapshot) do
+                if Enemy.Root and Enemy.Root.Parent and not Enemy.Guarded
+                    and math.abs(Enemy.Root.Position.Y - FloorY) <= 28
+                then
+                    local HealthLeaf = Enemy.State and Enemy.State.health
+                    local Health = HealthLeaf and tonumber(ReadLeaf(HealthLeaf)) or nil
+                    local Humanoid = Enemy.Model
+                        and Enemy.Model:FindFirstChildOfClass("Humanoid")
+                    if (Health == nil or Health > 0)
+                        and (not Humanoid or Humanoid.Health > 0) then
+                        Count += 1
+                    end
+                end
+            end
+            return Count
+        end
+
+        local function TickAutoTidal(T, DeltaTime)
+            if not Settings.AutoTidalFarm then
+                T.stage = "Disabled"
+                T.goal = nil
+                if T.wasEnabled and GENV.__AZ_LEGIT_NAV then
+                    GENV.__AZ_LEGIT_NAV.Reset("Tidal disabled")
+                end
+                if T.wasEnabled and GENV.__AZ_FARM_EXT then
+                    GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                end
+                T.wasEnabled = false
+                return
+            end
+            T.wasEnabled = true
+            local Root = GetRoot2()
+            if not Root or not Alive2() then
+                T.stage = "Waiting for character"
+                return
+            end
+            local Floor = math.clamp(math.floor(tonumber(T.floor) or 0), 0, 12)
+            local Phase = tostring(T.phase or "waiting"):lower()
+            if T.locked then
+                T.stage = "Flood-locked: waiting for recovery"
+                return
+            end
+            local _, Map, Markers = TidalMap()
+            if not Map or not Markers then
+                T.stage = "Waiting for Flood map/markers"
+                return
+            end
+            if T.roof then Floor = 12 end
+            local TargetFloor = Floor == 0 and 1 or math.min(Floor + 1, 12)
+            local MustReachFloor = Floor >= 1 and Floor <= 12
+                and not select(1, TidalOnFloor(Root, Floor))
+            local Fight = Phase == "fight" or T.roof
+            local GateContested = Phase == "block"
+                and workspace:GetAttribute("FloodGateContested") == true
+            local FloorEnemyCount = TidalLivingFloorEnemies(Floor)
+            T.floorEnemies = FloorEnemyCount
+
+            -- The current floor can be advancing server-side even while the
+            -- player is still climbing it; keep the entrance ahead of combat.
+            if MustReachFloor then
+                -- Do not touch levers/gates or chase enemies until the
+                -- current level's solid surface is actually underneath us.
+                TidalReachRegisteredFloor(T, Root, Floor, DeltaTime)
+                return
+            end
+
+            -- During any gate/block phase, combat has EXCLUSIVE movement
+            -- priority while a living enemy exists on this floor.  Do not
+            -- alternate between the gate point and an enemy every heartbeat.
+            -- Gate occupancy (FloodGateCrowd) must not activate combat.
+            if FloorEnemyCount > 0 then
+                T.gateClearSince = nil
+                T.gateCombatLock = Phase == "block"
+            end
+            if Fight or (Phase == "block" and FloorEnemyCount > 0) then
+                local _, EnemyRoot = NearestEnemy2()
+                if EnemyRoot then
+                    T.stage = Phase == "block"
+                        and ("Clear floor " .. Floor .. " enemies BEFORE gate ("
+                            .. FloorEnemyCount .. " left)")
+                        or ("Fighting floor " .. tostring(Floor))
+                    T.goal = EnemyRoot.Position
+                    if GENV.__AZ_FARM_EXT then
+                        GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(
+                            Settings.FarmMethod == "Tween",
+                            Settings.FarmMethod == "Legit")
+                    end
+                    MoveFarm2(DeltaTime)
+                    RunCombat2()
+                    return
+                end
+                if Phase == "block" and FloorEnemyCount > 0 then
+                    T.stage = "Enemies detected; waiting for attackable floor target"
+                    T.goal = nil
+                    RunCombat2()
+                    return
+                end
+                if Fight and Floor < 12 and (tonumber(T.remaining) or 0) > 0 then
+                    T.stage = "Waiting for floor enemies"
+                    RunCombat2()
+                    return
+                end
+            end
+
+            if Phase == "block" then
+                -- Brief empty-floor confirmation prevents flicker between mobs
+                -- and the gate when enemy models are temporarily unavailable.
+                T.gateClearSince = T.gateClearSince or os.clock()
+                if os.clock() - T.gateClearSince < 1.25 then
+                    T.stage = "Confirming gate enemies cleared"
+                    T.goal = nil
+                    RunCombat2()
+                    return
+                end
+                T.gateCombatLock = false
+                -- Lever takes priority only when the server actually requests
+                -- it. Stage data alone is never enough to pull every lever.
+                if T.lever ~= nil then
+                    local Prompt, LeverPart = TidalLever(Floor, true)
+                    if Prompt and LeverPart then
+                        local Goal = TidalGroundGoal(LeverPart.Position, Root, true, Floor)
+                        if TidalMove(T, Root, Goal, DeltaTime,
+                                "Floor " .. Floor .. " lever", 3)
+                            and TidalOnFloor(Root, Floor)
+                        then
+                            TidalTryLever(T, Root, Prompt, LeverPart)
+                        end
+                    else
+                        T.stage = "Waiting for floor " .. Floor .. " lever prompt"
+                    end
+                    return
+                end
+                -- Oct 18 patch: the game's FloodWaterController now reads
+                -- World.MapObjects.FloodGateZone as the actual gate occupancy
+                -- volume. It is runtime-created, so it may not exist yet.
+                -- Prefer its center on the current floor; keep old marker
+                -- fallback for older instances and before the zone replicates.
+                local GatePart, GateSource = nil, "none"
+                local World = workspace:FindFirstChild("World")
+                local Objects = World and World:FindFirstChild("MapObjects")
+                local Zone = Objects and Objects:FindFirstChild("FloodGateZone")
+                local FloorY = TidalHeight[Floor]
+                if Zone and Zone:IsA("BasePart") and FloorY
+                    and math.abs(Zone.Position.Y - FloorY) <= 15 then
+                    GatePart = Zone
+                    GateSource = "Live gate occupancy zone"
+                end
+                if not GatePart then
+                    local Group = Markers:FindFirstChild("Floor" .. tostring(Floor))
+                    local Barrier = Group and Group:FindFirstChild("Barrier")
+                    if Barrier and Barrier:IsA("BasePart") then
+                        GatePart, GateSource = Barrier, "Floor barrier marker fallback"
+                    end
+                end
+                if not GatePart then
+                    local _, LeverPart = TidalLever(Floor, false)
+                    GatePart = LeverPart or TidalFloorMarker(Floor)
+                    GateSource = "Floor marker fallback"
+                end
+                T.gateTargetSource = GateSource
+                if GatePart then
+                    local Goal = TidalGroundGoal(GatePart.Position, Root, false, Floor)
+                    local AtGate = TidalMove(T, Root, Goal, DeltaTime,
+                        "Hold gate floor " .. tostring(Floor), 5)
+                    if AtGate and TidalOnFloor(Root, Floor) then
+                        T.stage = GateContested and "Gate contested / waiting for enemies"
+                            or "At floor gate vicinity / checking progress"
+                        RunCombat2()
+                    end
+                else
+                    T.stage = "Waiting for floor " .. Floor .. " gate geometry"
+                end
+                return
+            end
+
+            if Phase == "drain" or (Floor == 0 and Phase ~= "fight") then
+                local Anchor, Label = TidalClimbAnchor(Root, Floor, TargetFloor, Settings.FarmMethod)
+                if Anchor then
+                    local Goal = TidalGroundGoal(Anchor, Root)
+                    local Arrived = TidalMove(T, Root, Goal, DeltaTime,
+                        "Climb to " .. (TargetFloor == 12 and "roof" or ("floor " .. TargetFloor))
+                            .. " / " .. Label, 6)
+                    if Arrived then
+                        T.stage = "At landing; waiting for server floor update"
+                    end
+                else
+                    T.stage = Label or "Waiting for next landing"
+                end
+                return
+            end
+
+            if T.roof or Floor == 12 then
+                local _, EnemyRoot = NearestEnemy2()
+                if EnemyRoot then
+                    T.stage = "Rooftop fight"
+                    MoveFarm2(DeltaTime)
+                    RunCombat2()
+                else
+                    T.stage = "Rooftop / waiting for boss"
+                    local BossSpawn = Markers:FindFirstChild("BossSpawn")
+                    if BossSpawn and BossSpawn:IsA("BasePart") then
+                        TidalMove(T, Root, TidalGroundGoal(BossSpawn.Position, Root),
+                            DeltaTime, "Roof center", 8)
+                    end
+                end
+                return
+            end
+            T.stage = "Awaiting Flood phase " .. tostring(Phase)
+        end
+
         Rescue.Connection =
             RunServiceService.Heartbeat:Connect(function(DeltaTime)
 
@@ -10597,28 +11377,46 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     pcall(Rescue.RunEndAction)
 
                 -- OCT18 MODE WORKFLOWS (no Hxh movement ownership here).
-                if workspace:GetAttribute("Mode") == "fateraid" then
-                    local F = GENV.__AZ_FATE_RUNTIME
-                    if not F then
-                        F = {state = "Waiting for offers", attempts = 0, lastOffer = "", lastAt = 0}
-                        GENV.__AZ_FATE_RUNTIME = F
+                -- Both Fate Raid and Tidal High Rise use FateOffer, FateOfferEnds
+                -- and FateBlessingPick. Keep separate toggles, category picks,
+                -- and retry state; never select a card unless server offers it.
+                local BlessingMode = workspace:GetAttribute("Mode")
+                local IsFateBlessingMode = BlessingMode == "fateraid"
+                local IsMoltenBlessingMode = BlessingMode == "floodescape"
+                if IsFateBlessingMode or IsMoltenBlessingMode then
+                    local RuntimeKey = IsFateBlessingMode and "__AZ_FATE_RUNTIME"
+                        or "__AZ_MOLTEN_BLESSING_RUNTIME"
+                    local F = GENV[RuntimeKey]
+                    if type(F) ~= "table" then
+                        F = {state = "Waiting for offers", attempts = 0,
+                            lastOffer = "", lastAt = 0}
+                        GENV[RuntimeKey] = F
+                    end
+                    local Enabled, Priority
+                    if IsFateBlessingMode then
+                        Enabled = Settings.AutoFateBlessings == true
+                        Priority = Settings.FateBlessingCategory
+                    else
+                        Enabled = Settings.AutoMoltenBlessings == true
+                        Priority = Settings.MoltenBlessingCategory
                     end
                     local Offer = LocalPlayerObject:GetAttribute("FateOffer")
                     local Ends = tonumber(LocalPlayerObject:GetAttribute("FateOfferEnds")) or 0
                     local NowServer = workspace:GetServerTimeNow()
                     if type(Offer) == "string" and Offer ~= "" and Ends > NowServer then
-                        if Offer ~= F.lastOffer then
-                            F.lastOffer, F.attempts, F.lastAt = Offer, 0, 0
+                        -- A new offer with the same cards can recur: include offer
+                        -- end time in the identity so later rounds aren't skipped.
+                        local OfferKey = Offer .. "|" .. tostring(Ends)
+                        if OfferKey ~= F.lastOffer then
+                            F.lastOffer, F.attempts, F.lastAt = OfferKey, 0, 0
                             F.choice, F.choiceSource = nil, nil
                         end
-                        F.state = "Offer available"
-                        if Settings.AutoFateBlessings and F.attempts < 2
+                        F.state = Enabled and "Offer available" or "Offer available (auto disabled)"
+                        if Enabled and F.attempts < 2
                             and os.clock() - F.lastAt >= 1.5 then
-                            -- Keep the same card for retries of this offer.
-                            -- Changing priority for the next offer is immediate.
                             if not F.choice then
                                 F.choice, F.choiceSource = PickFateBlessing(
-                                    Offer, Settings.FateBlessingCategory or "Random")
+                                    Offer, Priority or "Random")
                             end
                             local Choice = F.choice
                             if Choice then
@@ -10629,9 +11427,8 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                                     local Ok, Err = pcall(function()
                                         Remote:FireServer(Choice)
                                     end)
-                                    F.state = Ok
-                                        and ("Picked " .. Choice .. " [" .. F.choiceSource
-                                            .. "] (await confirmation)")
+                                    F.state = Ok and ("Picked " .. Choice .. " ["
+                                        .. (F.choiceSource or "") .. "] (await confirmation)")
                                         or ("Pick failed: " .. tostring(Err))
                                 else
                                     F.state = "Blessing remote not replicated"
@@ -10659,12 +11456,17 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     local Floor = workspace:GetAttribute("FloodFloor")
                     local Phase = tostring(workspace:GetAttribute("FloodPhase") or "waiting")
                     local Stage = tostring(Floor) .. ":" .. Phase
+                        .. ":" .. tostring(workspace:GetAttribute("FloodRoof"))
                     if Stage ~= T.lastStage then
                         T.lastStage, T.changedAt = Stage, os.clock()
+                        T.lastMoveAt, T.lastGoal = 0, nil
+                        T.gateClearSince = nil
+                        T.gateCombatLock = false
+                        T.leverBusy = false
                         print("[Anime Zero][Tidal] Stage:", Stage,
-                            "| Water:", tostring(workspace:GetAttribute("FloodLevel")))
-                        if type(GENV.__AZ_LEGIT_NAV) == "table" then
-                            GENV.__AZ_LEGIT_NAV.Reset("Tidal floor/phase change")
+                            "| Lava:", tostring(workspace:GetAttribute("FloodLevel")))
+                        if GENV.__AZ_LEGIT_NAV then
+                            GENV.__AZ_LEGIT_NAV.Reset("Tidal stage changed")
                         end
                     end
                     T.floor = Floor
@@ -10675,30 +11477,12 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     T.lever = workspace:GetAttribute("FloodLeverAt")
                     T.remaining = ReadRunValue2("remaining")
                     T.locked = LocalPlayerObject:GetAttribute("FloodLocked") == true
-                    if not Settings.AutoTidalCombat then
-                        T.stage = "Tidal assist disabled"
-                        return
-                    end
-                    local Fight = Phase == "fight"
-                        or (Phase == "block" and (
-                            workspace:GetAttribute("FloodGateContested") == true
-                            or (tonumber(workspace:GetAttribute("FloodGateCrowd")) or 0) > 0))
-                    if Fight and not T.locked then
-                        T.stage = "Combat on floor " .. tostring(Floor)
-                        if Settings.FarmMethod == "Legit" then
-                            local OK, Err = pcall(MoveFarm2, DeltaTime)
-                            if not OK then T.stage = "Movement error: " .. tostring(Err) end
-                        else
-                            T.stage = "Select Legit to move in Tidal (combat still active)"
-                        end
-                        pcall(RunCombat2)
-                    else
-                        T.stage = T.locked and "Drowning: climb a ramp"
-                            or (Phase == "block" and T.lever ~= nil and "Pull lever manually"
-                            or (Phase == "block" and "Reach/hold gate manually"
-                            or "Climb/advance manually; route not calibrated"))
-                        if type(GENV.__AZ_LEGIT_NAV) == "table" then
-                            GENV.__AZ_LEGIT_NAV.Reset("Tidal non-combat phase")
+                    local OK, Error = pcall(TickAutoTidal, T, DeltaTime)
+                    if not OK then
+                        T.stage = "Controller error: " .. tostring(Error)
+                        if not T.lastErrorAt or os.clock() - T.lastErrorAt > 3 then
+                            T.lastErrorAt = os.clock()
+                            warn("[Anime Zero][Tidal]", tostring(Error))
                         end
                     end
                     return
@@ -24300,6 +25084,8 @@ task.spawn(function()
         "AutoJoinMap",
         "AutoJoinRaid",
         "AutoJoinTrials",
+        "AutoJoinTidal",
+        "SelectedMoltenDifficulty",
         "SelectedTrialsRoom",
         "AutoStartVote",
 
@@ -28330,6 +29116,10 @@ local function FindLobbyMap(GamemodeId, MapName)
         Trials = {
             {Id = "trials", DisplayName = "Trials", Floors = true},
         },
+        Escape = {
+            {Id = "Flood", DisplayName = "Tidal High Rise"},
+            {Id = "Flood", DisplayName = "Molten High Rise"}, -- former patch label
+        },
     }
     for _, Map in ipairs(Fallback[GamemodeId] or {}) do
         if Map.Id == MapName or Map.DisplayName == MapName then
@@ -28881,6 +29671,25 @@ local function CreateLobbyQueue(
             }
         end
 
+    elseif Mode == "Escape" then
+        local FloodMap = FindLobbyMap("Escape", "Flood")
+            or FindLobbyMap("Escape", "Tidal High Rise")
+            or FindLobbyMap("Escape", "Molten High Rise")
+        if FloodMap and FloodMap.Id == "Flood" then
+            Payload = {
+                gamemode = "Escape",
+                map = FloodMap.Id,
+                chapter = 0,
+                floor = 0,
+                difficulty = DifficultyIds[Settings.SelectedMoltenDifficulty] or 4,
+                maxPlayers = 1,
+                friendsOnly = false,
+                roomNumber = RoomNumber,
+            }
+        else
+            warn("[Anime Zero][Tidal] Escape / Flood map not yet available")
+        end
+
     elseif Mode == "Raid" then
 
         local RaidMap =
@@ -29135,6 +29944,7 @@ end
         AutoJoinEndless = { setting = "AutoJoinEndless", group = "lobby" },
         AutoJoinRaid = { setting = "AutoJoinRaid", group = "lobby" },
         AutoJoinTrials = { setting = "AutoJoinTrials", group = "lobby" },
+        AutoJoinTidal = { setting = "AutoJoinTidal", group = "lobby" },
         AutoStartVote = { setting = "AutoStartVote", group = "lobby" },
         AutoRetry = { setting = "AutoRetry", group = "lobby" },
         AutoLeave = { setting = "AutoLeave", group = "lobby" },
@@ -29145,6 +29955,9 @@ end
         AutoFarm = { setting = "AutoFarm", group = "farm" },
         AutoTrialsFarm = { setting = "AutoTrialsFarm", group = "farm" },
         AutoRaidFarm = { setting = "AutoRaidFarm", group = "farm" },
+        AutoTidalFarm = { setting = "AutoTidalFarm", group = "farm" },
+        AutoFateBlessings = { setting = "AutoFateBlessings", group = "farm" },
+        AutoMoltenBlessings = { setting = "AutoMoltenBlessings", group = "farm" },
         AutoArise = { setting = "AutoArise", group = "farm" },
         AutoPickupLoot = { setting = "AutoPickupLoot", group = "farm" },
         AutoM1 = { setting = "AutoM1", group = "farm" },
@@ -29187,36 +30000,53 @@ end
             Settings.AutoJoinEndless = false
             Settings.AutoJoinRaid = false
             Settings.AutoJoinTrials = false
+            Settings.AutoJoinTidal = false
             SetOtherFlag("AutoJoinEndless", false)
             SetOtherFlag("AutoJoinRaid", false)
             SetOtherFlag("AutoJoinTrials", false)
+            SetOtherFlag("AutoJoinTidal", false)
             pcall(ResetLobbyState)
 
         elseif Flag == "AutoJoinEndless" and Value then
             Settings.AutoJoinMap = false
             Settings.AutoJoinRaid = false
             Settings.AutoJoinTrials = false
+            Settings.AutoJoinTidal = false
             SetOtherFlag("AutoJoinMap", false)
             SetOtherFlag("AutoJoinRaid", false)
             SetOtherFlag("AutoJoinTrials", false)
+            SetOtherFlag("AutoJoinTidal", false)
             pcall(ResetLobbyState)
 
         elseif Flag == "AutoJoinRaid" and Value then
             Settings.AutoJoinMap = false
             Settings.AutoJoinEndless = false
             Settings.AutoJoinTrials = false
+            Settings.AutoJoinTidal = false
             SetOtherFlag("AutoJoinMap", false)
             SetOtherFlag("AutoJoinEndless", false)
             SetOtherFlag("AutoJoinTrials", false)
+            SetOtherFlag("AutoJoinTidal", false)
             pcall(ResetLobbyState)
 
         elseif Flag == "AutoJoinTrials" and Value then
             Settings.AutoJoinMap = false
             Settings.AutoJoinEndless = false
             Settings.AutoJoinRaid = false
+            Settings.AutoJoinTidal = false
             SetOtherFlag("AutoJoinMap", false)
             SetOtherFlag("AutoJoinEndless", false)
             SetOtherFlag("AutoJoinRaid", false)
+            SetOtherFlag("AutoJoinTidal", false)
+            pcall(ResetLobbyState)
+
+        elseif Flag == "AutoJoinTidal" and Value then
+            for _, Other in ipairs({
+                "AutoJoinMap", "AutoJoinEndless", "AutoJoinRaid", "AutoJoinTrials"
+            }) do
+                Settings[Other] = false
+                SetOtherFlag(Other, false)
+            end
             pcall(ResetLobbyState)
 
         elseif Flag == "AutoRetry" and Value then
@@ -29338,11 +30168,13 @@ GENV.__AZ_AUTOJOIN_STATUS = function()
         uiEndless = (Window.Flags and Window.Flags.AutoJoinEndless),
         uiRaid = (Window.Flags and Window.Flags.AutoJoinRaid),
         uiTrials = (Window.Flags and Window.Flags.AutoJoinTrials),
+        uiTidal = (Window.Flags and Window.Flags.AutoJoinTidal),
         ready = LobbyReady,
         story = Settings.AutoJoinMap == true,
         endless = Settings.AutoJoinEndless == true,
         raid = Settings.AutoJoinRaid == true,
         trials = Settings.AutoJoinTrials == true,
+        tidal = Settings.AutoJoinTidal == true,
         trialsRoom = Settings.SelectedTrialsRoom,
         trialsHighestFromAccount = (GENV.__AZ_GET_TOP_TRIALS_FLOOR and GENV.__AZ_GET_TOP_TRIALS_FLOOR()) or nil,
         selectedMap = Settings.SelectedMap,
@@ -29389,6 +30221,7 @@ if LobbyReady then
             local AutoJoinEndlessNow = Settings.AutoJoinEndless == true
             local AutoJoinRaidNow = Settings.AutoJoinRaid == true
             local AutoJoinTrialsNow = Settings.AutoJoinTrials == true
+            local AutoJoinTidalNow = Settings.AutoJoinTidal == true
 
             if AutoJoinMapNow then
 
@@ -29411,6 +30244,11 @@ if LobbyReady then
 
                 RequestedMode =
                     "Trials"
+
+            elseif AutoJoinTidalNow then
+
+                RequestedMode =
+                    "Escape"
             end
 
 
