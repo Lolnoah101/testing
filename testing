@@ -39,6 +39,13 @@ end
 -- Trials uses Mode="trials", NOT a mode ending in "raid".
 -- Its lift is workspace.World.Markers.Lift, and its prompt is normally
 -- named ProximityPrompt (ActionText="Ascend"), not ExitPrompt.
+-- Flood Escape is a different event with its own movement/progression.
+-- Until a dedicated handler is tested, never use the Hxh Story controller.
+GENV.__AZ_IS_FLOOD_ESCAPE = function()
+    local Mode = workspace:GetAttribute("Mode")
+    return type(Mode) == "string" and string.lower(Mode) == "floodescape"
+end
+
 GENV.__AZ_IS_TRIALS_MODE = function()
     local Mode = workspace:GetAttribute("Mode")
     return type(Mode) == "string" and string.lower(Mode) == "trials"
@@ -316,6 +323,9 @@ local Settings = {
 
     -- Story / Endless movement + rubble progression.
     AutoRaidFarm = false,
+    AutoTidalCombat = false, -- Beta: combat only, never blind climb/teleport
+    AutoFateBlessings = false, -- Pick from current official Fate offer
+    FateBlessingCategory = "Random", -- Damage / Health / Defense / Utility / Random
 
     -- Sung Jinwoo: automatically raise eligible defeated enemies when the
     -- Shadow Gate Arise prompt appears. This never takes movement ownership.
@@ -344,6 +354,8 @@ local Settings = {
     },
 
     AutoUltimate = false,
+    -- Oct 18: opt-in acceptance of incoming official Duo Ultimate offers.
+    AutoDuoAccept = false,
 
     AutoBlock = false,
 
@@ -486,6 +498,91 @@ GENV.__AZ_SKILL_METHOD_STATUS = function()
         print("[Anime Zero][Skill Method]", K, "=", tostring(V))
     end
     return Info
+end
+
+--//============================================================
+--// OCT 18: DUO ULTIMATE (INCOMING OFFER ONLY)
+--// The game's DuoUltController.Press() sends "Accept" when an offer is
+--// active. Offer initiation remains a manual/native action.
+--//============================================================
+;(function()
+    local Players = game:GetService("Players")
+    local RS = game:GetService("ReplicatedStorage")
+    local Runtime = { accepted = 0, lastOfferUntil = 0, lastAttemptAt = 0,
+        lastResult = "idle", enabled = false, featureAvailable = nil }
+    GENV.__AZ_DUO_RUNTIME = Runtime
+    local function FeatureEnabled()
+        local Global = RS:FindFirstChild("global")
+        local Mod = Global and Global:FindFirstChild("Flags")
+        if not Mod then return false end
+        local Ok, Flags = pcall(require, Mod)
+        if not Ok or type(Flags) ~= "table" or type(Flags.IsOn) ~= "function" then
+            return false
+        end
+        local Good, Enabled = pcall(Flags.IsOn, "feature:duoUlt")
+        return Good and Enabled == true
+    end
+    GENV.__AZ_DUO_STATUS = function()
+        local LP = Players.LocalPlayer
+        local Now = workspace:GetServerTimeNow()
+        local Result = {
+            enabled = Settings.AutoDuoAccept == true,
+            autoUltimate = Settings.AutoUltimate == true,
+            offerSecondsLeft = LP and math.max(0, (tonumber(LP:GetAttribute("DuoOfferUntil")) or 0) - Now) or 0,
+            partner = LP and tostring(LP:GetAttribute("DuoPartner") or "none") or "none",
+            attempts = Runtime.accepted,
+            lastResult = Runtime.lastResult,
+            featureEnabled = FeatureEnabled(),
+        }
+        for Key, Value in pairs(Result) do
+            print("[Anime Zero][Duo Ultimate]", Key, "=", tostring(Value))
+        end
+        return Result
+    end
+    GENV.__AZ_TRY_DUO_ACCEPT = function()
+        if Settings.AutoDuoAccept ~= true or Settings.AutoUltimate ~= true
+            or not FeatureEnabled() then return false end
+        local LP = Players.LocalPlayer
+        if not LP then return false end
+        local Now = workspace:GetServerTimeNow()
+        local Until = tonumber(LP:GetAttribute("DuoOfferUntil")) or 0
+        if Until <= Now then return false end
+        -- At most one accept request per distinct server offer window.
+        if Runtime.lastOfferUntil == Until then return false end
+        if os.clock() - Runtime.lastAttemptAt < 0.5 then return false end
+        local Remote = RS:FindFirstChild("DuoUltRemote")
+        if not Remote or not Remote:IsA("RemoteEvent") then
+            Runtime.lastResult = "DuoUltRemote missing"
+            return false
+        end
+        Runtime.lastOfferUntil = Until
+        Runtime.lastAttemptAt = os.clock()
+        local Ok, Err = pcall(function() Remote:FireServer("Accept") end)
+        Runtime.lastResult = Ok and "Accept request sent (not server-confirmed)"
+            or tostring(Err)
+        if Ok then Runtime.accepted = Runtime.accepted + 1 end
+        return Ok
+    end
+    -- Run independently of enemy proximity, since an offer may arrive between waves.
+    task.spawn(function()
+        while GENV.__AZ_DUO_RUNTIME == Runtime do
+            task.wait(0.2)
+            pcall(GENV.__AZ_TRY_DUO_ACCEPT)
+        end
+    end)
+end)()
+
+--//============================================================
+GENV.__AZ_OCT18_COMPAT_STATUS = function()
+    local Mode = workspace:GetAttribute("Mode")
+    local S = {mode = Mode, floodEscapeProtected = GENV.__AZ_IS_FLOOD_ESCAPE(),
+        raidMode = GENV.__AZ_IS_RAID_MODE(),
+        autoDuoAccept = Settings.AutoDuoAccept == true,
+        raidMap = Settings.SelectedRaidMap,
+        skillMethod = Settings.SkillMethod,
+    }
+    for K,V in pairs(S) do print("[Anime Zero][Oct18]", K, "=", tostring(V)) end
+    return S
 end
 
 --// SETTINGS TAB STATE PERSISTENCE
@@ -2291,6 +2388,20 @@ end)()
         AutoRaidFarm =
             ReadSavedBool("AutoRaidFarm", Settings.AutoRaidFarm),
 
+        AutoTidalCombat =
+            ReadSavedBool("AutoTidalCombat", Settings.AutoTidalCombat),
+
+        AutoFateBlessings =
+            ReadSavedBool("AutoFateBlessings", Settings.AutoFateBlessings),
+
+        FateBlessingCategory =
+            (Saved.FateBlessingCategory == "Random"
+                or Saved.FateBlessingCategory == "Damage"
+                or Saved.FateBlessingCategory == "Health"
+                or Saved.FateBlessingCategory == "Defense"
+                or Saved.FateBlessingCategory == "Utility")
+                and Saved.FateBlessingCategory or "Random",
+
         AutoArise =
             ReadSavedBool("AutoArise", Settings.AutoArise),
 
@@ -2357,6 +2468,9 @@ end)()
 
         AutoUltimate =
             ReadSavedBool("AutoUltimate", Settings.AutoUltimate),
+
+        AutoDuoAccept =
+            ReadSavedBool("AutoDuoAccept", Settings.AutoDuoAccept),
 
         AutoBlock =
             ReadSavedBool("AutoBlock", Settings.AutoBlock),
@@ -2428,6 +2542,15 @@ end)()
         Settings.AutoRaidFarm =
             User.AutoRaidFarm == true
 
+        Settings.AutoTidalCombat =
+            User.AutoTidalCombat == true
+
+        Settings.AutoFateBlessings =
+            User.AutoFateBlessings == true
+
+        Settings.FateBlessingCategory =
+            User.FateBlessingCategory
+
         Settings.AutoArise =
             User.AutoArise == true
 
@@ -2463,6 +2586,9 @@ end)()
 
         Settings.AutoUltimate =
             User.AutoUltimate == true
+
+        Settings.AutoDuoAccept =
+            User.AutoDuoAccept == true
 
         Settings.AutoBlock =
             User.AutoBlock == true
@@ -2640,6 +2766,8 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
         DrivePoint = nil, DriveJump = false, LastRequestAt = 0,
         PathBlockConnection = nil, Path = nil, PathsComputed = 0,
         PathFailures = 0, StuckRepaths = 0, UsedAlternateGoal = false,
+        -- Fate entry uses a short-hop + early-repath assist on stair lips.
+        StairAssist = false, LastStairJumpAt = 0, StairAssistJumps = 0,
     }
 
     local function ClearPath()
@@ -2672,6 +2800,8 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
         Nav.LastProgressAt = os.clock()
         Nav.State = tostring(Reason or "Idle")
         Nav.LastError = nil
+        Nav.StairAssist = false
+        Nav.LastStairJumpAt = 0
     end
 
     -- PlayerModule can overwrite MoveTo's MoveDirection every render frame.
@@ -2698,13 +2828,44 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
             end
             local Delta = Nav.DrivePoint - Root.Position
             local Flat = Vector3.new(Delta.X, 0, Delta.Z)
-            if Flat.Magnitude >= 1.0 then
-                Human:Move(Flat.Unit, false)
-                if Nav.DriveJump and Human.FloorMaterial ~= Enum.Material.Air then
-                    Human.Jump = true
+            local Now = os.clock()
+            local StairLip = Nav.StairAssist and Delta.Y > 1.7
+                and Flat.Magnitude < 7
+
+            -- Pathfinding sometimes places a waypoint directly above a
+            -- staircase lip. Pure X/Z steering becomes zero there. Look
+            -- forward to the next path point instead of freezing in place.
+            if StairLip and Flat.Magnitude < 1.15 and Nav.Waypoints then
+                local Next = Nav.Waypoints[Nav.Index + 1]
+                if Next then
+                    local Ahead = Next.Position - Root.Position
+                    local Forward = Vector3.new(Ahead.X, 0, Ahead.Z)
+                    if Forward.Magnitude >= 1.0 then
+                        Flat = Forward
+                    end
                 end
+            end
+
+            if Flat.Magnitude >= 0.8 then
+                Human:Move(Flat.Unit, false)
             else
                 Human:Move(Vector3.zero, false)
+            end
+
+            -- Only help with a jump after a genuine stair stall. Keep normal
+            -- jumps for Roblox's PathWaypointAction.Jump as before.
+            local StalledAtLip = Nav.StairAssist
+                and Now - (Nav.LastProgressAt or Now) >= 0.85
+                and (StairLip or Flat.Magnitude < 8.0)
+            if (Nav.DriveJump or StalledAtLip)
+                and Human.FloorMaterial ~= Enum.Material.Air
+                and Now - Nav.LastStairJumpAt >= 0.85
+            then
+                Human.Jump = true
+                Nav.LastStairJumpAt = Now
+                if StalledAtLip then
+                    Nav.StairAssistJumps = Nav.StairAssistJumps + 1
+                end
             end
         end
     )
@@ -2740,7 +2901,7 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
         return Pos
     end
 
-    local function ComputePath(Start, Goal, CandidateRoot, Human, Char)
+    local function ComputePath(Start, Goal, CandidateRoot, Human, Char, StairPath)
         -- Try the exact goal first; only sample nearby grounded positions if
         -- the target happens to be inside a solid rubble/building collision.
         local FromTarget = Start - Goal
@@ -2765,7 +2926,9 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
                         AgentHeight = 5,
                         AgentCanJump = true,
                         AgentCanClimb = true,
-                        WaypointSpacing = 4,
+                        -- Denser waypoints prevent cutting across the
+                        -- stair-edge collision near the Fate arena.
+                        WaypointSpacing = StairPath and 2 or 4,
                     })
                     Path:ComputeAsync(Start, Candidate)
                     if Path.Status == Enum.PathStatus.Success then
@@ -2812,6 +2975,8 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
         if typeof(Pos) ~= "Vector3" then return false end
         Radius = math.clamp(tonumber(Radius) or 3, 1.5, 12)
         Owner = tostring(Owner or "Farm")
+        Nav.StairAssist = workspace:GetAttribute("Mode") == "fateraid"
+            and string.sub(Owner, 1, 5) == "Fate "
         Pos = GroundTarget(Pos, Root, Human, Char)
         local Distance = (Root.Position - Pos).Magnitude
         if Distance <= Radius then
@@ -2848,10 +3013,12 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
         if Nav.LastProgressPos == nil then
             Nav.LastProgressPos = Root.Position
             Nav.LastProgressAt = Now
-        elseif (Root.Position - Nav.LastProgressPos).Magnitude > 2.0 then
+        elseif (Root.Position - Nav.LastProgressPos).Magnitude
+                > (Nav.StairAssist and 0.95 or 2.0) then
             Nav.LastProgressPos = Root.Position
             Nav.LastProgressAt = Now
-        elseif Nav.DrivePoint and Now - Nav.LastProgressAt > 2.5 then
+        elseif Nav.DrivePoint and Now - Nav.LastProgressAt
+                > (Nav.StairAssist and 1.8 or 2.5) then
             -- Navigation stalled. Throw away this path and find another.
             Nav.Token = Nav.Token + 1
             ClearPath()
@@ -2859,8 +3026,9 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
             Nav.Computing = false
             Nav.StuckRepaths = Nav.StuckRepaths + 1
             Nav.LastProgressAt = Now
-            Nav.NextPathAt = Now + 0.3
-            Nav.State = "Blocked; rerouting around obstacle"
+            Nav.NextPathAt = Now + (Nav.StairAssist and 0.12 or 0.3)
+            Nav.State = Nav.StairAssist
+                and "Stairs stalled; recomputing path" or "Blocked; rerouting around obstacle"
         end
 
         if not Nav.Computing and not Nav.Waypoints
@@ -2872,8 +3040,9 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
             local Token = Nav.Token
             local From = Root.Position
             local To = Pos
+            local StairPath = Nav.StairAssist
             task.spawn(function()
-                local PathResult = ComputePath(From, To, Root, Human, Char)
+                local PathResult = ComputePath(From, To, Root, Human, Char, StairPath)
                 if Nav.Token ~= Token then return end
                 Nav.Computing = false
                 Nav.PathsComputed = Nav.PathsComputed + 1
@@ -2919,7 +3088,11 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
             while Nav.Index < #Waypoints do
                 local Point = Waypoints[Nav.Index].Position
                 local Delta = Point - Root.Position
-                if Vector3.new(Delta.X, 0, Delta.Z).Magnitude > 2.2 then
+                -- A waypoint directly above the player is NOT reached:
+                -- the old X/Z-only check discarded it on staircases.
+                if Vector3.new(Delta.X, 0, Delta.Z).Magnitude > 2.2
+                    or (Nav.StairAssist and math.abs(Delta.Y) > 3.0)
+                then
                     break
                 end
                 Nav.Index = Nav.Index + 1
@@ -2947,6 +3120,10 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
             pathsComputed = Nav.PathsComputed,
             pathFailures = Nav.PathFailures, stuckRepaths = Nav.StuckRepaths,
             alternateGoal = Nav.UsedAlternateGoal,
+            stairAssist = Nav.StairAssist,
+            stairJumps = Nav.StairAssistJumps,
+            secondsWithoutProgress = Nav.LastProgressAt > 0
+                and os.clock() - Nav.LastProgressAt or nil,
             stayNoclipSuspended = Settings.FarmMethod == "Legit",
         }
         for k,v in pairs(R) do
@@ -4459,6 +4636,7 @@ end
             or (
                 Saved.SelectedRaidMap == "Spirit's Bathtub"
                 or Saved.SelectedRaidMap == "Shadow Gate"
+                or Saved.SelectedRaidMap == "Evil Reflection"
             )
                 and Saved.SelectedRaidMap
             or Settings.SelectedRaidMap,
@@ -5365,6 +5543,7 @@ LobbyTab:CreateDropdown({
     options = {
         "Spirit's Bathtub",
         "Shadow Gate",
+        "Evil Reflection",
     },
 
     value = Settings.SelectedRaidMap,
@@ -5448,6 +5627,48 @@ LobbyTab:CreateToggle({
     end,
 })
 
+
+--//============================================================
+--// FATE RAID: BLESSING PRIORITY
+--// Stored in Farm preferences so the same selection is available in the
+--// lobby AND the dungeon after a teleport. UI intentionally lives here.
+--//============================================================
+
+LobbyTab:CreateDropdown({
+    name = "Fate Blessings Priority",
+    flag = "FateBlessingCategory",
+    options = {
+        "Random", "Damage", "Health", "Defense", "Utility",
+    },
+    value = Settings.FateBlessingCategory,
+    callback = function(Value)
+        local Selection = GetSingleSelection(Value)
+        if Selection == "Random" or Selection == "Damage"
+            or Selection == "Health" or Selection == "Defense"
+            or Selection == "Utility" then
+            Settings.FateBlessingCategory = Selection
+            if type(Settings.SetFarmUserPreference) == "function" then
+                Settings.SetFarmUserPreference("FateBlessingCategory", Selection)
+            end
+            print("[Anime Zero][Fate] Blessing priority:", Selection)
+        end
+    end,
+})
+
+LobbyTab:CreateToggle({
+    name = "Auto Fate Blessings",
+    flag = "AutoFateBlessings",
+    value = Settings.AutoFateBlessings == true,
+    callback = function(Value)
+        local Enabled = Value == true
+        Settings.AutoFateBlessings = Enabled
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("AutoFateBlessings", Enabled)
+        end
+        print("[Anime Zero][Fate] Auto Blessings:", Enabled,
+            "| priority:", Settings.FateBlessingCategory)
+    end,
+})
 
 --//============================================================
 --// TRIALS: select highest unlocked floor from live account progress.
@@ -5735,6 +5956,19 @@ GENV.__AZ_UI_FARM_MODES:CreateToggle({
 })
 
 
+GENV.__AZ_UI_FARM_MODES:CreateToggle({
+    name = "Tidal Combat (Beta)",
+    flag = "AutoTidalCombat",
+    value = Settings.AutoTidalCombat == true,
+    callback = function(Value)
+        Settings.AutoTidalCombat = Value == true
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("AutoTidalCombat", Value == true)
+        end
+        print("[Anime Zero][Tidal] Combat assist:", Value == true,
+            "| Climbing/gates still require mapped route")
+    end,
+})
 GENV.__AZ_UI_FARM_MODES:CreateToggle({
 
     name = "Auto Arise",
@@ -6137,6 +6371,20 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
     end,
 })
 
+
+-- Oct 18: optional auto-accept for INCOMING native Duo Ultimate offers.
+-- No auto-offering or undocumented server calls.
+GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
+    name = "Auto Accept Duo Ult",
+    flag = "AutoDuoAccept",
+    value = Settings.AutoDuoAccept,
+    callback = function(Value)
+        Settings.AutoDuoAccept = Value == true
+        if type(Settings.SetFarmUserPreference) == "function" then
+            Settings.SetFarmUserPreference("AutoDuoAccept", Value == true)
+        end
+    end,
+})
 
 GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
@@ -7594,6 +7842,10 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             Rescue.RaidGuardedBoss = false
             Rescue.RaidDodgeState = "Idle"
             table.clear(Rescue.SpikeHazards)
+            Rescue.FateGroundCache = nil
+            Rescue.FateLastReentryAt = 0
+            Rescue.FateEntry = nil
+            Rescue.FateLastMoveAt = nil
         end
 
 
@@ -7716,9 +7968,341 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
         end
 
 
+        --//========================================================
+        --// EVIL REFLECTION / FATE RAID: REAL ARENA FLOOR
+        --// The World.Areas volume is a tall trigger, not an actual floor.
+        --// In the 2026-10-18 dungeon snapshot its center is around Y=303.53,
+        --// while the broad circular platform is near Y=278-281. Never
+        --// preserve a falling player's Y or use the trigger's center Y.
+        --//========================================================
+        Rescue.GetFateArenaGoal = function(Root, Area)
+            if not Root or not Area or not Area:IsA("BasePart") then
+                Rescue.FateGroundReason = "Missing character or arena trigger"
+                return nil
+            end
+
+            local World = workspace:FindFirstChild("World")
+            local Map = World and World:FindFirstChild("Map")
+            if not Map then
+                Rescue.FateGroundReason = "World.Map has not loaded"
+                return nil
+            end
+
+            local Now = os.clock()
+            local Cache = Rescue.FateGroundCache
+            if Cache and Cache.Map == Map and Cache.Area == Area
+                and Now < Cache.ValidUntil
+            then
+                Rescue.FateGroundReason = Cache.Reason
+                Rescue.FateFloorPart = Cache.FloorPart
+                return Cache.Goal
+            end
+
+            -- Restrict ground-probing to large solid surfaces in THIS map.
+            -- This excludes tiny floating effects, props and the trigger part.
+            local Surfaces = {}
+            for _, Part in ipairs(Map:GetDescendants()) do
+                if Part:IsA("BasePart")
+                    and Part.CanCollide and Part.CanQuery
+                    and Part.Size.X >= 35 and Part.Size.Z >= 35
+                then
+                    table.insert(Surfaces, Part)
+                end
+            end
+
+            if #Surfaces == 0 then
+                Rescue.FateGroundReason = "No solid arena-size floor parts"
+                Rescue.FateGroundCache = {
+                    Map = Map, Area = Area, Goal = nil,
+                    FloorPart = nil, Reason = Rescue.FateGroundReason,
+                    ValidUntil = Now + 1.5,
+                }
+                return nil
+            end
+
+            local Params = RaycastParams.new()
+            Params.FilterType = Enum.RaycastFilterType.Include
+            Params.FilterDescendantsInstances = Surfaces
+            Params.RespectCanCollide = true
+            Params.IgnoreWater = true
+
+            local Offsets = {
+                Vector3.new(0, 0, 0),
+                Vector3.new(9, 0, 0),
+                Vector3.new(-9, 0, 0),
+                Vector3.new(0, 0, 9),
+                Vector3.new(0, 0, -9),
+                Vector3.new(16, 0, 0),
+                Vector3.new(-16, 0, 0),
+                Vector3.new(0, 0, 16),
+                Vector3.new(0, 0, -16),
+            }
+
+            local Goal, FloorPart
+            for _, Offset in ipairs(Offsets) do
+                local Origin = Area.CFrame:PointToWorldSpace(
+                    Vector3.new(Offset.X, Area.Size.Y * 0.5 + 22, Offset.Z)
+                )
+                local Hit = workspace:Raycast(
+                    Origin,
+                    Vector3.new(0, -(Area.Size.Y + 62), 0),
+                    Params
+                )
+
+                if Hit then
+                    local SurfacePoint = Hit.Position
+                    local StandingPoint = SurfacePoint + Vector3.new(0, 3.2, 0)
+                    local LocalPoint = Area.CFrame:PointToObjectSpace(StandingPoint)
+                    local Half = Area.Size * 0.5
+                    if math.abs(LocalPoint.X) <= Half.X - 4
+                        and math.abs(LocalPoint.Z) <= Half.Z - 4
+                        and math.abs(LocalPoint.Y) <= Half.Y + 1
+                        and Hit.Normal.Y >= 0.55
+                    then
+                        Goal = CFrame.new(StandingPoint) * Root.CFrame.Rotation
+                        FloorPart = Hit.Instance
+                        break
+                    end
+                end
+            end
+
+            local Reason = Goal and "Verified solid arena floor"
+                or "Arena floor raycast found no safe surface"
+            Rescue.FateGroundReason = Reason
+            Rescue.FateFloorPart = FloorPart
+            Rescue.FateGroundCache = {
+                Map = Map, Area = Area, Goal = Goal,
+                FloorPart = FloorPart, Reason = Reason,
+                ValidUntil = Now + (Goal and 2 or 1.5),
+            }
+            return Goal
+        end
+
+        --//========================================================
+        --// FATE RAID PLATFORM ENTRY: TELEPORT / TWEEN / LEGIT
+        --// Only fateraid uses this controller. The waves themselves are
+        --// triggered by the game's normal platform presence detection.
+        --// Legit uses the existing Humanoid/pathfinding mover; the other
+        --// methods use the selected farm movement preference.
+        --//========================================================
+        Rescue.MoveFateEntry = function(Root, Goal, DeltaTime, Label, Radius)
+            if not Root or typeof(Goal) ~= "CFrame" then return false end
+            local Distance = (Root.Position - Goal.Position).Magnitude
+            Radius = tonumber(Radius) or 3
+
+            if Settings.FarmMethod == "Legit" then
+                local Nav = GENV.__AZ_LEGIT_NAV
+                if type(Nav) ~= "table" then return false end
+                return Nav.Go(Goal, Radius, "Fate " .. tostring(Label or "Platform"))
+            end
+
+            if Distance <= Radius then
+                if Settings.FarmMethod == "Tween" then
+                    local Ext = GENV.__AZ_FARM_EXT
+                    if Ext and type(Ext.SetTweenNoclipEnabled) == "function" then
+                        Ext.SetTweenNoclipEnabled(false)
+                    end
+                end
+                Root.AssemblyLinearVelocity = Vector3.zero
+                Root.AssemblyAngularVelocity = Vector3.zero
+                return true
+            end
+
+            if Settings.FarmMethod == "Tween" then
+                local Ext = GENV.__AZ_FARM_EXT
+                if Ext and type(Ext.SetTweenNoclipEnabled) == "function" then
+                    Ext.SetTweenNoclipEnabled(true)
+                end
+                -- Center/next-wave calls sometimes run on a throttled
+                -- route check rather than each movement heartbeat.
+                local Now = os.clock()
+                local Elapsed = Now - (Rescue.FateLastMoveAt or (Now - 0.016))
+                Rescue.FateLastMoveAt = Now
+                local dt = math.clamp(tonumber(DeltaTime) or Elapsed, 0.001, 0.075)
+                local Speed = math.max(1, tonumber(Settings.TweenSpeed) or 95)
+                local Alpha = math.min(1, Speed * dt / math.max(Distance, 0.001))
+                Root.CFrame = Root.CFrame:Lerp(Goal, Alpha)
+            else
+                -- Teleport is intentionally immediate, directly onto the
+                -- raycast-confirmed floor, never the elevated trigger center.
+                Root.CFrame = Goal
+            end
+            Root.AssemblyLinearVelocity = Vector3.zero
+            Root.AssemblyAngularVelocity = Vector3.zero
+            return (Root.Position - Goal.Position).Magnitude <= Radius
+        end
+
+        Rescue.HandleFateEntry = function(Root, Area, DeltaTime)
+            if workspace:GetAttribute("Mode") ~= "fateraid"
+                or not Root or not Area
+            then
+                return false
+            end
+            local World = workspace:FindFirstChild("World")
+            local Floor = Rescue.GetFateArenaGoal(Root, Area)
+            if not Floor then
+                Rescue.RaidState = "Fate: waiting for verified platform floor"
+                return true
+            end
+
+            local F = Rescue.FateEntry
+            if not F or F.World ~= World or F.Character ~= Root.Parent then
+                F = {
+                    World = World, Character = Root.Parent,
+                    Step = 1, Complete = false,
+                    ArrivedAt = nil, Method = Settings.FarmMethod,
+                    State = "Starting", Goal = nil,
+                }
+                Rescue.FateEntry = F
+            end
+            if F.Method ~= Settings.FarmMethod then
+                F.Method = Settings.FarmMethod
+                -- Keep progress when changing movement method mid-route.
+                F.State = "Switched to " .. tostring(F.Method)
+            end
+
+            local Here = Root.Position
+            local Center = Floor.Position
+            local Horizontal = (Vector3.new(Here.X, 0, Here.Z)
+                - Vector3.new(Center.X, 0, Center.Z)).Magnitude
+            local OnPlatform = Rescue.IsInsideRaidArea(Root, Area)
+                and math.abs(Here.Y - Center.Y) <= 8
+                and Horizontal <= 86
+            local Wave = tonumber(ReadRunValue2("wave")) or 0
+            local Remaining = tonumber(ReadRunValue2("remaining")) or 0
+            local WaveStarted = ReadRunValue2("waveStartedAt") ~= nil
+                or (Wave > 0 and Remaining > 0)
+
+            if OnPlatform and WaveStarted then
+                F.Complete = true
+                F.State = "Waves active; combat owns movement"
+                Rescue.RaidState = F.State
+                return false
+            end
+            if F.Complete then
+                -- Do not steal movement from combat merely because it moves
+                -- towards an enemy near the arena's edge. Only recover when
+                -- the player actually drops beneath the raised platform.
+                if Here.Y >= Center.Y - 10
+                    or ReadRunValue2("finishedAt") ~= nil
+                then
+                    return false
+                end
+                F.Complete = false
+                F.Step = 4
+                F.State = "Recovering fallen character"
+                F.ArrivedAt = nil
+            end
+
+            -- Legit and Tween use the map's three-height stair/corridor
+            -- route. Markers are used as height/position references only;
+            -- pathfinding still verifies walkability for Legit.
+            -- Avoid relying on a hardcoded instance hierarchy beyond the
+            -- game-provided World.Navigation marker folder.
+            local Navigation = World and World:FindFirstChild("Navigation")
+            local function NavPoint(Name, Fallback)
+                local Marker = Navigation and Navigation:FindFirstChild(Name)
+                if Marker and Marker:IsA("BasePart") then
+                    return Marker.Position + Vector3.new(0, 2.8, 0)
+                end
+                return Fallback
+            end
+            local function MidPoint(A, B, Fallback)
+                local PA = Navigation and Navigation:FindFirstChild(A)
+                local PB = Navigation and Navigation:FindFirstChild(B)
+                if PA and PB and PA:IsA("BasePart") and PB:IsA("BasePart") then
+                    return (PA.Position + PB.Position) * 0.5 + Vector3.new(0, 2.8, 0)
+                end
+                return Fallback
+            end
+            local Checkpoints = {
+                { Name = "Lower stair landing",
+                  Position = NavPoint("nav247", Vector3.new(72, 252.8, -384)) },
+                { Name = "Raised corridor",
+                  Position = MidPoint("nav205", "nav206", Vector3.new(62, 267.8, -341)) },
+                { Name = "Platform stair approach",
+                  Position = MidPoint("nav173", "nav174", Vector3.new(62, 267.8, -293)) },
+                { Name = "Activation platform", Position = Center },
+            }
+
+            if Settings.FarmMethod == "Teleport" then
+                F.Step = 4
+            else
+                -- If the route starts mid-way (respawn, method swap, or
+                -- a manual move), skip checkpoints already clearly behind us.
+                if F.Step == 1 and Here.Z > -378 and Here.Y >= 246 then
+                    F.Step = 2
+                end
+                if F.Step == 2 and Here.Z > -335 and Here.Y >= 261 then
+                    F.Step = 3
+                end
+                if F.Step == 3 and Here.Z > -287 and Here.Y >= 262 then
+                    F.Step = 4
+                end
+            end
+
+            local Step = math.clamp(F.Step, 1, #Checkpoints)
+            local Current = Checkpoints[Step]
+            F.Goal = Current.Position
+            local Goal = CFrame.new(Current.Position) * Root.CFrame.Rotation
+            local Radius = Step == 4 and 3.5 or 6.0
+            local Arrived = Rescue.MoveFateEntry(
+                Root, Goal, DeltaTime, Current.Name, Radius
+            )
+
+            if Arrived then
+                if Step < #Checkpoints then
+                    F.Step = Step + 1
+                    F.State = "Reached " .. Current.Name
+                else
+                    F.ArrivedAt = F.ArrivedAt or os.clock()
+                    F.State = "On platform; waiting for automatic wave start"
+                end
+            else
+                F.State = "Going to " .. Current.Name
+                    .. " (" .. tostring(Settings.FarmMethod) .. ")"
+            end
+            Rescue.RaidState = F.State
+            return true
+        end
+
+        GENV.__AZ_FATE_ARENA_STATUS = function()
+            local Root = GetRoot2()
+            local World, Area = Rescue.GetRaidRouteObjects()
+            local Goal = Root and Area
+                and Rescue.GetFateArenaGoal(Root, Area) or nil
+            local Status = {
+                mode = workspace:GetAttribute("Mode"),
+                raidFarm = Settings.AutoRaidFarm == true,
+                farmMethod = Settings.FarmMethod,
+                raidState = Rescue.RaidState,
+                areaExists = Area ~= nil,
+                areaCenter = Area and Area.Position or nil,
+                characterPosition = Root and Root.Position or nil,
+                verifiedFloorGoal = Goal and Goal.Position or nil,
+                verifiedFloorPart = Rescue.FateFloorPart
+                    and Rescue.FateFloorPart:GetFullName() or nil,
+                reason = Rescue.FateGroundReason,
+                belowArena = Root and Goal
+                    and Root.Position.Y < Goal.Position.Y - 7 or false,
+                platformEntry = Rescue.FateEntry and Rescue.FateEntry.State or "Not started",
+                entryStep = Rescue.FateEntry and Rescue.FateEntry.Step or 0,
+                entryGoal = Rescue.FateEntry and Rescue.FateEntry.Goal or nil,
+                entryComplete = Rescue.FateEntry and Rescue.FateEntry.Complete or false,
+            }
+            for Key, Value in pairs(Status) do
+                print("[Anime Zero][FateArena]", Key, "=", tostring(Value))
+            end
+            return Status
+        end
+
         Rescue.GetRaidAreaGoal = function(Root, Area)
             if not Root or not Area then
                 return nil
+            end
+
+            if workspace:GetAttribute("Mode") == "fateraid" then
+                return Rescue.GetFateArenaGoal(Root, Area)
             end
 
             -- Keep the player's current Y whenever it already falls within the
@@ -8346,12 +8930,14 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                         Destination.Z
                     )
                     if (Root.Position - GoalPosition).Magnitude > 1.8 then
-                        if Settings.FarmMethod == "Legit" then
+                        if workspace:GetAttribute("Mode") == "fateraid" then
+                            Rescue.MoveFateEntry(Root,
+                                CFrame.new(GoalPosition) * Root.CFrame.Rotation,
+                                nil, "Raid Exit", 1.7)
+                        elseif Settings.FarmMethod == "Legit" then
                             GENV.__AZ_LEGIT_NAV.Go(GoalPosition, 1.7, "Elevator")
                         else
                             Root.CFrame = CFrame.new(GoalPosition) * Root.CFrame.Rotation
-                        end
-                        if Settings.FarmMethod ~= "Legit" then
                             Root.AssemblyLinearVelocity = Vector3.zero
                             Root.AssemblyAngularVelocity = Vector3.zero
                         end
@@ -8443,7 +9029,9 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 then
                     local Center = Rescue.GetRaidAreaGoal(Root, Area)
                     if Center and (Root.Position - Center.Position).Magnitude > 2.5 then
-                        if Settings.FarmMethod == "Legit" then
+                        if workspace:GetAttribute("Mode") == "fateraid" then
+                            Rescue.MoveFateEntry(Root, Center, nil, "Next Wave", 2.2)
+                        elseif Settings.FarmMethod == "Legit" then
                             GENV.__AZ_LEGIT_NAV.Go(Center, 2.2, "Raid Wave")
                         else
                             Root.CFrame = Center
@@ -8481,7 +9069,9 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 -- Area activation should be reliable and immediate. This mirrors
                 -- the Story/Join-map behavior of moving inside the real area
                 -- volume rather than chasing individual enemy spawn positions.
-                if Settings.FarmMethod == "Legit" then
+                if workspace:GetAttribute("Mode") == "fateraid" then
+                    Rescue.MoveFateEntry(Root, Goal, nil, "Raid Area", 2.5)
+                elseif Settings.FarmMethod == "Legit" then
                     GENV.__AZ_LEGIT_NAV.Go(Goal, 2.5, "Raid Area")
                 else
                     Root.CFrame = Goal
@@ -8538,11 +9128,14 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             local FarmEnabled =
                 (IsRaid and Settings.AutoRaidFarm == true)
                 or (GENV.__AZ_IS_TRIALS_MODE() and Settings.AutoTrialsFarm == true)
+                or (GENV.__AZ_IS_FLOOD_ESCAPE() and Settings.AutoTidalCombat == true)
                 or (not IsRaid and not GENV.__AZ_IS_TRIALS_MODE()
+                    and not GENV.__AZ_IS_FLOOD_ESCAPE()
                     and Settings.AutoFarm == true)
 
             local WantsHorizontalHold =
-                FarmEnabled
+                FarmEnabled and not GENV.__AZ_IS_FLOOD_ESCAPE()
+                and workspace:GetAttribute("Mode") ~= "fateraid"
                 and (
                     Settings.FarmPosition == "Above"
                     or Settings.FarmPosition == "Below"
@@ -8572,10 +9165,40 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 return
             end
 
+            -- Fate Raid: platform entry has exclusive movement ownership
+            -- until the game activates the first wave. Never confuse the
+            -- lower spawn/stairway with a fall from the arena.
+            if IsRaid and workspace:GetAttribute("Mode") == "fateraid" then
+                local _, ArenaArea = Rescue.GetRaidRouteObjects()
+                if not ArenaArea then
+                    Rescue.RaidState = "Fate: waiting for activation area"
+                    return
+                end
+                if Rescue.HandleFateEntry(Root, ArenaArea, DeltaTime) then
+                    return
+                end
+            end
+
             local EnemyFarmGoal =
                 EnemyRoot
                 and DesiredEnemyCFrame2(EnemyRoot)
                 or nil
+
+            -- In Fate Raid, a Below-offset enemy goal would pass beneath the
+            -- raised platform. Keep that goal at a verified floor height.
+            if IsRaid and workspace:GetAttribute("Mode") == "fateraid"
+                and EnemyFarmGoal
+            then
+                local _, ArenaArea = Rescue.GetRaidRouteObjects()
+                local FloorGoal = ArenaArea
+                    and Rescue.GetFateArenaGoal(Root, ArenaArea) or nil
+                if FloorGoal and EnemyFarmGoal.Position.Y < FloorGoal.Position.Y - 0.5 then
+                    local Position = EnemyFarmGoal.Position
+                    EnemyFarmGoal = CFrame.new(
+                        Position.X, FloorGoal.Position.Y, Position.Z
+                    ) * EnemyFarmGoal.Rotation
+                end
+            end
 
             -- Trials elevator has absolute movement priority. Waiting for
             -- enemy count to be zero can fail because stale enemies survive
@@ -8594,6 +9217,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 Rescue.RaidDodgeState = "Idle"
 
                 if not GENV.__AZ_IS_TRIALS_MODE()
+                    and not GENV.__AZ_IS_FLOOD_ESCAPE()
                     and not EnemyRoot
                     and Rescue.RunNormalProgressionAssist(DeltaTime)
                 then
@@ -8605,6 +9229,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             -- It consumes the exact enemySpikes telegraph packet plus the
             -- game's own aoeIndicator parts for other telegraphed boss slams.
             if IsRaid
+                and workspace:GetAttribute("Mode") ~= "fateraid"
                 and workspace:GetAttribute("RaidExitOpen") ~= true
             then
                 local _, RaidArea =
@@ -8740,6 +9365,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
             if not EnemyRoot then
                 if Settings.FarmMethod ~= "Legit"
+                    and not GENV.__AZ_IS_FLOOD_ESCAPE()
                     and not IsRaid and Settings.FarmPosition == "Below"
                     and not GENV.__AZ_IS_FLOOR_EXIT_READY()
                 then
@@ -8771,18 +9397,20 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 return
             end
 
-            if Settings.FarmMethod == "Legit" then
+            if Settings.FarmMethod == "Legit" or GENV.__AZ_IS_FLOOD_ESCAPE() then
                 -- Above/Below are aerial holds; walking uses a grounded
                 -- approach regardless of the selected farm position.
                 GENV.__AZ_LEGIT_NAV.Go(Goal,
                     math.clamp(Settings.FarmDistance or 7, 4, 10),
-                    GENV.__AZ_IS_TRIALS_MODE() and "Trials Enemy" or "Raid Enemy")
+                    GENV.__AZ_IS_FLOOD_ESCAPE() and "Tidal Enemy"
+                        or (GENV.__AZ_IS_TRIALS_MODE() and "Trials Enemy" or "Raid Enemy"))
                 return
             end
 
             local HorizontalHold =
-                Settings.FarmPosition == "Above"
-                or Settings.FarmPosition == "Below"
+                workspace:GetAttribute("Mode") ~= "fateraid"
+                and (Settings.FarmPosition == "Above"
+                    or Settings.FarmPosition == "Below")
 
             if HorizontalHold then
                 local HoldDistance =
@@ -9829,6 +10457,80 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
 
 
+        GENV.__AZ_TIDAL_ROUTE_SNAPSHOT = function()
+            if not GENV.__AZ_IS_FLOOD_ESCAPE() then
+                print("[Anime Zero][Tidal] Only use this in Tidal High Rise")
+                return nil
+            end
+            local Char = game:GetService("Players").LocalPlayer.Character
+            local Root = Char and Char:FindFirstChild("HumanoidRootPart")
+            local World = workspace:FindFirstChild("World")
+            local Map = World and World:FindFirstChild("Map")
+            local Result = {
+                floor = workspace:GetAttribute("FloodFloor"),
+                phase = workspace:GetAttribute("FloodPhase"),
+                locked = game:GetService("Players").LocalPlayer:GetAttribute("FloodLocked"),
+                water = workspace:GetAttribute("FloodLevel"),
+                gateProgress = workspace:GetAttribute("FloodGate"),
+                leverAt = workspace:GetAttribute("FloodLeverAt"),
+                characterPosition = Root and tostring(Root.Position) or "none",
+                nearby = {},
+            }
+            if Root and World then
+                for _, Obj in ipairs(World:GetDescendants()) do
+                    if Obj:IsA("BasePart") then
+                        local Label = string.lower(Obj.Name)
+                        if string.find(Label, "ramp", 1, true)
+                            or string.find(Label, "lever", 1, true)
+                            or string.find(Label, "gate", 1, true)
+                            or string.find(Label, "stair", 1, true)
+                            or string.find(Label, "exit", 1, true)
+                        then
+                            local Distance = (Obj.Position - Root.Position).Magnitude
+                            if Distance <= 180 then
+                                table.insert(Result.nearby, {
+                                    name = Obj:GetFullName(), distance = math.floor(Distance),
+                                    position = tostring(Obj.Position),
+                                })
+                            end
+                        end
+                    end
+                end
+                table.sort(Result.nearby, function(A,B)
+                    return A.distance < B.distance
+                end)
+            end
+            for Key, Value in pairs(Result) do
+                if Key ~= "nearby" then
+                    print("[Anime Zero][Tidal Route]", Key, "=", tostring(Value))
+                end
+            end
+            for Index = 1, math.min(12, #Result.nearby) do
+                local Entry = Result.nearby[Index]
+                print("[Anime Zero][Tidal Route] Near", Index, Entry.name,
+                    Entry.distance, Entry.position)
+            end
+            return Result
+        end
+        GENV.__AZ_NEW_MODES_STATUS = function()
+            local F, T = GENV.__AZ_FATE_RUNTIME, GENV.__AZ_TIDAL_RUNTIME
+            local Result = {mode = workspace:GetAttribute("Mode"),
+                tidal = T and T.stage or "inactive", tidalFloor = T and T.floor,
+                tidalPhase = T and T.phase, tidalWater = T and T.water,
+                tidalGate = T and T.gate, tidalLever = T and T.lever,
+                tidalCombat = Settings.AutoTidalCombat,
+                fate = F and F.state or "inactive",
+                fateBlessings = Settings.AutoFateBlessings,
+                fatePriority = Settings.FateBlessingCategory,
+                fateLastPick = F and F.choice or "none",
+                fateLastPickSource = F and F.choiceSource or "none",
+                fateRaidFarm = Settings.AutoRaidFarm,
+                fateOffer = game:GetService("Players").LocalPlayer:GetAttribute("FateOffer")}
+            for Key, Value in pairs(Result) do
+                print("[Anime Zero][Mode]", Key, "=", tostring(Value))
+            end
+            return Result
+        end
         Rescue.Ready = true
         GENV.__AZ_FARM_RESCUE_ACTIVE = true
         GENV.__AZ_FARM_ENGINE_ACTIVE = true
@@ -9838,6 +10540,49 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             game.PlaceId
         )
 
+
+        -- Official FateBlessings config IDs from this dungeon place.
+        -- The categories are a user preference; the server still decides
+        -- which three cards are offered and validates the selected ID.
+        local FateBlessingCategories = {
+            Damage = { Sharp = true, ChainShatter = true },
+            Health = { BigHeart = true, ShardSnack = true, SpareHeart = true },
+            Defense = { MirrorArmor = true },
+            Utility = { Swift = true },
+        }
+        local ValidFateBlessingIds = {
+            Sharp = true, ChainShatter = true,
+            BigHeart = true, ShardSnack = true, SpareHeart = true,
+            MirrorArmor = true, Swift = true,
+        }
+
+        local function PickFateBlessing(Offer, Priority)
+            local Candidates = {}
+            local Preferred = {}
+            local Category = FateBlessingCategories[Priority]
+            local Seen = {}
+
+            -- Same comma-separated ID format used by the official picker.
+            for Id in string.gmatch(Offer, "[^,]+") do
+                local Name = string.match(Id, "^%s*(.-)%s*$")
+                if ValidFateBlessingIds[Name] and not Seen[Name] then
+                    Seen[Name] = true
+                    table.insert(Candidates, Name)
+                    if Category and Category[Name] then
+                        table.insert(Preferred, Name)
+                    end
+                end
+            end
+
+            if #Preferred > 0 then
+                return Preferred[math.random(1, #Preferred)], "Preferred " .. Priority
+            end
+            if #Candidates > 0 then
+                return Candidates[math.random(1, #Candidates)],
+                    Priority == "Random" and "Random" or "Random fallback"
+            end
+            return nil, "No recognized offered blessings"
+        end
 
         Rescue.Connection =
             RunServiceService.Heartbeat:Connect(function(DeltaTime)
@@ -9850,6 +10595,114 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 -- Retry works in Raid even when the legacy farm engine is idle.
                 local SuccessEndAction, EndActionError =
                     pcall(Rescue.RunEndAction)
+
+                -- OCT18 MODE WORKFLOWS (no Hxh movement ownership here).
+                if workspace:GetAttribute("Mode") == "fateraid" then
+                    local F = GENV.__AZ_FATE_RUNTIME
+                    if not F then
+                        F = {state = "Waiting for offers", attempts = 0, lastOffer = "", lastAt = 0}
+                        GENV.__AZ_FATE_RUNTIME = F
+                    end
+                    local Offer = LocalPlayerObject:GetAttribute("FateOffer")
+                    local Ends = tonumber(LocalPlayerObject:GetAttribute("FateOfferEnds")) or 0
+                    local NowServer = workspace:GetServerTimeNow()
+                    if type(Offer) == "string" and Offer ~= "" and Ends > NowServer then
+                        if Offer ~= F.lastOffer then
+                            F.lastOffer, F.attempts, F.lastAt = Offer, 0, 0
+                            F.choice, F.choiceSource = nil, nil
+                        end
+                        F.state = "Offer available"
+                        if Settings.AutoFateBlessings and F.attempts < 2
+                            and os.clock() - F.lastAt >= 1.5 then
+                            -- Keep the same card for retries of this offer.
+                            -- Changing priority for the next offer is immediate.
+                            if not F.choice then
+                                F.choice, F.choiceSource = PickFateBlessing(
+                                    Offer, Settings.FateBlessingCategory or "Random")
+                            end
+                            local Choice = F.choice
+                            if Choice then
+                                local Remote = ReplicatedStorageService:FindFirstChild("FateBlessingPick")
+                                if Remote and Remote:IsA("RemoteEvent") then
+                                    F.attempts += 1
+                                    F.lastAt = os.clock()
+                                    local Ok, Err = pcall(function()
+                                        Remote:FireServer(Choice)
+                                    end)
+                                    F.state = Ok
+                                        and ("Picked " .. Choice .. " [" .. F.choiceSource
+                                            .. "] (await confirmation)")
+                                        or ("Pick failed: " .. tostring(Err))
+                                else
+                                    F.state = "Blessing remote not replicated"
+                                    F.lastAt = os.clock()
+                                end
+                            else
+                                F.state = F.choiceSource or "No recognized offered blessings"
+                                F.lastAt = os.clock()
+                            end
+                        end
+                    else
+                        F.state = "No active blessing offer"
+                        F.lastOffer = ""
+                        F.attempts = 0
+                        F.choice, F.choiceSource = nil, nil
+                    end
+                end
+
+                if GENV.__AZ_IS_FLOOD_ESCAPE() then
+                    local T = GENV.__AZ_TIDAL_RUNTIME
+                    if not T then
+                        T = {stage = "Waiting", lastStage = "", changedAt = 0}
+                        GENV.__AZ_TIDAL_RUNTIME = T
+                    end
+                    local Floor = workspace:GetAttribute("FloodFloor")
+                    local Phase = tostring(workspace:GetAttribute("FloodPhase") or "waiting")
+                    local Stage = tostring(Floor) .. ":" .. Phase
+                    if Stage ~= T.lastStage then
+                        T.lastStage, T.changedAt = Stage, os.clock()
+                        print("[Anime Zero][Tidal] Stage:", Stage,
+                            "| Water:", tostring(workspace:GetAttribute("FloodLevel")))
+                        if type(GENV.__AZ_LEGIT_NAV) == "table" then
+                            GENV.__AZ_LEGIT_NAV.Reset("Tidal floor/phase change")
+                        end
+                    end
+                    T.floor = Floor
+                    T.phase = Phase
+                    T.roof = workspace:GetAttribute("FloodRoof") == true
+                    T.water = workspace:GetAttribute("FloodLevel")
+                    T.gate = workspace:GetAttribute("FloodGate")
+                    T.lever = workspace:GetAttribute("FloodLeverAt")
+                    T.remaining = ReadRunValue2("remaining")
+                    T.locked = LocalPlayerObject:GetAttribute("FloodLocked") == true
+                    if not Settings.AutoTidalCombat then
+                        T.stage = "Tidal assist disabled"
+                        return
+                    end
+                    local Fight = Phase == "fight"
+                        or (Phase == "block" and (
+                            workspace:GetAttribute("FloodGateContested") == true
+                            or (tonumber(workspace:GetAttribute("FloodGateCrowd")) or 0) > 0))
+                    if Fight and not T.locked then
+                        T.stage = "Combat on floor " .. tostring(Floor)
+                        if Settings.FarmMethod == "Legit" then
+                            local OK, Err = pcall(MoveFarm2, DeltaTime)
+                            if not OK then T.stage = "Movement error: " .. tostring(Err) end
+                        else
+                            T.stage = "Select Legit to move in Tidal (combat still active)"
+                        end
+                        pcall(RunCombat2)
+                    else
+                        T.stage = T.locked and "Drowning: climb a ramp"
+                            or (Phase == "block" and T.lever ~= nil and "Pull lever manually"
+                            or (Phase == "block" and "Reach/hold gate manually"
+                            or "Climb/advance manually; route not calibrated"))
+                        if type(GENV.__AZ_LEGIT_NAV) == "table" then
+                            GENV.__AZ_LEGIT_NAV.Reset("Tidal non-combat phase")
+                        end
+                    end
+                    return
+                end
 
                 -- Dedicated Trials farm: resets stale room state whenever
                 -- TrialsRoom (floor index) or TrialsFloor (room 1..5) changes.
@@ -11556,6 +12409,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                 local Names = {
                     spiritedawayraid = "Raid",
                     sololevelingraid = "Raid",
+                    fateraid = "Raid",
                     infinite = "Endless",
                     hxh = "Story",
                     sakamoto = "Sakamoto",
@@ -11575,6 +12429,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                     hxh = "HxH",
                     spiritedawayraid = "Spirit's Bathtub",
                     sololevelingraid = "Shadow Gate",
+                    fateraid = "Evil Reflection",
                     infinite = "ZZZ World",
                     trials = "Trials",
                 }
@@ -12840,11 +13695,11 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                 end
                 return false
             end
-            local function WaitForTitle(M, Id, Timeout)
+            local function WaitForTitle(M, Id, Timeout, Field)
                 local Deadline = os.clock() + Timeout
                 while IsRunning() and os.clock() < Deadline do
                     local Latest = DataOf(M)
-                    if Latest and tostring(Latest.equippedTitle or "") == Id then
+                    if Latest and tostring(Latest[Field] or "") == Id then
                         return true
                     end
                     task.wait(0.2)
@@ -12894,20 +13749,37 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                     end
                     local TitleStatus = "no unlocked title"
                     if TitleId and IsRunning() then
+                        local StatOk, VisualOk = false, false
                         local Latest = DataOf(M) or Data
-                        if tostring(Latest.equippedTitle or "") == TitleId then
-                            TitleStatus = "title already equipped"
+                        if tostring(Latest.equippedStatsTitle or "") == TitleId then
+                            StatOk = true
                         else
                             local Fired = pcall(function()
-                                M.Packets.equipTitle:fire(TitleId)
+                                M.Packets.equipTitle:fire({titleId = TitleId, titleType = "Stats"})
                             end)
-                            if Fired and WaitForTitle(M, TitleId, 3) then
-                                TitleStatus = "title equipped"
-                            else
-                                TitleStatus = "title not confirmed"
-                            end
+                            StatOk = Fired and WaitForTitle(M, TitleId, 3, "equippedStatsTitle")
                         end
+                        Latest = DataOf(M) or Data
+                        if tostring(Latest.equippedTitle or "") == TitleId then
+                            VisualOk = true
+                        else
+                            local Fired = pcall(function()
+                                M.Packets.equipTitle:fire({titleId = TitleId, titleType = "Visual"})
+                            end)
+                            VisualOk = Fired and WaitForTitle(M, TitleId, 3, "equippedTitle")
+                        end
+                        TitleStatus = "Stats: " .. (StatOk and "confirmed" or "unconfirmed")
+                            .. ", Visual: " .. (VisualOk and "confirmed" or "unconfirmed")
                     end
+                    local FinalData = DataOf(M)
+                    GENV.__AZ_PRESET_LAST_RESULT = {
+                        preset = CurrentPreset, chosenAccessories = Chosen,
+                        chosenTitle = TitleId, equipped = EquippedCount,
+                        already = AlreadyCount, failed = FailedCount,
+                        statTitle = FinalData and FinalData.equippedStatsTitle or "unavailable",
+                        visualTitle = FinalData and FinalData.equippedTitle or "unavailable",
+                        titleStatus = TitleStatus,
+                    }
                     if IsRunning() then
                         Notice(CurrentPreset .. ": " .. EquippedCount
                             .. " accessories equipped, " .. AlreadyCount
@@ -12945,8 +13817,16 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
                 end,
             })
             GENV.__AZ_PLAYER_PRESET_STATUS = function()
-                print("[Anime Zero][Presets] selected=", Selected,
-                    "busy=", State.Busy)
+                local M = Modules()
+                local Account = M and DataOf(M) or nil
+                local S = {selected = Selected, busy = State.Busy,
+                    displayedTitle = Account and Account.equippedTitle or "unavailable",
+                    statTitle = Account and Account.equippedStatsTitle or "unavailable",
+                    lastResult = GENV.__AZ_PRESET_LAST_RESULT}
+                for Key, Value in pairs(S) do
+                    print("[Anime Zero][Presets]", Key, "=", tostring(Value))
+                end
+                return S
             end
         end)()
 
@@ -27443,6 +28323,7 @@ local function FindLobbyMap(GamemodeId, MapName)
         Raid = {
             {Id = "spiritedawayraid", DisplayName = "Spirit's Bathtub"},
             {Id = "sololevelingraid", DisplayName = "Shadow Gate"},
+            {Id = "fateraid", DisplayName = "Evil Reflection"},
             {Id = "spiritedawayraid", DisplayName = "BathTub"},
             {Id = "sololevelingraid", DisplayName = "ShadowGate"},
         },
@@ -28008,16 +28889,15 @@ local function CreateLobbyQueue(
                 Settings.SelectedRaidMap
                     or "Spirit's Bathtub"
             )
-            or FindLobbyMap(
-                "Raid",
-                Settings.SelectedRaidMap == "Shadow Gate"
-                    and "ShadowGate"
-                    or "BathTub"
-            )
-            or FindLobbyMap(
-                "Raid",
-                "Spirit's Bathtub"
-            )
+            or (Settings.SelectedRaidMap ~= "Evil Reflection"
+                and FindLobbyMap(
+                    "Raid",
+                    Settings.SelectedRaidMap == "Shadow Gate"
+                        and "ShadowGate"
+                        or "BathTub"
+                ))
+            or (Settings.SelectedRaidMap ~= "Evil Reflection"
+                and FindLobbyMap("Raid", "Spirit's Bathtub"))
 
 
         if RaidMap then
@@ -36167,6 +37047,12 @@ end
 
 local function UpdateAutoFarm()
 
+    if GENV.__AZ_IS_FLOOD_ESCAPE() then
+        DesiredFarmCFrame = nil
+        SetFarmMode("Flood Escape requires dedicated farm")
+        return
+    end
+
     if GENV.__AZ_IS_RAID_MODE() then
         DesiredFarmCFrame = nil
         SetFarmMode("Raid Uses Auto Raid Farm")
@@ -36412,6 +37298,7 @@ end
 
 local function RunCombatHeartbeat()
 
+    if GENV.__AZ_IS_FLOOD_ESCAPE() then return end
     if not IsAlive() then
         return
     end
