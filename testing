@@ -1,3 +1,8 @@
+--// OCT-18 LOBBY CATALOG AUDIT
+--// 50 titles and 28 accessories in config; 27 are craftable.
+--// Auto Farm Titles exposes only supported farm profiles; presets read all owned items dynamically.
+--// Spin pool includes Mochi Commander; evolution config includes Crimson Eclipse and Solar Radiance.
+
 --// Anime Zero bootstrap
 --// Stores the current full script in the executor filesystem so the
 --// "Auto Execute On Teleport" setting can reload it after place teleports.
@@ -7734,8 +7739,11 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 local Health = HealthLeaf and tonumber(ReadLeaf(HealthLeaf)) or nil
                 if not Info.Guarded
                     and (Health == nil or Health > 0)
-                    and (not MoltenMode or not RootNow
-                        or math.abs(Info.Root.Position.Y - RootNow.Position.Y) <= 26)
+                    and (not MoltenMode
+                        or (type(GENV.__AZ_TIDAL_IS_ACTIVE_FLOOR_ENEMY) == "function"
+                            and GENV.__AZ_TIDAL_IS_ACTIVE_FLOOR_ENEMY(Info.Root.Position.Y))
+                        or (type(GENV.__AZ_TIDAL_IS_ACTIVE_FLOOR_ENEMY) ~= "function"
+                            and (not RootNow or math.abs(Info.Root.Position.Y - RootNow.Position.Y) <= 26)))
                 then
                     local Score = Info.Distance
 
@@ -9578,6 +9586,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
             local HorizontalHold =
                 workspace:GetAttribute("Mode") ~= "fateraid"
+                and not GENV.__AZ_IS_FLOOD_ESCAPE()
                 and (Settings.FarmPosition == "Above"
                     or Settings.FarmPosition == "Below")
 
@@ -9651,7 +9660,9 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     local Alpha =
                         math.clamp(
                             (
-                                135
+                                (GENV.__AZ_IS_FLOOD_ESCAPE()
+                                    and (tonumber(Settings.TweenSpeed) or 95)
+                                    or 135)
                                 * DeltaTime
                             )
                             / math.max(
@@ -10819,6 +10830,47 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 or Group:FindFirstChild("Barrier"))
         end
 
+        -- The game's latest Floor 10 has two elevations: enemy spawn pads
+        -- near Y=546.5 and the gate/respawn landing near Y=585.5. Never
+        -- assume all enemies are level with the floor's Respawn marker.
+        local TidalSpawnHeightCache = {markers = nil, heights = {}}
+        local function TidalCombatHeight(Floor)
+            local _, _, Markers = TidalMap()
+            if not Markers then
+                return Floor == 10 and 546.5 or TidalHeight[Floor]
+            end
+            if TidalSpawnHeightCache.markers ~= Markers then
+                TidalSpawnHeightCache.markers = Markers
+                TidalSpawnHeightCache.heights = {}
+            end
+            local Cached = TidalSpawnHeightCache.heights[Floor]
+            if Cached then return Cached end
+            local Group = Markers:FindFirstChild("Floor" .. tostring(Floor))
+            local Spawns = Group and Group:FindFirstChild("EnemySpawns")
+            local Sample = Spawns and Spawns:FindFirstChildWhichIsA("BasePart")
+            local Y = Sample and Sample.Position.Y
+                or (Floor == 10 and 546.5 or TidalHeight[Floor])
+            TidalSpawnHeightCache.heights[Floor] = Y
+            return Y
+        end
+
+        local function TidalEnemyOnFloorY(Y, Floor)
+            if type(Y) ~= "number" then return false end
+            local CombatY = TidalCombatHeight(Floor)
+            local GateY = TidalHeight[Floor]
+            return (CombatY ~= nil and math.abs(Y - CombatY) <= 28)
+                or (GateY ~= nil and math.abs(Y - GateY) <= 16)
+        end
+
+        -- Used by the shared combat engine when its mode is floodescape.
+        -- The filter is the current floor's spawn band, NOT the player's
+        -- current Y: Floor 10 has enemies 39 studs below the gate landing.
+        GENV.__AZ_TIDAL_IS_ACTIVE_FLOOR_ENEMY = function(Y)
+            local Floor = workspace:GetAttribute("FloodRoof") == true and 12
+                or math.clamp(math.floor(tonumber(workspace:GetAttribute("FloodFloor")) or 0), 0, 12)
+            return TidalEnemyOnFloorY(Y, Floor)
+        end
+
         local function TidalGroundGoal(Point, Root, ExactRadius, Floor)
             if typeof(Point) ~= "Vector3" or not Root then return nil end
             local _, Map = TidalMap()
@@ -10839,6 +10891,15 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 Vector3.new(12,0,0), Vector3.new(-12,0,0),
                 Vector3.new(0,0,12), Vector3.new(0,0,-12),
             }
+            -- A combat destination may be on the separate spawn deck below
+            -- a floor's gate. Validate the surface against that deck instead
+            -- of demanding it be within 8 studs of the gate's marker height.
+            local ExpectedY = Floor and TidalHeight[Floor] or nil
+            local CombatY = Floor and TidalCombatHeight(Floor) or nil
+            if CombatY and ExpectedY and math.abs(CombatY - ExpectedY) > 12
+                and math.abs(Point.Y - CombatY) <= 20 then
+                ExpectedY = CombatY
+            end
             local Human = Root.Parent and Root.Parent:FindFirstChildOfClass("Humanoid")
             local Height = math.clamp((Human and Human.HipHeight or 2)
                 + Root.Size.Y / 2, 2.5, 7)
@@ -10849,8 +10910,8 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     Vector3.new(0, -40, 0), Parameters)
                 if Hit and Hit.Normal.Y >= 0.62
                     and math.abs(Hit.Position.Y - Point.Y) <= (Floor and 8 or 15)
-                    and (not Floor or (TidalHeight[Floor]
-                        and math.abs(Hit.Position.Y - TidalHeight[Floor]) <= 8))
+                    and (not Floor or (ExpectedY
+                        and math.abs(Hit.Position.Y - ExpectedY) <= 8))
                 then
                     local Pos = Hit.Position + Vector3.new(0, Height, 0)
                     local Score = Offset.Magnitude + math.abs(Pos.Y - Point.Y) * 0.07
@@ -10865,8 +10926,8 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
         -- A close-by lever or marker is NOT proof that Roblox considers us
         -- on the current walkable floor. Confirm the visible surface beneath
         -- the HumanoidRootPart, and its height relative to FloorN.Respawn.
-        local function TidalOnFloor(Root, Floor)
-            local Level = TidalHeight[Floor]
+        local function TidalOnFloor(Root, Floor, HeightOverride)
+            local Level = HeightOverride or TidalHeight[Floor]
             local _, Map = TidalMap()
             if not Root or not Level or not Map then
                 return false, "Map/floor not loaded"
@@ -11129,6 +11190,10 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 leverRequested = workspace:GetAttribute("FloodLeverAt") ~= nil,
                 gateContested = workspace:GetAttribute("FloodGateContested") == true,
                 floorEnemies = T and T.floorEnemies or nil,
+                enemySpawnHeight = TidalCombatHeight(Floor),
+                standingOnEnemyDeck = select(1, TidalOnFloor(Root, Floor, TidalCombatHeight(Floor))),
+                serverRemaining = T and T.serverRemaining or nil,
+                gateWaitingForEnemies = T and T.gateWaitingForEnemies == true or false,
                 combatPriority = T and T.gateCombatLock == true or false,
                 gateClearSeconds = T and T.gateClearSince
                     and os.clock() - T.gateClearSince or nil,
@@ -11150,13 +11215,12 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
         -- Track CURRENT floor enemies, not FloodGateCrowd (player occupancy).
         -- The lobby/other raids still use their original enemy selection.
         local function TidalLivingFloorEnemies(Floor)
-            local FloorY = TidalHeight[Floor]
-            if not FloorY then return 0 end
+            if not TidalHeight[Floor] then return 0 end
             local Snapshot = GetEnemySnapshot2()
             local Count = 0
             for _, Enemy in ipairs(Snapshot) do
                 if Enemy.Root and Enemy.Root.Parent and not Enemy.Guarded
-                    and math.abs(Enemy.Root.Position.Y - FloorY) <= 28
+                    and TidalEnemyOnFloorY(Enemy.Root.Position.Y, Floor)
                 then
                     local HealthLeaf = Enemy.State and Enemy.State.health
                     local Health = HealthLeaf and tonumber(ReadLeaf(HealthLeaf)) or nil
@@ -11203,13 +11267,28 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             end
             if T.roof then Floor = 12 end
             local TargetFloor = Floor == 0 and 1 or math.min(Floor + 1, 12)
-            local MustReachFloor = Floor >= 1 and Floor <= 12
-                and not select(1, TidalOnFloor(Root, Floor))
             local Fight = Phase == "fight" or T.roof
             local GateContested = Phase == "block"
                 and workspace:GetAttribute("FloodGateContested") == true
             local FloorEnemyCount = TidalLivingFloorEnemies(Floor)
+            local ServerRemaining = tonumber(T.remaining)
+            -- The HUD's "left" count is runStore.remaining. It is independent
+            -- of whether distant enemy models have replicated to this client.
+            -- Gate movement requires BOTH this count and visible enemies clear.
+            local HasEnemies = FloorEnemyCount > 0
+                or (ServerRemaining ~= nil and ServerRemaining > 0)
             T.floorEnemies = FloorEnemyCount
+            T.serverRemaining = ServerRemaining
+            T.gateWaitingForEnemies = Phase == "block" and HasEnemies
+
+            -- The fight deck and gate deck are distinct on Floor 10. Do not
+            -- pull the character back to Y=585 every time it reaches the
+            -- real Y=546 combat floor, or it'll bounce between both levels.
+            local AtLanding = select(1, TidalOnFloor(Root, Floor))
+            local AtCombatDeck = select(1, TidalOnFloor(Root, Floor, TidalCombatHeight(Floor)))
+            local FightingHere = Fight or (Phase == "block" and HasEnemies)
+            local MustReachFloor = Floor >= 1 and Floor <= 12
+                and not AtLanding and not (FightingHere and AtCombatDeck)
 
             -- The current floor can be advancing server-side even while the
             -- player is still climbing it; keep the entrance ahead of combat.
@@ -11224,11 +11303,11 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             -- priority while a living enemy exists on this floor.  Do not
             -- alternate between the gate point and an enemy every heartbeat.
             -- Gate occupancy (FloodGateCrowd) must not activate combat.
-            if FloorEnemyCount > 0 then
+            if HasEnemies then
                 T.gateClearSince = nil
                 T.gateCombatLock = Phase == "block"
             end
-            if Fight or (Phase == "block" and FloorEnemyCount > 0) then
+            if Fight or (Phase == "block" and HasEnemies) then
                 local _, EnemyRoot = NearestEnemy2()
                 if EnemyRoot then
                     T.stage = Phase == "block"
@@ -11245,13 +11324,15 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     RunCombat2()
                     return
                 end
-                if Phase == "block" and FloorEnemyCount > 0 then
-                    T.stage = "Enemies detected; waiting for attackable floor target"
+                if Phase == "block" and HasEnemies then
+                    T.stage = "Gate paused: " .. tostring(ServerRemaining or "unknown")
+                        .. " reported left; " .. tostring(FloorEnemyCount)
+                        .. " visible, searching current floor"
                     T.goal = nil
                     RunCombat2()
                     return
                 end
-                if Fight and Floor < 12 and (tonumber(T.remaining) or 0) > 0 then
+                if Fight and Floor < 12 and HasEnemies then
                     T.stage = "Waiting for floor enemies"
                     RunCombat2()
                     return
@@ -11259,6 +11340,11 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             end
 
             if Phase == "block" then
+                if HasEnemies then
+                    T.gateClearSince = nil
+                    T.stage = "Gate suppressed: enemies remaining"
+                    return
+                end
                 -- Brief empty-floor confirmation prevents flicker between mobs
                 -- and the gate when enemy models are temporarily unavailable.
                 T.gateClearSince = T.gateClearSince or os.clock()
@@ -11762,7 +11848,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
         -- Crafting
 
         CraftItem =
-            "Leaf Shinobi Headband",
+            "Shinobi Headband",
 
         AutoCraft = false,
 
@@ -11817,6 +11903,8 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
         ["Divine Emperor"] = "shanks",
 
         ["Cataclysm"] = "miyabi",
+
+        ["Mochi Commander"] = "katakuri",
     }
 
 
@@ -11857,6 +11945,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
         "Divine Emperor",
 
         "Cataclysm",
+        "Mochi Commander",
     }
 
 
@@ -11950,7 +12039,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
     local CraftRecipes = {
 
-        ["Leaf Shinobi Headband"] = {
+        ["Shinobi Headband"] = {
             CraftId = "1",
             AccessoryId = "101",
             Materials = { ["101"] = 12, ["102"] = 5 },
@@ -11968,7 +12057,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             Materials = { ["101"] = 16, ["102"] = 6 },
         },
 
-        ["8th Brigade Fire Hat"] = {
+        ["Fire Brigade Hat"] = {
             CraftId = "4",
             AccessoryId = "104",
             Materials = { ["101"] = 20, ["102"] = 8 },
@@ -11992,7 +12081,7 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             Materials = { ["101"] = 30, ["107"] = 20, ["105"] = 8 },
         },
 
-        ["Panther Hollow Mask"] = {
+        ["Panther Bone Mask"] = {
             CraftId = "8",
             AccessoryId = "108",
             Materials = { ["106"] = 24, ["104"] = 8, ["108"] = 8 },
@@ -12037,35 +12126,39 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
 
 
     local CraftOptions = {
-
-        "Leaf Shinobi Headband",
-
+        "Shinobi Headband",
         "Gentleman's Top Hat",
-
         "Capsule Scarf",
-
-        "8th Brigade Fire Hat",
-
+        "Fire Brigade Hat",
         "SunGlasses",
-
         "Kitsune Mask",
-
         "Diva Headphones",
-
-        "Panther Hollow Mask",
-
+        "Panther Bone Mask",
         "Light Admiral Cloak",
-
         "Wind Spirit Wing",
-
         "Dark Captain Wings",
-
         "Flame Pirate Hat",
-
         "Blast Archer Crown",
-
         "Blast Archer Wings",
+        "Flame Director's Hat",
+        "Shadow Lord's Coat",
+        "Void Hunter's Eye",
+        "Red Emperor's Cloak",
+        "Cursed King's Collar",
+        "Immortal Sovereign's Shades",
+        "Order Assassin's Tie",
+        "Thunder Prodigy Collar",
+        "Rubber Captain's Hat",
+        "Otherworld Halo",
+        "Astral Wings",
+        "Spectral Wings",
+        "Adaptation Wheel",
     }
+
+    -- Current game accessoryCraftConfig exposes exactly these craftable IDs.
+    -- Share with the Automation dropdown so both tabs agree.
+    GENV.__AZ_CRAFT_OPTIONS = CraftOptions
+
 
 
     local MaterialNames = {
@@ -15600,14 +15693,21 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
         }
 
         --// TITLE GRINDER
-        AutomationTab:CreateSection({name = "Title Grinder"})
+        AutomationTab:CreateSection({name = "Title Grinder (Supported Routes)"})
         local TitleChoices = {
             "Cosmic Warrior", "Rubber Man", "Thunder Prodigy",
             "Twisted Agony", "Lights of Divinity", "Divine Emperor",
             "Dragon Eclipse", "Kings Gambit", "Immortal Sovereign",
-            "Cursed King", "Cataclysm", "Dungeon Legend",
-            "Hoarder", "Beyond Limits", "Millionaire", "Paramita Pyre",
+            "Cursed King", "Cataclysm", "Mochi Commander", "Dungeon Legend",
+            "Hoarder", "Beyond Limits", "Millionaire", "Flame Director",
         }
+        if TitleAutomationSettings.SelectedTitle == "Paramita Pyre" then
+            TitleAutomationSettings.SelectedTitle = "Flame Director"
+        end
+        if AdvancedAutomationSettings.MultiTitleTargets["Paramita Pyre"] == true then
+            AdvancedAutomationSettings.MultiTitleTargets["Flame Director"] = true
+            AdvancedAutomationSettings.MultiTitleTargets["Paramita Pyre"] = nil
+        end
         -- Migrate a previous single-title choice into the new multi-select.
         if next(AdvancedAutomationSettings.MultiTitleTargets) == nil
             and type(TitleAutomationSettings.SelectedTitle) == "string"
@@ -15670,18 +15770,54 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
             Snapshot = type(PreviousAccessory.Snapshot) == "table"
                 and PreviousAccessory.Snapshot or nil,
         }
+        -- Backward compatibility for saved target names from prior patches.
+        local LegacyCraftAliases = {
+            ["Leaf Shinobi Headband"] = "Shinobi Headband",
+            ["8th Brigade Fire Hat"] = "Fire Brigade Hat",
+            ["Panther Hollow Mask"] = "Panther Bone Mask",
+        }
+        for OldName, CurrentName in pairs(LegacyCraftAliases) do
+            if AccessoryAutomationSettings.SelectedAccessories[OldName] == true then
+                AccessoryAutomationSettings.SelectedAccessories[CurrentName] = true
+                AccessoryAutomationSettings.SelectedAccessories[OldName] = nil
+            end
+        end
+
         GENV.__AZ_ACCESSORY_AUTOMATION_SETTINGS = AccessoryAutomationSettings
         GENV.__AZ_ACCESSORY_AUTOMATION_STATUS_FUNCTION = nil
         GENV.__AZ_ACCESSORY_AUTOMATION_PERSIST_FUNCTION = nil
         GENV.__AZ_ACCESSORY_AUTOMATION_UI_QUEUE = nil
 
-        local AccessoryChoices = {
-            "Leaf Shinobi Headband", "Gentleman's Top Hat", "Capsule Scarf",
-            "8th Brigade Fire Hat", "SunGlasses", "Kitsune Mask",
-            "Diva Headphones", "Panther Hollow Mask", "Light Admiral Cloak",
-            "Wind Spirit Wing", "Dark Captain Wings", "Flame Pirate Hat",
-            "Blast Archer Crown", "Blast Archer Wings",
+        local AccessoryChoices = GENV.__AZ_CRAFT_OPTIONS or {
+            "Shinobi Headband",
+            "Gentleman's Top Hat",
+            "Capsule Scarf",
+            "Fire Brigade Hat",
+            "SunGlasses",
+            "Kitsune Mask",
+            "Diva Headphones",
+            "Panther Bone Mask",
+            "Light Admiral Cloak",
+            "Wind Spirit Wing",
+            "Dark Captain Wings",
+            "Flame Pirate Hat",
+            "Blast Archer Crown",
+            "Blast Archer Wings",
+            "Flame Director's Hat",
+            "Shadow Lord's Coat",
+            "Void Hunter's Eye",
+            "Red Emperor's Cloak",
+            "Cursed King's Collar",
+            "Immortal Sovereign's Shades",
+            "Order Assassin's Tie",
+            "Thunder Prodigy Collar",
+            "Rubber Captain's Hat",
+            "Otherworld Halo",
+            "Astral Wings",
+            "Spectral Wings",
+            "Adaptation Wheel",
         }
+
         local function SaveAccessoryAutomation()
             local Save = GENV.__AZ_ACCESSORY_AUTOMATION_PERSIST_FUNCTION
             if type(Save) == "function" then pcall(Save) end
@@ -15742,12 +15878,59 @@ GENV.__AZ_STARTUP_PHASE = "Loading optional lobby automation"
         AutomationTab:CreateSection({name = "Auto Evolve"})
         -- Never turn on character acquisition from an old saved option.
         AdvancedAutomationSettings.EvolutionAcquireMissing = false
+        -- All characters with entries in the patched evolutionConfig.
+        -- The controller uses these display names for its owned-slot lookups.
         local EvolutionChoices = {
-            "Rubber Man", "Cosmic Warrior", "Thunder Prodigy",
-            "Twisted Agony", "Kings Gambit", "Lights of Divinity",
-            "Dragon Eclipse", "Immortal Sovereign", "Cursed King",
-            "Divine Emperor", "Cataclysm", "Paramita Pyre",
+            "Rubber Man",
+            "Cosmic Warrior",
+            "Thunder Prodigy",
+            "Twisted Agony",
+            "Kings Gambit",
+            "Lights of Divinity",
+            "Dragon Eclipse",
+            "Immortal Sovereign",
+            "Cursed King",
+            "Divine Emperor",
+            "Cataclysm",
+            "Flame Director",
+            "Shadow Lord",
+            "Mochi Commander",
+            "Silver Calamity",
+            "Inferno Prince",
+            "Astral Blossom",
+            "Ye-0",
+            "Crimson Eclipse",
+            "Solar Radiance",
         }
+        local function RefreshAvailableEvolutions()
+            local RS = game:GetService("ReplicatedStorage")
+            local Assets = RS:FindFirstChild("assets")
+            local Config = Assets and Assets:FindFirstChild("config")
+            local Global = RS:FindFirstChild("global")
+            local Constants = Global and Global:FindFirstChild("constants")
+            local Module = Config and Config:FindFirstChild("evolutionConfig")
+            local CharactersModule = Constants and Constants:FindFirstChild("characters")
+            if not Module or not CharactersModule then return end
+            local Success, EvoConfig = pcall(require, Module)
+            local NamesOk, NamesData = pcall(require, CharactersModule)
+            if not Success or not NamesOk or type(EvoConfig) ~= "table"
+                or type(NamesData) ~= "table"
+                or type(NamesData.charactersByName) ~= "table" then return end
+            local Result, Seen = {}, {}
+            for CharacterId in pairs(EvoConfig) do
+                local Info = NamesData.charactersByName[CharacterId]
+                local Label = Info and Info.displayName
+                if type(Label) == "string" and Label ~= "" and not Seen[Label] then
+                    Seen[Label] = true
+                    table.insert(Result, Label)
+                end
+            end
+            if #Result > 0 then
+                table.sort(Result)
+                EvolutionChoices = Result
+            end
+        end
+        pcall(RefreshAvailableEvolutions)
         local FullEvolveToggle
         FullEvolveToggle = AutomationTab:CreateToggle({
             name = "Auto Evolve",
@@ -22364,6 +22547,16 @@ task.spawn(function()
             act = "Act 1",
             mode = "Story",
         },
+        -- Current Arcane spin pool includes katakuri. This title requires
+        -- boss/enemy defeats as Mochi Commander on Hard or higher.
+        ["Mochi Commander"] = {
+            id = "145",
+            character = "katakuri",
+            difficulty = "Hard",
+            map = "Hxh",
+            act = "Act 1",
+            mode = "Story",
+        },
         ["Dungeon Legend"] = {
             id = "133",
             difficulty = "Easy",
@@ -22408,7 +22601,7 @@ task.spawn(function()
             progressLabel = "Coins Earned",
             achievementTitle = true,
         },
-        ["Paramita Pyre"] = {
+        ["Flame Director"] = {
             id = "141",
             character = "hutao",
             raidCharacter = true,
@@ -22492,6 +22685,10 @@ task.spawn(function()
     end
 
     local function GetProfile()
+        -- Older save files use the pre-patch name for title ID 141.
+        if Automation.SelectedTitle == "Paramita Pyre" then
+            Automation.SelectedTitle = "Flame Director"
+        end
         return Profiles[
             tostring(Automation.SelectedTitle or "")
         ]
@@ -23133,7 +23330,7 @@ task.spawn(function()
 
 
                                 SetState(
-                                    "Placing stored Paramita Pyre into Slot "
+                                    "Placing stored Flame Director into Slot "
                                         .. tostring(SlotNumber)
                                 )
 
@@ -23142,7 +23339,7 @@ task.spawn(function()
                                 ApplyRunProfile(Profile)
 
                                 SetState(
-                                    "Paramita Pyre not owned - farming Raid | Pity "
+                                    "Flame Director not owned - farming Raid | Pity "
                                         .. tostring(
                                             math.min(
                                                 ReadProgress(
@@ -23212,7 +23409,7 @@ task.spawn(function()
                     end
 
                     -- Only after BOTH conditions are confirmed from account
-                    -- state do we arm Auto Join. Paramita Pyre additionally
+                    -- state do we arm Auto Join. Flame Director additionally
                     -- suppresses Ultimate only for this title objective; the
                     -- user's saved Farm setting is never changed.
                     GENV.__AZ_SUPPRESS_ULTIMATE =
@@ -23223,7 +23420,7 @@ task.spawn(function()
                     if Profile.mode == "Raid" then
 
                         SetState(
-                            "Paramita Pyre + Combat Slot confirmed - joining Raid [Nightmare]"
+                            "Flame Director + Combat Slot confirmed - joining Raid [Nightmare]"
                         )
 
                     else
@@ -23302,7 +23499,7 @@ task.spawn(function()
                         Settings.AutoLeave = true
 
                         SetState(
-                            "Paramita Pyre stored - returning to lobby to place unit"
+                            "Flame Director stored - returning to lobby to place unit"
                         )
 
                         task.wait(0.35)
@@ -23744,6 +23941,22 @@ task.spawn(function()
         end
     end)
 
+    -- TeleportSettings can restore pre-rename targets AFTER the UI loads.
+    -- Normalize their names here too, so old selections still craft correctly.
+    if type(Automation.SelectedAccessories) == "table" then
+        local OldAliases = {
+            ["Leaf Shinobi Headband"] = "Shinobi Headband",
+            ["8th Brigade Fire Hat"] = "Fire Brigade Hat",
+            ["Panther Hollow Mask"] = "Panther Bone Mask",
+        }
+        for OldName, CurrentName in pairs(OldAliases) do
+            if Automation.SelectedAccessories[OldName] == true then
+                Automation.SelectedAccessories[CurrentName] = true
+                Automation.SelectedAccessories[OldName] = nil
+            end
+        end
+    end
+
     -- Keep the Rayfield toggle visually synchronized when this script was
     -- auto-executed after a place teleport and the state came from
     -- TeleportSettings rather than the UI config callback.
@@ -23831,20 +24044,33 @@ task.spawn(function()
     end)
 
     local CraftNames = {
-        ["1"] = "Leaf Shinobi Headband",
+        ["1"] = "Shinobi Headband",
         ["2"] = "Gentleman's Top Hat",
         ["3"] = "Capsule Scarf",
-        ["4"] = "8th Brigade Fire Hat",
+        ["4"] = "Fire Brigade Hat",
         ["5"] = "SunGlasses",
         ["6"] = "Kitsune Mask",
         ["7"] = "Diva Headphones",
-        ["8"] = "Panther Hollow Mask",
+        ["8"] = "Panther Bone Mask",
         ["9"] = "Light Admiral Cloak",
         ["10"] = "Wind Spirit Wing",
         ["11"] = "Dark Captain Wings",
         ["12"] = "Flame Pirate Hat",
         ["13"] = "Blast Archer Crown",
         ["14"] = "Blast Archer Wings",
+        ["15"] = "Flame Director's Hat",
+        ["16"] = "Shadow Lord's Coat",
+        ["17"] = "Void Hunter's Eye",
+        ["18"] = "Red Emperor's Cloak",
+        ["19"] = "Cursed King's Collar",
+        ["20"] = "Immortal Sovereign's Shades",
+        ["21"] = "Order Assassin's Tie",
+        ["22"] = "Thunder Prodigy Collar",
+        ["23"] = "Rubber Captain's Hat",
+        ["24"] = "Otherworld Halo",
+        ["25"] = "Astral Wings",
+        ["26"] = "Spectral Wings",
+        ["27"] = "Adaptation Wheel",
     }
 
     local MaterialNames = {
@@ -25454,6 +25680,8 @@ task.spawn(function()
         "rin",
         "astra_yao",
         "ye_shunguang",
+        "chisa",
+        "cha_hae_in",
     }
 
 
@@ -25469,13 +25697,15 @@ task.spawn(function()
         sukuna = "Cursed King",
         shanks = "Divine Emperor",
         miyabi = "Cataclysm",
-        hutao = "Paramita Pyre",
+        hutao = "Flame Director",
         sung_jinwoo = "Shadow Monarch",
         katakuri = "Mochi Commander",
         frieren = "Silver Calamity",
         rin = "Inferno Prince",
         astra_yao = "Astral Blossom",
         ye_shunguang = "Ye-0",
+        chisa = "Crimson Eclipse",
+        cha_hae_in = "Solar Radiance",
     }
 
 
@@ -25505,11 +25735,12 @@ task.spawn(function()
         "Immortal Sovereign",
         "Cursed King",
         "Cataclysm",
+        "Mochi Commander",
         "Dungeon Legend",
         "Hoarder",
         "Beyond Limits",
         "Millionaire",
-        "Paramita Pyre",
+        "Flame Director",
     }
 
 
@@ -25525,31 +25756,44 @@ task.spawn(function()
         ["Immortal Sovereign"] = "111",
         ["Cursed King"] = "113",
         ["Cataclysm"] = "116",
+        ["Mochi Commander"] = "145",
         ["Dungeon Legend"] = "133",
         ["Hoarder"] = "137",
         ["Beyond Limits"] = "139",
         ["Millionaire"] = "140",
-        ["Paramita Pyre"] = "141",
+        ["Flame Director"] = "141",
     }
 
 
     local AccessoryCraftNames = {
-        "Leaf Shinobi Headband",
+        "Shinobi Headband",
         "Gentleman's Top Hat",
         "Capsule Scarf",
-        "8th Brigade Fire Hat",
+        "Fire Brigade Hat",
         "SunGlasses",
         "Kitsune Mask",
         "Diva Headphones",
-        "Panther Hollow Mask",
+        "Panther Bone Mask",
         "Light Admiral Cloak",
         "Wind Spirit Wing",
         "Dark Captain Wings",
         "Flame Pirate Hat",
         "Blast Archer Crown",
         "Blast Archer Wings",
+        "Flame Director's Hat",
+        "Shadow Lord's Coat",
+        "Void Hunter's Eye",
+        "Red Emperor's Cloak",
+        "Cursed King's Collar",
+        "Immortal Sovereign's Shades",
+        "Order Assassin's Tie",
+        "Thunder Prodigy Collar",
+        "Rubber Captain's Hat",
+        "Otherworld Halo",
+        "Astral Wings",
+        "Spectral Wings",
+        "Adaptation Wheel",
     }
-
 
     local function FindOwnedSlot(
         Data,
@@ -26230,7 +26474,7 @@ task.spawn(function()
                         ReturnToLobby()
 
                         SetState(
-                            "Full Evolve: Paramita Pyre stored - returning to lobby"
+                            "Full Evolve: Flame Director stored - returning to lobby"
                         )
 
                         return
@@ -26268,7 +26512,7 @@ task.spawn(function()
 
 
                     SetState(
-                        "Full Evolve: placing stored Paramita Pyre into Slot "
+                        "Full Evolve: placing stored Flame Director into Slot "
                             .. tostring(RollSlot)
                     )
 
@@ -26282,7 +26526,7 @@ task.spawn(function()
 
 
                 SetState(
-                    "Full Evolve: farming Raid for Paramita Pyre | Pity "
+                    "Full Evolve: farming Raid for Flame Director | Pity "
                         .. tostring(
                             math.min(
                                 RaidUnitPity(
