@@ -11193,7 +11193,11 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 enemySpawnHeight = TidalCombatHeight(Floor),
                 standingOnEnemyDeck = select(1, TidalOnFloor(Root, Floor, TidalCombatHeight(Floor))),
                 serverRemaining = T and T.serverRemaining or nil,
+                -- Nonzero runStore.remaining must not veto the server's
+                -- explicit block/gate phase after local enemies are cleared.
+                blockRemainingIgnored = T and T.blockRemainingIgnored == true or false,
                 gateWaitingForEnemies = T and T.gateWaitingForEnemies == true or false,
+                gateGoalVerified = T and T.gateGoalVerified == true or false,
                 combatPriority = T and T.gateCombatLock == true or false,
                 gateClearSeconds = T and T.gateClearSince
                     and os.clock() - T.gateClearSince or nil,
@@ -11272,14 +11276,22 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 and workspace:GetAttribute("FloodGateContested") == true
             local FloorEnemyCount = TidalLivingFloorEnemies(Floor)
             local ServerRemaining = tonumber(T.remaining)
-            -- The HUD's "left" count is runStore.remaining. It is independent
-            -- of whether distant enemy models have replicated to this client.
-            -- Gate movement requires BOTH this count and visible enemies clear.
-            local HasEnemies = FloorEnemyCount > 0
-                or (ServerRemaining ~= nil and ServerRemaining > 0)
+            -- runStore.remaining is authoritative for the FIGHT portion of
+            -- a floor, when enemies may be outside replication distance.
+            -- Crucially, it is NOT a gate-clear condition: the official HUD
+            -- switches to FloodPhase="block" for gate/lever objectives while
+            -- runStore.remaining may still be nonzero or behind replication.
+            -- Once block begins, only *living visible enemies on this floor*
+            -- hold combat ownership; otherwise approach the physical gate.
+            local VisibleFloorEnemies = FloorEnemyCount > 0
+            local ServerFightEnemies = Phase == "fight"
+                and ServerRemaining ~= nil and ServerRemaining > 0
+            local HasEnemies = VisibleFloorEnemies or ServerFightEnemies
             T.floorEnemies = FloorEnemyCount
             T.serverRemaining = ServerRemaining
-            T.gateWaitingForEnemies = Phase == "block" and HasEnemies
+            T.blockRemainingIgnored = Phase == "block"
+                and ServerRemaining ~= nil and ServerRemaining > 0
+            T.gateWaitingForEnemies = Phase == "block" and VisibleFloorEnemies
 
             -- The fight deck and gate deck are distinct on Floor 10. Do not
             -- pull the character back to Y=585 every time it reaches the
@@ -11372,37 +11384,46 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     end
                     return
                 end
-                -- Oct 18 patch: the game's FloodWaterController now reads
-                -- World.MapObjects.FloodGateZone as the actual gate occupancy
-                -- volume. It is runtime-created, so it may not exist yet.
-                -- Prefer its center on the current floor; keep old marker
-                -- fallback for older instances and before the zone replicates.
-                local GatePart, GateSource = nil, "none"
+                -- The live FloodGateZone is the actual gate occupancy area.
+                -- Find a WALKABLE surface nearest its center. If a runtime
+                -- gate zone is still loading or its origin cannot be grounded,
+                -- try the floor barrier/lever targets instead of freezing at
+                -- "No verified ground" indefinitely.
                 local World = workspace:FindFirstChild("World")
                 local Objects = World and World:FindFirstChild("MapObjects")
                 local Zone = Objects and Objects:FindFirstChild("FloodGateZone")
                 local FloorY = TidalHeight[Floor]
+                local CandidatePoints = {}
                 if Zone and Zone:IsA("BasePart") and FloorY
                     and math.abs(Zone.Position.Y - FloorY) <= 15 then
-                    GatePart = Zone
-                    GateSource = "Live gate occupancy zone"
+                    table.insert(CandidatePoints, {
+                        part = Zone, source = "Live gate occupancy zone"})
                 end
-                if not GatePart then
-                    local Group = Markers:FindFirstChild("Floor" .. tostring(Floor))
-                    local Barrier = Group and Group:FindFirstChild("Barrier")
-                    if Barrier and Barrier:IsA("BasePart") then
-                        GatePart, GateSource = Barrier, "Floor barrier marker fallback"
+                local Group = Markers:FindFirstChild("Floor" .. tostring(Floor))
+                local Barrier = Group and Group:FindFirstChild("Barrier")
+                if Barrier and Barrier:IsA("BasePart") then
+                    table.insert(CandidatePoints, {
+                        part = Barrier, source = "Floor barrier marker fallback"})
+                end
+                local _, LeverPart = TidalLever(Floor, false)
+                if LeverPart then
+                    table.insert(CandidatePoints, {
+                        part = LeverPart, source = "Lever-side gate fallback"})
+                end
+
+                local GateGoal, GateSource = nil, "none"
+                for _, Candidate in ipairs(CandidatePoints) do
+                    local Verified = TidalGroundGoal(
+                        Candidate.part.Position, Root, false, Floor)
+                    if Verified then
+                        GateGoal, GateSource = Verified, Candidate.source
+                        break
                     end
                 end
-                if not GatePart then
-                    local _, LeverPart = TidalLever(Floor, false)
-                    GatePart = LeverPart or TidalFloorMarker(Floor)
-                    GateSource = "Floor marker fallback"
-                end
                 T.gateTargetSource = GateSource
-                if GatePart then
-                    local Goal = TidalGroundGoal(GatePart.Position, Root, false, Floor)
-                    local AtGate = TidalMove(T, Root, Goal, DeltaTime,
+                T.gateGoalVerified = GateGoal ~= nil
+                if GateGoal then
+                    local AtGate = TidalMove(T, Root, GateGoal, DeltaTime,
                         "Hold gate floor " .. tostring(Floor), 5)
                     if AtGate and TidalOnFloor(Root, Floor) then
                         T.stage = GateContested and "Gate contested / waiting for enemies"
@@ -11410,7 +11431,9 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                         RunCombat2()
                     end
                 else
-                    T.stage = "Waiting for floor " .. Floor .. " gate geometry"
+                    T.goal = nil
+                    T.stage = "Floor " .. tostring(Floor)
+                        .. " gate: no verified ground near gate zone/marker"
                 end
                 return
             end
