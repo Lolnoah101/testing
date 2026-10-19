@@ -1,3 +1,4 @@
+--// OCT 19: RESTORE STAY NOCLIP IN TIDAL ON USER TOGGLE (all movement methods).
 --// OCT 19 FLOOR 10: Collision-aware upper-to-lower enemy deck transitions; preserve active Tween noclip.
 --// OCT 19 HOTFIX: Tidal under-floor/roof escape + verified above-floor rescue; collision-aware Tween transit.
 --// OCT 19 PATCH: Tidal High Rise ground support + underground recovery; new FloodEscape balance.
@@ -3155,7 +3156,9 @@ GENV.__AZ_FARM_EXT = GENV.__AZ_FARM_EXT or {}
             stairJumps = Nav.StairAssistJumps,
             secondsWithoutProgress = Nav.LastProgressAt > 0
                 and os.clock() - Nav.LastProgressAt or nil,
-            stayNoclipSuspended = Settings.FarmMethod == "Legit",
+            stayNoclipSuspended = Settings.FarmMethod == "Legit"
+                and not (GENV.__AZ_IS_FLOOD_ESCAPE()
+                    and Settings.StayNoclip == true),
         }
         for k,v in pairs(R) do
             print("[Anime Zero][Legit]", k, "=", tostring(v))
@@ -11426,7 +11429,10 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 overheadFloorPart = T and T.overheadFloorPart or "none",
                 recoveryGrace = T and math.max(0, (T.recoveryGraceUntil or 0) - os.clock()) or 0,
                 tweenTravelActive = T and T.tweenTravelActive == true or false,
-                persistentNoclipSuspended = Settings.AutoTidalFarm == true,
+                persistentNoclipSuspended = false,
+                stayNoclipRequested = Settings.StayNoclip == true,
+                tidalStayNoclipActive = Settings.StayNoclip == true
+                    and GENV.__AZ_IS_FLOOD_ESCAPE(),
                 locked = game:GetService("Players").LocalPlayer:GetAttribute("FloodLocked") == true,
                 lavaHeight = workspace:GetAttribute("FloodLevel"),
                 secondsUntilLava = (function()
@@ -29637,31 +29643,27 @@ GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled = function(
     Enabled, ForceRestore
 )
 
-    -- OCT 19: Tidal uses real floor and gate occupancy detection. Persistent
-    -- noclip lets the avatar sink through those decks (especially after a
-    -- Tween or a combat->gate handoff). Suspend the EFFECT for this mode,
-    -- preserving the user's saved StayNoclip preference everywhere else.
-    if type(GENV.__AZ_IS_FLOOD_ESCAPE) == "function"
+    -- Tidal once forcibly restored collision at the end of EVERY move,
+    -- while waiting for waves, on floor/lever checks, and during combat.
+    -- That made Stay Noclip ineffective and wedged the avatar on barriers.
+    -- Restore the USER'S persistent selection in this mode. The dedicated
+    -- Tidal controller still raycasts collidable MAP geometry to select safe
+    -- landing positions and recover from actual beneath-map falls.
+    local TidalStayNoclip = Settings.StayNoclip == true
+        and type(GENV.__AZ_IS_FLOOD_ESCAPE) == "function"
         and GENV.__AZ_IS_FLOOD_ESCAPE()
-        and Settings.AutoTidalFarm == true
-    then
-        local T = GENV.__AZ_TIDAL_RUNTIME
-        -- Only an actively moving Tween may temporarily cross geometry;
-        -- always restore collisions for grounded play and rescue.
-        if ForceRestore == true or Settings.FarmMethod ~= "Tween"
-            or not T or T.tweenTravelActive ~= true then
-            Enabled = false
-            ForceRestore = true
-        else
-            Enabled = true
-        end
-    end
+        and SessionAlive()
 
-    if ForceRestore == true then
+    if TidalStayNoclip then
+        -- Internal Tidal movement calls ForceRestore for temporary Tween
+        -- cleanup, but must not override the user's persistent preference.
+        -- Session teardown still restores collisions via SessionAlive().
+        Enabled = true
+        ForceRestore = false
+    elseif ForceRestore == true then
         Enabled = false
     elseif Settings.FarmMethod == "Legit" then
-        -- Legit walks on the ground; suspend persistent noclip without
-        -- changing the user's saved Stay Noclip preference.
+        -- Other modes retain their original grounded Legit behavior.
         Enabled = false
     elseif Settings.StayNoclip == true then
         Enabled = true
@@ -29739,13 +29741,18 @@ end
 -- Stepped fires before physics so collisions remain disabled even while idle.
 GENV.__AZ_FARM_EXT.StayNoclipConnection = RunService.Stepped:Connect(function()
     if not SessionAlive() then return end
-    if GENV.__AZ_IS_FLOOD_ESCAPE()
-        and Settings.AutoTidalFarm == true
-    then
+    if GENV.__AZ_IS_FLOOD_ESCAPE() then
         local T = GENV.__AZ_TIDAL_RUNTIME
-        local InTransit = T and T.tweenTravelActive == true
+        local InTransit = Settings.AutoTidalFarm == true
+            and T and T.tweenTravelActive == true
             and Settings.FarmMethod == "Tween"
-        GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(InTransit, not InTransit)
+        local UserStay = Settings.StayNoclip == true
+        -- Keep persistent noclip in place through combat, gate/lever waits,
+        -- stairs, the garage, and Floor 10's two-deck transition.
+        GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(
+            UserStay or InTransit == true,
+            not UserStay and not InTransit
+        )
     elseif Settings.StayNoclip == true and Settings.FarmMethod ~= "Legit" then
         GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(true)
     end
