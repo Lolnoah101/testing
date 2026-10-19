@@ -1,3 +1,6 @@
+--// OCT 19 FLOOR 10: Collision-aware upper-to-lower enemy deck transitions; preserve active Tween noclip.
+--// OCT 19 HOTFIX: Tidal under-floor/roof escape + verified above-floor rescue; collision-aware Tween transit.
+--// OCT 19 PATCH: Tidal High Rise ground support + underground recovery; new FloodEscape balance.
 --// OCT-18 LOBBY CATALOG AUDIT
 --// 50 titles and 28 accessories in config; 27 are craftable.
 --// Auto Farm Titles exposes only supported farm profiles; presets read all owned items dynamically.
@@ -10,6 +13,7 @@
 local __AZ_SOURCE = [======[
 --//============================================================
 --// ANIME ZERO
+--// 2026-10-18: TIDAL GARAGE START: WAIT FOR FIRST WAVE; NO PREMATURE FLOOR 0 CLIMB
 --// 2026-10-12: AUTO ULTIMATE SUPPORTS BONUS SECOND ULT (MAIN + TRIALS/RAID)
 --// 2026-10-12: TWEEN SPEED SLIDER + FULL TWEEN NOCLIP + RUBBLE CLOSE ARRIVAL
 --// 2026-10-11: HxH RUBBLE RETRY + STAY NOCLIP + TWEEN SPEED + AREA MARKERS
@@ -9351,6 +9355,9 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 or nil
 
             if GENV.__AZ_IS_FLOOD_ESCAPE() and EnemyFarmGoal then
+                if GENV.__AZ_FARM_EXT then
+                    GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                end
                 local Project = GENV.__AZ_TIDAL_SAFE_COMBAT_GOAL
                 local Safe = type(Project) == "function"
                     and Project(EnemyFarmGoal.Position, Root) or nil
@@ -10858,6 +10865,12 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             if type(Y) ~= "number" then return false end
             local CombatY = TidalCombatHeight(Floor)
             local GateY = TidalHeight[Floor]
+            -- The parking garage spans multiple stacked decks (up to about
+            -- Y=74.5). Treat all living garage enemies as initial-wave combat,
+            -- rather than using the ground-level marker's narrow +/-28 band.
+            if Floor == 0 then
+                return Y >= -8 and Y <= 83
+            end
             return (CombatY ~= nil and math.abs(Y - CombatY) <= 28)
                 or (GateY ~= nil and math.abs(Y - GateY) <= 16)
         end
@@ -10868,6 +10881,12 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
         GENV.__AZ_TIDAL_IS_ACTIVE_FLOOR_ENEMY = function(Y)
             local Floor = workspace:GetAttribute("FloodRoof") == true and 12
                 or math.clamp(math.floor(tonumber(workspace:GetAttribute("FloodFloor")) or 0), 0, 12)
+            -- Some servers publish Floor=1 while the avatar is still in
+            -- the parking-garage opening wave. Prioritize that wave first.
+            local Runtime = GENV.__AZ_TIDAL_RUNTIME
+            if Runtime and Runtime.parkingCombatActive == true then
+                Floor = 0
+            end
             return TidalEnemyOnFloorY(Y, Floor)
         end
 
@@ -10896,6 +10915,11 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             -- of demanding it be within 8 studs of the gate's marker height.
             local ExpectedY = Floor and TidalHeight[Floor] or nil
             local CombatY = Floor and TidalCombatHeight(Floor) or nil
+            -- Parking-level combat may be on a raised garage deck. Accept
+            -- the actual collidable floor near the enemy, not just Y=0.75.
+            if Floor == 0 and Point.Y >= -8 and Point.Y <= 83 then
+                ExpectedY = Point.Y
+            end
             if CombatY and ExpectedY and math.abs(CombatY - ExpectedY) > 12
                 and math.abs(Point.Y - CombatY) <= 20 then
                 ExpectedY = CombatY
@@ -10954,6 +10978,200 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             return true, "Verified standing on floor"
         end
 
+        -- Check the ground supporting the avatar, including ramps and the
+        -- lower combat deck. Unlike FloorN.Respawn, this is actual geometry.
+        -- Never treat an invisible marker, water/lava effect, or floor below
+        -- the avatar by many studs as valid support.
+        local function TidalSupportedGround(Root)
+            local _, Map = TidalMap()
+            if not Root or not Map then return nil end
+            local Params = RaycastParams.new()
+            Params.FilterType = Enum.RaycastFilterType.Include
+            Params.FilterDescendantsInstances = {Map}
+            Params.RespectCanCollide = true
+            Params.IgnoreWater = true
+            local Hit = workspace:Raycast(
+                Root.Position + Vector3.new(0, 1.5, 0),
+                Vector3.new(0, -14.5, 0), Params)
+            if not Hit or not Hit.Instance or not Hit.Instance.CanCollide
+                or Hit.Normal.Y < 0.55 then
+                return nil
+            end
+            local Clearance = Root.Position.Y - Hit.Position.Y
+            if Clearance < 1.1 or Clearance > 8.5 then return nil end
+            return Hit
+        end
+
+        -- Test for a real solid underside above us. A marker position is NOT
+        -- evidence of a walkable surface. This catches a character lodged
+        -- just below a ceiling even when it is less than 11 studs from its
+        -- last supported position or no last-safe record exists yet.
+        local function TidalOverheadFloor(Root, Floor)
+            local _, Map = TidalMap()
+            if not Root or not Map then return nil end
+            local Params = RaycastParams.new()
+            Params.FilterType = Enum.RaycastFilterType.Include
+            Params.FilterDescendantsInstances = {Map}
+            Params.RespectCanCollide = true
+            Params.IgnoreWater = true
+            local Hit = workspace:Raycast(Root.Position + Vector3.new(0, 0.5, 0),
+                Vector3.new(0, 29, 0), Params)
+            if not Hit or not Hit.Instance or not Hit.Instance.CanCollide
+                or Hit.Normal.Y > -0.55 then return nil end
+            local GateY = TidalHeight[Floor]
+            local CombatY = TidalCombatHeight(Floor)
+            local PreviousY = TidalHeight[math.max(Floor - 1, 0)]
+            if (GateY and math.abs(Hit.Position.Y - GateY) <= 11)
+                or (CombatY and math.abs(Hit.Position.Y - CombatY) <= 11)
+                or (PreviousY and math.abs(Hit.Position.Y - PreviousY) <= 11)
+            then
+                return Hit
+            end
+            return nil
+        end
+
+        -- A verified safe return point from the *current* stage. Use the real
+        -- collidable map surface near the game's Respawn/EnemySpawns markers,
+        -- never the non-collidable marker's CFrame. If a previous checkpoint
+        -- vanished, this still lets a player escape from below the world.
+        local function TidalRecoveryDestination(T, Root, Floor, PreferCurrent)
+            local Saved = T.lastSafeCFrame
+            -- If we are stuck against a ceiling belonging to the current
+            -- floor, return to its actual platform instead of bouncing down
+            -- to a previous floor and repeating the climb.
+            if not PreferCurrent and Saved then
+                local Old = TidalGroundGoal(Saved.Position, Root, true,
+                    T.lastSafeFloor == Floor and Floor or nil)
+                if Old then return Old, "last physically supported deck" end
+            end
+            local _, _, Markers = TidalMap()
+            local Group = Markers and Markers:FindFirstChild("Floor" .. tostring(Floor))
+            local Spawns = Group and Group:FindFirstChild("EnemySpawns")
+            local EnemyPart = Spawns and Spawns:FindFirstChildWhichIsA("BasePart", true)
+            if tostring(T.phase or ""):lower() == "fight" and EnemyPart then
+                local Combat = TidalGroundGoal(EnemyPart.Position, Root, false, Floor)
+                if Combat then return Combat, "current floor combat deck" end
+            end
+            local Marker = TidalFloorMarker(Floor)
+            if Marker then
+                local Landing = TidalGroundGoal(Marker.Position, Root, false, Floor)
+                if Landing then return Landing, "verified current floor landing" end
+            end
+            if EnemyPart then
+                local Combat = TidalGroundGoal(EnemyPart.Position, Root, false, Floor)
+                if Combat then return Combat, "verified alternate combat deck" end
+            end
+            if PreferCurrent and Saved then
+                local Old = TidalGroundGoal(Saved.Position, Root, true,
+                    T.lastSafeFloor == Floor and Floor or nil)
+                if Old then return Old, "last physically supported deck" end
+            end
+            return nil, "no verified floor surface found"
+        end
+
+        -- Recovery is an atomic character relocation ABOVE verified ground.
+        -- Never try to Tween/Walk upward through a collidable ceiling: that is
+        -- exactly how a character gets stuck underneath the roof/platform.
+        -- The ordinary selected movement method resumes after grounding.
+        local function TidalFallRecovery(T, Root, Floor)
+            local Now = os.clock()
+            local Support = TidalSupportedGround(Root)
+            T.groundSupported = Support ~= nil
+            T.groundPart = Support and Support.Instance:GetFullName() or nil
+            if Support then
+                T.lastSafeCFrame = Root.CFrame
+                T.lastSafeFloor = Floor
+                T.lastSafeAt = Now
+                T.unsupportedSince = nil
+                T.groundRecoveryState = "Supported on solid map geometry"
+                T.recoveryTrigger = "none"
+                return false
+            end
+            T.unsupportedSince = T.unsupportedSince or Now
+            local LastSafe = T.lastSafeCFrame
+            local Ceiling = TidalOverheadFloor(Root, Floor)
+            T.overheadFloorPart = Ceiling and Ceiling.Instance:GetFullName() or nil
+            local FallenFromSafe = LastSafe ~= nil
+                and Root.Position.Y < LastSafe.Position.Y - 4
+            -- Floor 10 deliberately has a lower enemy deck. A Tween or
+            -- combat mover descending toward that deck is NOT an under-map
+            -- fall until it actually passes below the combat surface.
+            local CombatY = TidalCombatHeight(Floor)
+            local GateY = TidalHeight[Floor]
+            local CombatTransfer = CombatY and GateY
+                and math.abs(CombatY - GateY) > 12
+                and T.goal and math.abs(T.goal.Y - CombatY) < 12
+                and Root.Position.Y >= CombatY - 1.5
+                and Root.Position.Y <= GateY + 12
+            if CombatTransfer then FallenFromSafe = false end
+            local PreviousY = TidalHeight[math.max(Floor - 1, 0)]
+            local DeepBelowLevel = Floor >= 1 and PreviousY ~= nil
+                and Root.Position.Y < PreviousY - 12
+            local UnderExpectedFloor = Ceiling ~= nil
+                and Root.Position.Y < Ceiling.Position.Y - 1
+            -- Some floors clip the root INSIDE the collision shell, so an
+            -- upward ray cannot see the underside. When motion has stalled
+            -- near the expected level without ground support, treat it as a
+            -- failed landing instead of repeatedly fighting the collision.
+            local NearFloor = (GateY and math.abs(Root.Position.Y - GateY) < 9)
+                or (CombatY and math.abs(Root.Position.Y - CombatY) < 9)
+            local StalledInFloor = NearFloor
+                and Now - T.unsupportedSince > 1.2
+                and Root.AssemblyLinearVelocity.Magnitude < 2.5
+            -- An intentional move from Floor 10's gate to its lower
+            -- combat/lever deck passes beneath the upper platform. Do NOT
+            -- rescue the player back up while they are still traveling
+            -- toward a verified lower-deck destination.
+            local Trigger = (UnderExpectedFloor and not CombatTransfer)
+                    and "solid floor directly overhead"
+                or (StalledInFloor and not CombatTransfer)
+                    and "stalled inside or against floor"
+                or DeepBelowLevel and "far beneath prior level"
+                or FallenFromSafe and "fell below last supported deck"
+                or nil
+            T.recoveryTrigger = Trigger or "unsupported; no trapped-floor evidence"
+            if not Trigger
+                or Now - T.unsupportedSince < 0.45
+                or Now - (T.lastGroundRecoveryAt or 0) < 1.8
+            then
+                return false
+            end
+            local Safe, Source = TidalRecoveryDestination(T, Root, Floor,
+                UnderExpectedFloor or StalledInFloor or DeepBelowLevel)
+            if not Safe then
+                T.groundRecoveryState = "Recovery paused: " .. Source
+                T.goal = nil
+                T.stage = T.groundRecoveryState
+                return true -- Never keep following a bad below-map destination.
+            end
+            if GENV.__AZ_LEGIT_NAV then
+                GENV.__AZ_LEGIT_NAV.Reset("Tidal below-map emergency re-entry")
+            end
+            T.tweenTravelActive = false
+            local Ext = GENV.__AZ_FARM_EXT
+            if Ext then Ext.SetTweenNoclipEnabled(false, true) end
+            local Character = Root.Parent
+            -- Extra clearance prevents the avatar's body from overlapping
+            -- the floor on re-entry. CFrame/PivotTo is an instantaneous move,
+            -- not a physical attempt to pass through the solid ceiling.
+            local Destination = Safe + Vector3.new(0, 2.5, 0)
+            if Character and Character:IsA("Model") then
+                Character:PivotTo(Destination)
+            else
+                Root.CFrame = Destination
+            end
+            Root.AssemblyLinearVelocity = Vector3.zero
+            Root.AssemblyAngularVelocity = Vector3.zero
+            if Ext then Ext.SetTweenNoclipEnabled(false, true) end
+            T.lastGroundRecoveryAt = Now
+            T.recoveryCount = (T.recoveryCount or 0) + 1
+            T.groundRecoveryState = "Moved above " .. Source .. "; confirming support"
+            T.recoveryGraceUntil = Now + 0.8
+            T.stage = "Underground recovery / " .. Source
+            T.goal = Destination.Position
+            return true
+        end
+
         local TidalLeverCache = {Map = nil, Prompts = {}}
         local function TidalLever(Floor, RequireEnabled)
             local _, Map = TidalMap()
@@ -10970,14 +11188,22 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     end
                 end
             end
-            local Best, BestPart, BestDiff = nil, nil, 25
+            -- Levers normally sit ~4 studs above the same floor's Respawn.
+            -- On Floor 10 the *lever* is instead at Y~550, next to the
+            -- combat deck (Y~546.5), while Respawn/gate is Y~585.5.
+            -- Check BOTH valid deck elevations, not only the gate landing.
+            local CombatY = TidalCombatHeight(Floor)
+            local Best, BestPart, BestDiff = nil, nil, 18
             for _, Object in ipairs(TidalLeverCache.Prompts) do
                 if Object.Parent and (RequireEnabled ~= true or Object.Enabled) then
                     local Parent = Object.Parent
                     local Part = Parent:IsA("BasePart") and Parent
                         or Parent:FindFirstChildWhichIsA("BasePart", true)
                     if Part then
-                        local Delta = math.abs(Part.Position.Y - ExpectedY - 4.5)
+                        local AtGate = math.abs(Part.Position.Y - ExpectedY - 4.5)
+                        local AtCombat = CombatY and math.abs(Part.Position.Y - CombatY - 4.5)
+                            or math.huge
+                        local Delta = math.min(AtGate, AtCombat)
                         if Delta < BestDiff then
                             Best, BestPart, BestDiff = Object, Part, Delta
                         end
@@ -11038,6 +11264,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
 
         local function TidalMove(T, Root, Goal, DeltaTime, Label, Radius)
             if not Goal then
+                T.tweenTravelActive = false
                 T.stage = "No verified ground: " .. tostring(Label)
                 T.goal = nil
                 return false
@@ -11059,6 +11286,10 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 - Vector3.new(Goal.Position.X, 0, Goal.Position.Z)).Magnitude
             local VerticalDistance = math.abs(Root.Position.Y - Goal.Position.Y)
             if HorizontalDistance <= (Radius or 5) and VerticalDistance <= 2.5 then
+                T.tweenTravelActive = false
+                if GENV.__AZ_FARM_EXT then
+                    GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                end
                 if Method == "Legit" then
                     GENV.__AZ_LEGIT_NAV.Go(Goal, Radius or 5, "Tidal " .. Label)
                 end
@@ -11070,6 +11301,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             if Method == "Legit" then
                 GENV.__AZ_LEGIT_NAV.Go(Goal, Radius or 5, "Tidal " .. Label)
             elseif Method == "Tween" then
+                T.tweenTravelActive = true
                 GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(true)
                 local Speed = math.clamp(tonumber(Settings.TweenSpeed) or 95, 20, 250)
                 local Fraction = math.clamp(Speed * math.clamp(DeltaTime or 0.016, 0, 0.1)
@@ -11165,6 +11397,10 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
         GENV.__AZ_TIDAL_SAFE_COMBAT_GOAL = function(Pos, Root)
             local Level = workspace:GetAttribute("FloodRoof") == true and 12
                 or math.clamp(math.floor(tonumber(workspace:GetAttribute("FloodFloor")) or 0), 0, 12)
+            local Runtime = GENV.__AZ_TIDAL_RUNTIME
+            if Runtime and Runtime.parkingCombatActive == true then
+                Level = 0
+            end
             return TidalGroundGoal(Pos, Root, false, Level)
         end
 
@@ -11181,6 +11417,16 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 stage = T and T.stage or "unavailable",
                 goal = T and T.goal or nil,
                 method = Settings.FarmMethod,
+                grounded = T and T.groundSupported or false,
+                groundedPart = T and T.groundPart or nil,
+                lastSafePosition = T and T.lastSafeCFrame and T.lastSafeCFrame.Position or nil,
+                groundedRecovery = T and T.groundRecoveryState or "not required",
+                recoveryCount = T and (T.recoveryCount or 0) or 0,
+                recoveryTrigger = T and T.recoveryTrigger or "none",
+                overheadFloorPart = T and T.overheadFloorPart or "none",
+                recoveryGrace = T and math.max(0, (T.recoveryGraceUntil or 0) - os.clock()) or 0,
+                tweenTravelActive = T and T.tweenTravelActive == true or false,
+                persistentNoclipSuspended = Settings.AutoTidalFarm == true,
                 locked = game:GetService("Players").LocalPlayer:GetAttribute("FloodLocked") == true,
                 lavaHeight = workspace:GetAttribute("FloodLevel"),
                 secondsUntilLava = (function()
@@ -11188,10 +11434,20 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     return At and math.max(0, At - workspace:GetServerTimeNow()) or nil
                 end)(),
                 leverRequested = workspace:GetAttribute("FloodLeverAt") ~= nil,
+                leverObjective = T and T.leverObjective == true or false,
+                leverTravel = T and T.leverTravel == true or false,
+                leverPromptFound = T and T.leverPromptFound == true or false,
+                leverPromptEnabled = T and T.leverPromptEnabled == true or false,
+                leverPartPosition = T and T.leverPartPosition or nil,
+                leverDeckHeight = T and T.leverDeckHeight or nil,
                 gateContested = workspace:GetAttribute("FloodGateContested") == true,
                 floorEnemies = T and T.floorEnemies or nil,
                 enemySpawnHeight = TidalCombatHeight(Floor),
                 standingOnEnemyDeck = select(1, TidalOnFloor(Root, Floor, TidalCombatHeight(Floor))),
+                combatDeckTransit = T and T.combatDeckTransit == true or false,
+                combatTargetHeight = T and T.combatTargetHeight or nil,
+                verticalToCombatDeck = Root and TidalCombatHeight(Floor)
+                    and (Root.Position.Y - TidalCombatHeight(Floor)) or nil,
                 serverRemaining = T and T.serverRemaining or nil,
                 -- Nonzero runStore.remaining must not veto the server's
                 -- explicit block/gate phase after local enemies are cleared.
@@ -11202,6 +11458,12 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 gateClearSeconds = T and T.gateClearSince
                     and os.clock() - T.gateClearSince or nil,
                 gateTargetSource = T and T.gateTargetSource or "none",
+                garageWaveSeen = T and T.parkingWaveSeen == true or false,
+                garageCombatActive = T and T.parkingCombatActive == true or false,
+                garageWaveStartedAt = T and T.parkingWaveStartedAt or nil,
+                garageEnemyCount = T and T.parkingEnemyCount or 0,
+                garageExitAllowed = T and T.parkingExitAllowed == true or false,
+                garageWaitReason = T and T.parkingWaitReason or "none",
                 gateZoneAvailable = (function()
                     local World = workspace:FindFirstChild("World")
                     local Objects = World and World:FindFirstChild("MapObjects")
@@ -11243,6 +11505,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             if not Settings.AutoTidalFarm then
                 T.stage = "Disabled"
                 T.goal = nil
+                T.tweenTravelActive = false
                 if T.wasEnabled and GENV.__AZ_LEGIT_NAV then
                     GENV.__AZ_LEGIT_NAV.Reset("Tidal disabled")
                 end
@@ -11250,6 +11513,7 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
                 end
                 T.wasEnabled = false
+                T.parkingCombatActive = false
                 return
             end
             T.wasEnabled = true
@@ -11270,6 +11534,24 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 return
             end
             if T.roof then Floor = 12 end
+            -- A Floor 10 Tween may legitimately travel THROUGH geometry
+            -- between the upper gate and lower enemy deck. Do not restore
+            -- collisions every heartbeat in the middle of that transition:
+            -- it would trap the avatar against a rail, floor or ceiling.
+            -- The moving controller owns temporary noclip until arrival.
+            if Settings.FarmMethod ~= "Tween"
+                or T.tweenTravelActive ~= true
+            then
+                T.tweenTravelActive = false
+                if GENV.__AZ_FARM_EXT then
+                    GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                end
+            end
+            if TidalFallRecovery(T, Root, Floor) then return end
+            if (T.recoveryGraceUntil or 0) > os.clock() then
+                T.stage = "Underground recovery: waiting to settle onto solid floor"
+                return
+            end
             local TargetFloor = Floor == 0 and 1 or math.min(Floor + 1, 12)
             local Fight = Phase == "fight" or T.roof
             local GateContested = Phase == "block"
@@ -11292,15 +11574,156 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             T.blockRemainingIgnored = Phase == "block"
                 and ServerRemaining ~= nil and ServerRemaining > 0
             T.gateWaitingForEnemies = Phase == "block" and VisibleFloorEnemies
+            T.parkingCombatActive = false
 
-            -- The fight deck and gate deck are distinct on Floor 10. Do not
-            -- pull the character back to Y=585 every time it reaches the
-            -- real Y=546 combat floor, or it'll bounce between both levels.
+            -- GARAGE START INTERLOCK (Floor 0): an empty enemy folder while
+            -- the match is replicating is NOT evidence that the garage wave
+            -- was cleared. The old `(Floor == 0 and Phase ~= "fight")` route
+            -- climbed immediately from the initial waiting/drain state.
+            -- Hold position until we've observed authoritative or visible
+            -- first-wave activity AND the server actually advances to drain.
+            -- No fixed timer can safely stand in for that server transition.
+            if Floor == 0 then
+                local WaveStartedAt = tonumber(ReadRunValue2("waveStartedAt"))
+                local ParkingEnemies = FloorEnemyCount
+                T.parkingEnemyCount = ParkingEnemies
+                if ParkingEnemies > 0
+                    or (ServerRemaining ~= nil and ServerRemaining > 0)
+                    or (WaveStartedAt ~= nil and WaveStartedAt > 0)
+                then
+                    T.parkingWaveSeen = true
+                    T.parkingWaveStartedAt = WaveStartedAt or T.parkingWaveStartedAt
+                end
+                local ServerPermitsClimb = Phase == "drain"
+                local ParkingEnemiesCleared = ParkingEnemies == 0
+                T.parkingExitAllowed = ServerPermitsClimb
+                    and T.parkingWaveSeen == true and ParkingEnemiesCleared
+                if not T.parkingExitAllowed then
+                    T.parkingWaitReason = not T.parkingWaveSeen
+                        and "Awaiting first garage wave spawn"
+                        or not ParkingEnemiesCleared
+                            and "Clearing first garage wave"
+                            or not ServerPermitsClimb
+                                and "Waiting for server drain phase"
+                                or "Waiting for garage clearance"
+                    if Phase ~= "fight" and ParkingEnemies == 0 then
+                        T.goal = nil
+                        T.combatDeckTransit = false
+                        T.tweenTravelActive = false
+                        T.stage = "Parking garage: " .. T.parkingWaitReason
+                        if GENV.__AZ_FARM_EXT then
+                            GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                        end
+                        return
+                    end
+                    -- During fight/wave replication, the combat branch below
+                    -- still handles existing enemies. It must never promote
+                    -- a zero-target fight to stair or gate navigation.
+                else
+                    T.parkingWaitReason = "Garage wave cleared; drain authorized"
+                end
+            elseif Floor == 1 and Root.Position.Y < 83 then
+                -- Some builds advertise Floor=1 while we're physically still
+                -- on the parking deck. Never infer that Floor=1 alone means
+                -- the initial enemies are gone or that the ramp is ready.
+                local GarageEnemies = TidalLivingFloorEnemies(0)
+                local WaveStartedAt = tonumber(ReadRunValue2("waveStartedAt"))
+                T.parkingEnemyCount = GarageEnemies
+                if GarageEnemies > 0
+                    or (ServerRemaining ~= nil and ServerRemaining > 0)
+                    or (WaveStartedAt ~= nil and WaveStartedAt > 0)
+                then
+                    T.parkingWaveSeen = true
+                    T.parkingWaveStartedAt = WaveStartedAt or T.parkingWaveStartedAt
+                end
+                local MustWaitAtGarage = GarageEnemies > 0
+                    or (FloorEnemyCount == 0 and
+                        (Phase == "waiting" or Phase == "fight"
+                            or (Phase == "drain" and not T.parkingWaveSeen)))
+                if MustWaitAtGarage then
+                    T.parkingCombatActive = true
+                    T.parkingExitAllowed = false
+                    T.combatDeckTransit = false
+                    T.tweenTravelActive = false
+                    if GarageEnemies > 0 then
+                        -- Target actual garage enemies using parking-height
+                        -- ground projection, even if FloodFloor says 1.
+                        T.parkingWaitReason = "Clearing garage enemies before ramp"
+                        local _, EnemyRoot = NearestEnemy2()
+                        if EnemyRoot then
+                            local Goal = TidalGroundGoal(
+                                EnemyRoot.Position, Root, false, 0)
+                            if Goal then
+                                local Arrived = TidalMove(T, Root, Goal,
+                                    DeltaTime, "Parking garage first wave",
+                                    math.clamp(tonumber(Settings.FarmDistance) or 7, 4, 9))
+                                if Arrived then RunCombat2() end
+                            else
+                                T.stage = "Parking: waiting for verified enemy deck"
+                                T.goal = nil
+                            end
+                        else
+                            T.stage = "Parking: waiting for garage enemy replication"
+                            T.goal = nil
+                        end
+                    else
+                        T.parkingWaitReason = "Waiting for first garage wave or server advance"
+                        T.stage = "Parking garage: " .. T.parkingWaitReason
+                        T.goal = nil
+                        if GENV.__AZ_FARM_EXT then
+                            GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                        end
+                    end
+                    return
+                end
+                T.parkingWaitReason = "Server advanced or active upper floor detected"
+                T.parkingExitAllowed = true
+            end
+
+            -- Floor 10 has a lower combat/lever deck and a higher gate
+            -- landing. An enabled local prompt is also a valid lever signal
+            -- if the FloodLeverAt attribute has not replicated yet.
+            local ActiveLeverPrompt, ActiveLeverPart = nil, nil
+            local AnyLeverPrompt, AnyLeverPart = nil, nil
+            if Phase == "block" then
+                ActiveLeverPrompt, ActiveLeverPart = TidalLever(Floor, true)
+                -- The prompt may be replicated before the server enables it.
+                AnyLeverPrompt, AnyLeverPart = TidalLever(Floor, false)
+            end
+            local LeverRequested = Phase == "block"
+                and (T.lever ~= nil or ActiveLeverPrompt ~= nil)
             local AtLanding = select(1, TidalOnFloor(Root, Floor))
             local AtCombatDeck = select(1, TidalOnFloor(Root, Floor, TidalCombatHeight(Floor)))
             local FightingHere = Fight or (Phase == "block" and HasEnemies)
+            -- Floor 10's combat pad is ~39 studs BELOW the gate landing.
+            -- Being supported on stairs/railings between those two levels,
+            -- or already transitioning there, must not force the farm back
+            -- to the upper Respawn marker before each enemy target.
+            local CombatY, GateY = TidalCombatHeight(Floor), TidalHeight[Floor]
+            local Floor10CombatRoute = Floor == 10 and FightingHere
+                and CombatY and GateY
+                and (T.combatDeckTransit == true
+                    or (T.tweenTravelActive == true and T.goal
+                        and math.abs(T.goal.Y - CombatY) <= 12
+                        and Root.Position.Y >= CombatY - 2)
+                    or (T.groundSupported == true
+                        and Root.Position.Y >= CombatY - 7
+                        and Root.Position.Y <= GateY + 10))
+            -- When a real, enabled lever is available, it is the navigation
+            -- destination. Do not constantly reroute back to Respawn while
+            -- Tween/Legit descends from the gate landing to the lever deck.
+            -- TidalFallRecovery separately guards true below-map falls.
+            local LeverTravel = LeverRequested and AnyLeverPart ~= nil
             local MustReachFloor = Floor >= 1 and Floor <= 12
-                and not AtLanding and not (FightingHere and AtCombatDeck)
+                and not AtLanding
+                and not (FightingHere and AtCombatDeck)
+                and not Floor10CombatRoute
+                and not LeverTravel
+            T.leverTravel = LeverTravel
+            T.leverObjective = LeverRequested
+            T.leverPromptFound = AnyLeverPrompt ~= nil
+            T.leverPromptEnabled = ActiveLeverPrompt ~= nil
+            T.leverPartPosition = AnyLeverPart and AnyLeverPart.Position or nil
 
             -- The current floor can be advancing server-side even while the
             -- player is still climbing it; keep the entrance ahead of combat.
@@ -11322,19 +11745,78 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
             if Fight or (Phase == "block" and HasEnemies) then
                 local _, EnemyRoot = NearestEnemy2()
                 if EnemyRoot then
+                    -- Validate a real deck position near THIS enemy, rather
+                    -- than targeting its raw CFrame beneath/inside a floor.
+                    local Desired = DesiredEnemyCFrame2(EnemyRoot)
+                    local CombatGoal = Desired and TidalGroundGoal(
+                        Desired.Position, Root, false, Floor) or nil
+                    -- Narrow combat decks may not support the "Behind"
+                    -- offset even though the enemy stands on solid ground.
+                    -- Try the actual enemy pad before abandoning the target.
+                    if not CombatGoal then
+                        CombatGoal = TidalGroundGoal(
+                            EnemyRoot.Position, Root, false, Floor)
+                    end
+                    if not CombatGoal then
+                        T.tweenTravelActive = false
+                        T.combatDeckTransit = false
+                        if GENV.__AZ_FARM_EXT then
+                            GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                        end
+                        T.stage = "Waiting for verified enemy-deck surface"
+                        T.goal = nil
+                        return
+                    end
+                    local CombatDeckY = TidalCombatHeight(Floor)
+                    local UpperDeckY = TidalHeight[Floor]
+                    local IsLowerDeck = Floor == 10
+                        and CombatDeckY and UpperDeckY
+                        and UpperDeckY - CombatDeckY > 12
+                        and math.abs(CombatGoal.Position.Y - CombatDeckY) <= 10
+                    local NeedsDeckTransition = IsLowerDeck
+                        and math.abs(Root.Position.Y - CombatGoal.Position.Y) > 10
+                    -- Keep transition ownership until the verified lower
+                    -- deck is reached, even during the last few studs.
+                    local DeckTransitionActive = IsLowerDeck and
+                        (NeedsDeckTransition or
+                            (T.combatDeckTransit == true and not AtCombatDeck))
+                    T.combatDeckTransit = DeckTransitionActive
+                    T.combatTargetHeight = CombatGoal.Position.Y
                     T.stage = Phase == "block"
                         and ("Clear floor " .. Floor .. " enemies BEFORE gate ("
-                            .. FloorEnemyCount .. " left)")
+                            .. FloorEnemyCount .. " visible)")
                         or ("Fighting floor " .. tostring(Floor))
-                    T.goal = EnemyRoot.Position
-                    if GENV.__AZ_FARM_EXT then
-                        GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(
-                            Settings.FarmMethod == "Tween",
-                            Settings.FarmMethod == "Legit")
+
+                    -- TidalMove coordinates Teleport, Tween and Legit.
+                    -- In particular, Tween enables temporary noclip BEFORE
+                    -- crossing upper-deck collision and keeps it enabled
+                    -- until the verified lower-deck landing is reached.
+                    -- The old MoveFarm2 forcibly restored collision each
+                    -- heartbeat, cancelling the very transition we need.
+                    if DeckTransitionActive or Settings.FarmMethod == "Tween" then
+                        local Arrived = TidalMove(T, Root, CombatGoal,
+                            DeltaTime,
+                            DeckTransitionActive and "Descend to floor 10 enemies"
+                                or "Approach floor enemy",
+                            math.clamp(tonumber(Settings.FarmDistance) or 7, 4, 9))
+                        if not Arrived then return end
+                        T.combatDeckTransit = false
+                        RunCombat2()
+                        return
                     end
+                    T.tweenTravelActive = false
+                    if GENV.__AZ_FARM_EXT then
+                        GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                    end
+                    T.goal = CombatGoal.Position
                     MoveFarm2(DeltaTime)
                     RunCombat2()
                     return
+                end
+                T.tweenTravelActive = false
+                T.combatDeckTransit = false
+                if GENV.__AZ_FARM_EXT then
+                    GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
                 end
                 if Phase == "block" and HasEnemies then
                     T.stage = "Gate paused: " .. tostring(ServerRemaining or "unknown")
@@ -11349,8 +11831,20 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     RunCombat2()
                     return
                 end
+                if Fight and Floor == 0 and not HasEnemies then
+                    T.goal = nil
+                    T.stage = "Parking garage: waiting for first-wave enemies / server phase"
+                    return
+                end
             end
 
+            if not HasEnemies then
+                T.combatDeckTransit = false
+                T.tweenTravelActive = false
+                if GENV.__AZ_FARM_EXT then
+                    GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(false, true)
+                end
+            end
             if Phase == "block" then
                 if HasEnemies then
                     T.gateClearSince = nil
@@ -11367,20 +11861,35 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                     return
                 end
                 T.gateCombatLock = false
-                -- Lever takes priority only when the server actually requests
-                -- it. Stage data alone is never enough to pull every lever.
-                if T.lever ~= nil then
-                    local Prompt, LeverPart = TidalLever(Floor, true)
+                -- During the server's block phase, prefer the requested
+                -- or enabled floor lever. In particular the Floor 10 lever
+                -- is physically DOWN on the enemy deck, not at gate height.
+                if LeverRequested then
+                    local Prompt = ActiveLeverPrompt or AnyLeverPrompt
+                    local LeverPart = ActiveLeverPart or AnyLeverPart
                     if Prompt and LeverPart then
+                        local CombatY, GateY = TidalCombatHeight(Floor), TidalHeight[Floor]
+                        local LeverY = math.abs(LeverPart.Position.Y - CombatY)
+                            < math.abs(LeverPart.Position.Y - GateY)
+                            and CombatY or GateY
+                        T.leverDeckHeight = LeverY
                         local Goal = TidalGroundGoal(LeverPart.Position, Root, true, Floor)
                         if TidalMove(T, Root, Goal, DeltaTime,
-                                "Floor " .. Floor .. " lever", 3)
-                            and TidalOnFloor(Root, Floor)
+                                "Floor " .. Floor .. " lever / deck "
+                                .. math.floor(LeverY), 3)
+                            and select(1, TidalOnFloor(Root, Floor, LeverY))
                         then
-                            TidalTryLever(T, Root, Prompt, LeverPart)
+                            if Prompt.Enabled then
+                                TidalTryLever(T, Root, Prompt, LeverPart)
+                            else
+                                T.stage = "At Floor " .. Floor
+                                    .. " lever; waiting for prompt activation"
+                            end
                         end
                     else
-                        T.stage = "Waiting for floor " .. Floor .. " lever prompt"
+                        T.goal = nil
+                        T.stage = "Waiting for floor " .. Floor
+                            .. " lever object (not using gate as fallback)"
                     end
                     return
                 end
@@ -11438,7 +11947,9 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                 return
             end
 
-            if Phase == "drain" or (Floor == 0 and Phase ~= "fight") then
+            -- Only climb once the server declares drain. Parking Floor 0
+            -- additionally needs first-wave confirmation (guarded above).
+            if Phase == "drain" then
                 local Anchor, Label = TidalClimbAnchor(Root, Floor, TargetFloor, Settings.FarmMethod)
                 if Anchor then
                     local Goal = TidalGroundGoal(Anchor, Root)
@@ -11571,6 +12082,8 @@ GENV.__AZ_UI_FARM_COMBAT:CreateToggle({
                         T.lastMoveAt, T.lastGoal = 0, nil
                         T.gateClearSince = nil
                         T.gateCombatLock = false
+                        T.combatDeckTransit = false
+                        T.tweenTravelActive = false
                         T.leverBusy = false
                         print("[Anime Zero][Tidal] Stage:", Stage,
                             "| Lava:", tostring(workspace:GetAttribute("FloodLevel")))
@@ -29124,6 +29637,26 @@ GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled = function(
     Enabled, ForceRestore
 )
 
+    -- OCT 19: Tidal uses real floor and gate occupancy detection. Persistent
+    -- noclip lets the avatar sink through those decks (especially after a
+    -- Tween or a combat->gate handoff). Suspend the EFFECT for this mode,
+    -- preserving the user's saved StayNoclip preference everywhere else.
+    if type(GENV.__AZ_IS_FLOOD_ESCAPE) == "function"
+        and GENV.__AZ_IS_FLOOD_ESCAPE()
+        and Settings.AutoTidalFarm == true
+    then
+        local T = GENV.__AZ_TIDAL_RUNTIME
+        -- Only an actively moving Tween may temporarily cross geometry;
+        -- always restore collisions for grounded play and rescue.
+        if ForceRestore == true or Settings.FarmMethod ~= "Tween"
+            or not T or T.tweenTravelActive ~= true then
+            Enabled = false
+            ForceRestore = true
+        else
+            Enabled = true
+        end
+    end
+
     if ForceRestore == true then
         Enabled = false
     elseif Settings.FarmMethod == "Legit" then
@@ -29205,7 +29738,15 @@ end
 -- Persistent control is independent of Story/Trials/Raid farm state.
 -- Stepped fires before physics so collisions remain disabled even while idle.
 GENV.__AZ_FARM_EXT.StayNoclipConnection = RunService.Stepped:Connect(function()
-    if Settings.StayNoclip == true and SessionAlive() and Settings.FarmMethod ~= "Legit" then
+    if not SessionAlive() then return end
+    if GENV.__AZ_IS_FLOOD_ESCAPE()
+        and Settings.AutoTidalFarm == true
+    then
+        local T = GENV.__AZ_TIDAL_RUNTIME
+        local InTransit = T and T.tweenTravelActive == true
+            and Settings.FarmMethod == "Tween"
+        GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(InTransit, not InTransit)
+    elseif Settings.StayNoclip == true and Settings.FarmMethod ~= "Legit" then
         GENV.__AZ_FARM_EXT.SetTweenNoclipEnabled(true)
     end
 end)
