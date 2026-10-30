@@ -70,6 +70,14 @@ local state = {
     AutoFarmRaid = false,
     AutoLeaveTrial = false,
     TrialLeaveWave = 5,
+    AutoLeaveTower = false,
+    TowerLeaveWave = 10,
+    TowerLastLeave = -math.huge,
+    AutoLeaveRaid = false,
+    RaidLeaveWave = 5,
+    RaidLastLeave = -math.huge,
+    AutoJoinSoloRaid = false,
+    AutoJoinNinjaRaid = false,
     TrialLastLeave = -math.huge,
     LastSeenMode = nil,
     AntiAFKConnection = nil,
@@ -1206,6 +1214,53 @@ local equipBestToggle = unitsTab:CreateToggle({
     end
 })
 
+-- Auto-lock uses the native Shadows/Lock toggle only on units currently unlocked.
+-- Locked units are already excluded from Auto Fuse and Auto Sell.
+state.AutoLockUnits = false
+state.LockRarities = {}
+state.UnitLockLastAttempt = {}
+unitsTab:CreateSection({ name = "Auto Lock", icon = "lock" })
+local lockRarityChoice = unitsTab:CreateDropdown({
+    name = "Lock Rarities",
+    options = ALL_RARITIES,
+    value = {}, multiSelect = true,
+    placeholder = "Select unit rarities...",
+    flag = "Paraiso_LockRarities_V1",
+    callback = function(values)
+        state.LockRarities = raritySet(values, ALL_RARITIES)
+    end
+})
+local lockToggle = unitsTab:CreateToggle({
+    name = "Auto Lock Units", value = false,
+    flag = "Paraiso_AutoLockUnits_V1",
+    callback = function(value) state.AutoLockUnits = value == true end
+})
+state.LockRarities = raritySet(selectedLabels(lockRarityChoice), ALL_RARITIES)
+state.AutoLockUnits = lockToggle.value == true
+
+task.spawn(function()
+    while state.Running do
+        if state.AutoLockUnits and hasSelections(state.LockRarities) then
+            local data = getInventoryData()
+            if data then
+                for uid, owned in pairs(data.Shadows) do
+                    local def = getUnitDefinition(owned)
+                    local rarity = def and def.Rarity
+                    if rarity and state.LockRarities[rarity] and not owned.Locked then
+                        local now = os.clock()
+                        if now - (state.UnitLockLastAttempt[uid] or -math.huge) >= 12 then
+                            state.UnitLockLastAttempt[uid] = now
+                            bridge:FireServer("General", "Shadows", "Lock", uid)
+                            break -- wait for replicated Locked state before next unit
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.8)
+    end
+end)
+
 -- Shared threshold: fusion/selling stay idle until the unit inventory is
 -- almost full. This threshold does not affect Equip Best or Auto Open Stars.
 unitsTab:CreateSection({ name = "Inventory Cleanup", icon = "package" })
@@ -1768,6 +1823,35 @@ local function readModeValue(container, childName)
     return nil
 end
 
+-- Read the active wave only; never use a historical highest-wave statistic.
+local function readActiveWave(mode)
+    local modeFolder = gameModes and gameModes:FindFirstChild(mode)
+    local containers = {modeFolder}
+    local server = Workspace:FindFirstChild("Server")
+    local active = server and server:FindFirstChild(mode)
+    if active then containers[#containers+1] = active end
+    if mode == "Tower" then
+        local roomName = player:GetAttribute("TowerRoom")
+        local rooms = active and active:FindFirstChild("ActiveRooms")
+        local room = rooms and roomName and rooms:FindFirstChild(tostring(roomName))
+        if room then table.insert(containers, 1, room) end
+    elseif mode == "Raid" then
+        local roomName = player:GetAttribute("RaidRoom")
+        local rooms = active and active:FindFirstChild("ActiveRooms")
+        local room = rooms and roomName and rooms:FindFirstChild(tostring(roomName))
+        if room then table.insert(containers, 1, room) end
+    end
+    for _, obj in ipairs(containers) do
+        if obj then
+            local wave = tonumber(readModeValue(obj, "Wave"))
+                or tonumber(obj:GetAttribute("Wave"))
+            if wave and wave > 0 then return math.floor(wave) end
+        end
+    end
+    local attribute = player:GetAttribute(mode .. "Wave")
+    return (type(attribute) == "number" and attribute > 0) and math.floor(attribute) or nil
+end
+
 local function canEnterNewMode()
     local mode = player:GetAttribute("Mode")
     return mode == nil or mode == "" or mode == "World" or mode == "Normal" or mode == "None"
@@ -1909,25 +1993,48 @@ local function availableRaidRoom(raidRoot, raidId)
     return best
 end
 
+local function ownRaidRoom(raidRoot, raidId)
+    local rooms = raidRoot and raidRoot:FindFirstChild("Rooms")
+    if not rooms then return nil end
+    for _, room in ipairs(rooms:GetChildren()) do
+        if room:GetAttribute("Status") == "Queue"
+            and room:GetAttribute("Raid") == raidId
+            and tonumber(room:GetAttribute("OwnerUserId")) == player.UserId then
+            return room
+        end
+    end
+    return nil
+end
+
 local function tryJoinRaid(now)
     if player:GetAttribute("RaidRoom") ~= nil or player:GetAttribute("Mode") == "Raid" then return end
-    if not canEnterNewMode() then return end
-    if now - state.RaidLastRequest < 15 then return end
+    if not canEnterNewMode() or now - state.RaidLastRequest < 12 then return end
     local raid = gameModes and gameModes:FindFirstChild("Raid")
     if readModeValue(raid, "Open") ~= true then return end
     local active = readModeValue(raid, "Active")
-    if type(active) ~= "string" or active == "" then return end
-    -- Raid choice is a FILTER, not an override of the server's rotation.
-    if active ~= state.SelectedRaid then return end
-    local room = availableRaidRoom(raid, active)
-    if room and raidHasKeyForAction(active, "Join") then
-        if sendModeRequest("Gamemodes", "Raid", "Join", room.Name) then
-            state.RaidLastRequest = now
+    if type(active) ~= "string" then return end
+    if active == "Solo City" and state.AutoJoinSoloRaid then
+        -- Solo City: join the currently open public raid. No key creation needed.
+        local room = availableRaidRoom(raid, active)
+        local result
+        if room then
+            result = sendModeRequest("Gamemodes", "Raid", "Join", room.Name)
+        else
+            -- The game's prompt UI also contains a direct Join action.
+            result = sendModeRequest("Gamemodes", "Raid", "Join")
         end
-    elseif not room and state.RaidQueuePolicy == "Join First (Create if Empty)"
-        and raidHasKeyForAction(active, "Create") then
-        if sendModeRequest("Gamemodes", "Raid", "Create", active) then
-            state.RaidLastRequest = now
+        if result then state.RaidLastRequest = now end
+    elseif active == "Ninja Village" and state.AutoJoinNinjaRaid then
+        -- Ninja Village: create your own key-paid queue and join ONLY your queue.
+        local own = ownRaidRoom(raid, active)
+        if own then
+            if sendModeRequest("Gamemodes", "Raid", "Join", own.Name) then
+                state.RaidLastRequest = now
+            end
+        elseif raidHasKeyForAction(active, "Create") then
+            if sendModeRequest("Gamemodes", "Raid", "Create", active) then
+                state.RaidLastRequest = now
+            end
         end
     end
 end
@@ -1954,6 +2061,7 @@ local trialDifficultyDropdown = modesTab:CreateDropdown({
 local trialToggle
 local towerToggle
 local raidToggle
+local ninjaRaidToggle
 state.UiLayout.trialRow = modesTab:CreateGroup()
 trialToggle = state.UiLayout.trialRow:CreateToggle({
     name = "Auto Join Time Trial",
@@ -1965,6 +2073,7 @@ trialToggle = state.UiLayout.trialRow:CreateToggle({
         if value then
             if towerToggle then towerToggle:Set(false) end
             if raidToggle then raidToggle:Set(false) end
+            if ninjaRaidToggle then ninjaRaidToggle:Set(false) end
         end
     end,
 })
@@ -2015,6 +2124,7 @@ towerToggle = state.UiLayout.towerRow:CreateToggle({
         if value then
             if trialToggle then trialToggle:Set(false) end
             if raidToggle then raidToggle:Set(false) end
+            if ninjaRaidToggle then ninjaRaidToggle:Set(false) end
         end
     end,
 })
@@ -2030,81 +2140,104 @@ local towerFarmToggle = state.UiLayout.towerRow:CreateToggle({
     end,
 })
 
+local towerLeaveInput = modesTab:CreateInput({
+    name = "Leave Tower At Wave", numeric = true,
+    value = "10", placeholder = "Enter wave number",
+    flag = "Paraiso_TowerLeaveWave_V1",
+    callback = function(text)
+        local wave = tonumber(text)
+        if wave and wave >= 1 then
+            state.TowerLeaveWave = math.clamp(math.floor(wave), 1, 70)
+        end
+    end
+})
+local towerLeaveToggle = modesTab:CreateToggle({
+    name = "Auto Leave Tower", value = false,
+    flag = "Paraiso_AutoLeaveTower_V1",
+    callback = function(value)
+        state.AutoLeaveTower = value == true
+        state.TowerLastLeave = -math.huge
+    end
+})
+
 modesTab:CreateSection({ name = "Raids", icon = "swords" })
-state.UiLayout.raidSelectRow = modesTab:CreateGroup()
-state.UiLayout.raidSelectLeft = state.UiLayout.raidSelectRow:CreateGroup({ direction = "column" })
-state.UiLayout.raidSelectRight = state.UiLayout.raidSelectRow:CreateGroup({ direction = "column" })
-local raidDropdown = state.UiLayout.raidSelectLeft:CreateDropdown({
-    name = "Select Raid",
-    options = raidNames,
-    value = { raidNames[1] },
-    multiSelect = false,
-    flag = "Paraiso_SelectedRaid",
+-- Separate paths because Solo City joins when open; Ninja Village needs a key.
+raidToggle = modesTab:CreateToggle({
+    name = "Auto Join Solo City Raid", value = false,
+    flag = "Paraiso_AutoJoinSoloRaid_V1",
     callback = function(value)
-        if type(value) == "table" then value = value[1] end
-        if raidDisplayIds[value] then
-            state.SelectedRaid = raidDisplayIds[value]
-            state.RaidLastRequest = -math.huge
-        end
-    end,
-})
-local raidPolicyDropdown = state.UiLayout.raidSelectRight:CreateDropdown({
-    name = "Raid Queue Behavior",
-    options = { "Join First (Create if Empty)", "Join Only" },
-    value = { "Join First (Create if Empty)" },
-    multiSelect = false,
-    flag = "Paraiso_RaidQueuePolicy",
-    callback = function(value)
-        if type(value) == "table" then value = value[1] end
-        if value == "Join First (Create if Empty)" or value == "Join Only" then
-            state.RaidQueuePolicy = value
-        end
-    end,
-})
-state.UiLayout.raidToggleRow = modesTab:CreateGroup()
-raidToggle = state.UiLayout.raidToggleRow:CreateToggle({
-    name = "Auto Join Raid",
-    value = false,
-    flag = "Paraiso_AutoJoinRaid",
-    callback = function(value)
-        state.AutoJoinRaid = value == true
+        state.AutoJoinSoloRaid = value == true
+        state.AutoJoinRaid = state.AutoJoinSoloRaid or state.AutoJoinNinjaRaid
         state.RaidLastRequest = -math.huge
         if value then
             if trialToggle then trialToggle:Set(false) end
             if towerToggle then towerToggle:Set(false) end
         end
-    end,
+    end
 })
-
-local raidFarmToggle = state.UiLayout.raidToggleRow:CreateToggle({
-    name = "Auto Farm Raids",
-    value = false,
+ninjaRaidToggle = modesTab:CreateToggle({
+    name = "Auto Create / Join Ninja Raid", value = false,
+    flag = "Paraiso_AutoJoinNinjaRaid_V1",
+    callback = function(value)
+        state.AutoJoinNinjaRaid = value == true
+        state.AutoJoinRaid = state.AutoJoinSoloRaid or state.AutoJoinNinjaRaid
+        state.RaidLastRequest = -math.huge
+        if value then
+            if trialToggle then trialToggle:Set(false) end
+            if towerToggle then towerToggle:Set(false) end
+        end
+    end
+})
+local raidFarmToggle = modesTab:CreateToggle({
+    name = "Auto Farm Raids", value = false,
     flag = "Paraiso_AutoFarmRaids",
     callback = function(value)
         state.AutoFarmRaid = value == true
         changeTarget()
-        if not value and not state.AutoFarm and not hasActiveQuestTarget() then returnAboveMap() end
-    end,
+        if not value and not state.AutoFarm and not hasActiveQuestTarget() then
+            returnAboveMap()
+        end
+    end
+})
+local raidLeaveInput = modesTab:CreateInput({
+    name = "Leave Raid At Wave", numeric = true,
+    value = "5", placeholder = "Enter wave number",
+    flag = "Paraiso_RaidLeaveWave_V1",
+    callback = function(text)
+        local wave = tonumber(text)
+        if wave and wave >= 1 then
+            state.RaidLeaveWave = math.clamp(math.floor(wave), 1, 5)
+        end
+    end
+})
+local raidLeaveToggle = modesTab:CreateToggle({
+    name = "Auto Leave Raid", value = false,
+    flag = "Paraiso_AutoLeaveRaid_V1",
+    callback = function(value)
+        state.AutoLeaveRaid = value == true
+        state.RaidLastLeave = -math.huge
+    end
 })
 
--- Rayfield can restore saved values without invoking their callbacks.
+-- Load saved Rayfield values without changing normal Farm toggles.
 local trialSaved = selectedLabels(trialDifficultyDropdown)[1]
 if trialSaved and trialGoalByName[trialSaved] then
     state.TrialDifficultyGoal = trialSaved
 end
-local savedRaid = selectedLabels(raidDropdown)[1]
-state.SelectedRaid = raidDisplayIds[savedRaid] or raidDisplayIds[raidNames[1]] or "Solo City"
-local savedRaidPolicy = selectedLabels(raidPolicyDropdown)[1]
-state.RaidQueuePolicy = (savedRaidPolicy == "Join Only") and "Join Only" or "Join First (Create if Empty)"
 state.AutoJoinTimeTrial = trialToggle.value == true
 state.AutoCreateJoinTower = towerToggle.value == true
-state.AutoJoinRaid = raidToggle.value == true
+state.AutoJoinSoloRaid = raidToggle.value == true
+state.AutoJoinNinjaRaid = ninjaRaidToggle.value == true
+state.AutoJoinRaid = state.AutoJoinSoloRaid or state.AutoJoinNinjaRaid
 state.AutoFarmTrial = trialFarmToggle.value == true
 state.AutoFarmTower = towerFarmToggle.value == true
 state.AutoFarmRaid = raidFarmToggle.value == true
 state.AutoLeaveTrial = trialLeaveToggle.value == true
 state.TrialLeaveWave = math.max(1, math.floor(tonumber(trialLeaveInput.value) or 5))
--- At most one mode should make network requests at a time.
+state.AutoLeaveTower = towerLeaveToggle.value == true
+state.TowerLeaveWave = math.clamp(math.floor(tonumber(towerLeaveInput.value) or 10), 1, 70)
+state.AutoLeaveRaid = raidLeaveToggle.value == true
+state.RaidLeaveWave = math.clamp(math.floor(tonumber(raidLeaveInput.value) or 5), 1, 5)
 if state.AutoJoinRaid then
     if state.AutoJoinTimeTrial then trialToggle:Set(false) end
     if state.AutoCreateJoinTower then towerToggle:Set(false) end
@@ -2135,6 +2268,24 @@ task.spawn(function()
             and os.clock() - state.TrialLastLeave >= 12 then
             state.TrialLastLeave = os.clock()
             sendModeRequest("Gamemodes", "Trial", "Leave")
+        end
+        -- Wave-based leaving is independent of joining and mode auto-farming.
+        local now = os.clock()
+        if player:GetAttribute("Mode") == "Tower" and state.AutoLeaveTower
+            and now - state.TowerLastLeave >= 12 then
+            local wave = readActiveWave("Tower")
+            if wave and wave >= state.TowerLeaveWave then
+                state.TowerLastLeave = now
+                sendModeRequest("Gamemodes", "Tower", "Leave")
+            end
+        end
+        if player:GetAttribute("Mode") == "Raid" and state.AutoLeaveRaid
+            and now - state.RaidLastLeave >= 12 then
+            local wave = readActiveWave("Raid")
+            if wave and wave >= state.RaidLeaveWave then
+                state.RaidLastLeave = now
+                sendModeRequest("Gamemodes", "Raid", "Leave")
+            end
         end
         if state.AutoJoinTimeTrial or state.AutoCreateJoinTower or state.AutoJoinRaid then
             local ok, err = pcall(function()
@@ -2777,7 +2928,7 @@ local AVATAR_NAMES = {
 }
 local avatarOptions, avatarFromDisplay = {}, {}
 for _, entry in ipairs(AVATAR_NAMES) do
-    local label = entry.name .. " (" .. entry.world .. ")"
+    local label = entry.name
     table.insert(avatarOptions, label)
     avatarFromDisplay[label] = entry.name
 end
@@ -2787,8 +2938,15 @@ state.AvatarParts = {}
 state.AvatarShiny = false
 state.AutoCraftAvatars = false
 state.LastAvatarCraft = {}
+state.AvatarCraftPending = nil
+state.AvatarNoticeHistory = {}
 
+local avatarWatchText
 playerTab:CreateSection({ name = "Avatars", icon = "shirt" })
+avatarWatchText = playerTab:CreateText({
+    name = "Selected Avatar",
+    text = "Sung | Buff: checking game data..."
+})
 state.UiLayout.avatarRow = playerTab:CreateGroup()
 state.UiLayout.avatarLeft = state.UiLayout.avatarRow:CreateGroup({ direction = "column" })
 state.UiLayout.avatarRight = state.UiLayout.avatarRow:CreateGroup({ direction = "column" })
@@ -2834,6 +2992,42 @@ local avatarCraftToggle = playerTab:CreateToggle({
         state.AutoCraftAvatars = value == true
     end
 })
+-- Separate actions: craft once, then explicitly equip visuals and buff.
+local function notifyAvatar(title, message, duration)
+    pcall(function()
+        window:Notify({ title = title, content = message, duration = duration or 5 })
+    end)
+end
+local function equipAvatarKind(kind)
+    local data = nativeController and nativeController.Data
+    local key = state.AvatarName .. (state.AvatarShiny and " Shiny" or "")
+    local owned = type(data) == "table" and type(data.Avatars) == "table"
+        and data.Avatars[key]
+    if type(owned) ~= "table" then
+        notifyAvatar("Avatar not crafted", "Craft " .. key .. " before equipping it.")
+        return
+    end
+    local hasPart = false
+    for _, part in ipairs({ "Head", "Torso", "Arms", "Legs" }) do
+        if owned[part] then hasPart = true break end
+    end
+    if not hasPart then
+        notifyAvatar("Avatar not crafted", "You need an owned " .. key .. " part first.")
+        return
+    end
+    bridge:FireServer("General", "Avatars", kind, key)
+    notifyAvatar("Avatar request sent", kind .. ": " .. key .. ". Game server will confirm equipping.", 4)
+end
+local avatarButtons = playerTab:CreateGroup()
+avatarButtons:CreateButton({
+    name = "Equip Visual", icon = "eye",
+    callback = function() equipAvatarKind("Visual") end
+})
+avatarButtons:CreateButton({
+    name = "Equip Buff", icon = "sparkles",
+    callback = function() equipAvatarKind("Buff") end
+})
+
 state.AvatarName = avatarFromDisplay[firstChoice(avatarChoice.value)] or "Sung"
 state.AvatarParts = labelsToSet(avatarPartChoice.value)
 state.AvatarShiny = firstChoice(avatarShinyChoice.value) == "Shiny"
@@ -2860,32 +3054,115 @@ local function avatarDefinitions()
     return defs
 end
 
+local function describeAvatarBuff(definition)
+    if type(definition) ~= "table" then return "Not available" end
+    local stats = definition.Buffs or definition.Buff or definition.Bonus or definition.Stats
+    if type(stats) == "string" or type(stats) == "number" then
+        return tostring(stats)
+    end
+    if type(stats) == "table" then
+        local segments = {}
+        for k, v in pairs(stats) do
+            if (type(v) == "number" or type(v) == "string") and #segments < 4 then
+                segments[#segments+1] = tostring(k) .. ": " .. tostring(v)
+            end
+        end
+        table.sort(segments)
+        if #segments > 0 then return table.concat(segments, " | ") end
+    end
+    return "See in-game avatar buffs"
+end
+
+local lastAvatarWatchValue = nil
+local function updateAvatarWatcher(data)
+    local key = state.AvatarName .. (state.AvatarShiny and " Shiny" or "")
+    local defs = avatarDefinitions()
+    local owned = type(data) == "table" and type(data.Avatars) == "table" and data.Avatars[key] or nil
+    local ownedCount = 0
+    if type(owned) == "table" then
+        for _, part in ipairs({ "Head", "Torso", "Arms", "Legs" }) do
+            if owned[part] then ownedCount += 1 end
+        end
+    end
+    local message = string.format("%s | Crafted: %d/4\nBuff: %s", key, ownedCount,
+        describeAvatarBuff(defs[key]))
+    if avatarWatchText and message ~= lastAvatarWatchValue then
+        avatarWatchText:Set(message)
+        lastAvatarWatchValue = message
+    end
+end
+
+local function craftNotice(key, reason, message, cooldown)
+    local now = os.clock()
+    local notifyKey = key .. ":" .. reason .. ":" .. message
+    if now - (state.AvatarNoticeHistory[notifyKey] or -math.huge) < (cooldown or 18) then return end
+    state.AvatarNoticeHistory[notifyKey] = now
+    notifyAvatar(reason, message, 5)
+end
+
 local function tryCraftAvatar(data)
-    if not state.AutoCraftAvatars then return false end
+    if type(data.Avatars) ~= "table" or type(data.Inventory) ~= "table" then return false end
     local key = state.AvatarName .. (state.AvatarShiny and " Shiny" or "")
     local info = avatarDefinitions()[key]
-    if not info or type(info.Crafts) ~= "table" or type(data.Avatars) ~= "table"
-        or type(data.Inventory) ~= "table" then return false end
+    -- Never show a crafted-success notification before replicated data confirms it.
+    local pending = state.AvatarCraftPending
+    if pending then
+        local confirmed = type(data.Avatars[pending.key]) == "table"
+            and data.Avatars[pending.key][pending.part]
+        if confirmed then
+            notifyAvatar("Craft successful", pending.key .. " " .. pending.part .. " crafted successfully!", 5)
+            state.AvatarCraftPending = nil
+        elseif os.clock() - pending.sentAt > 12 then
+            craftNotice(pending.key .. pending.part, "Craft not confirmed",
+                "The server did not confirm crafting. Check your materials.", 25)
+            state.AvatarCraftPending = nil
+        else
+            return false -- no second craft while waiting
+        end
+    end
+    if not state.AutoCraftAvatars then return false end
+    if not info or type(info.Crafts) ~= "table" then return false end
     local already = data.Avatars[key] or {}
     for _, part in ipairs({ "Head", "Torso", "Arms", "Legs" }) do
         if state.AvatarParts[part] and not already[part] then
-            local costs = info.Crafts[part]
-            local affordable = type(costs) == "table" and #costs > 0
-            if affordable then
-                for _, cost in ipairs(costs) do
-                    if cost[1] ~= "Item" or (data.Inventory[cost[2]] or 0) < (tonumber(cost[3]) or math.huge) then
-                        affordable = false
-                        break
+            -- Shiny avatar parts require their matching normal part first.
+            if state.AvatarShiny and not ((data.Avatars[state.AvatarName] or {})[part]) then
+                craftNotice(key .. part, "Normal avatar required",
+                    "Craft " .. state.AvatarName .. " " .. part .. " before the shiny version.", 25)
+            else
+                local costs = info.Crafts[part]
+                local costList, missing = {}, {}
+                if type(costs) == "table" then
+                    for _, cost in ipairs(costs) do
+                        if type(cost) == "table" then
+                            local item, required = cost[2], tonumber(cost[3])
+                            if cost[1] == "Item" and item ~= nil and required then
+                                local owned = tonumber(data.Inventory[item]) or 0
+                                costList[#costList+1] = item
+                                if owned < required then
+                                    missing[#missing+1] = string.format(
+                                        "%s: missing %d (have %d/%d)", tostring(item),
+                                        required-owned, owned, required)
+                                end
+                            else
+                                missing[#missing+1] = "Unknown required material"
+                            end
+                        end
                     end
                 end
-            end
-            if affordable then
-                local attemptKey = key .. ":" .. part
-                local now = os.clock()
-                if now - (state.LastAvatarCraft[attemptKey] or -math.huge) > 8 then
-                    state.LastAvatarCraft[attemptKey] = now
-                    bridge:FireServer("General", "Avatars", "Craft", key, part)
-                    return true
+                if #missing > 0 or #costList == 0 then
+                    craftNotice(key .. part, "Cannot craft " .. key .. " " .. part,
+                        table.concat(missing, "; ") ~= "" and table.concat(missing, "; ")
+                        or "Craft requirements are unavailable.", 25)
+                else
+                    local attemptKey = key .. ":" .. part
+                    local now = os.clock()
+                    if now - (state.LastAvatarCraft[attemptKey] or -math.huge) > 8 then
+                        state.LastAvatarCraft[attemptKey] = now
+                        state.AvatarCraftPending = { key = key, part = part, sentAt = now }
+                        bridge:FireServer("General", "Avatars", "Craft", key, part)
+                        return true
+                    end
                 end
             end
         end
@@ -2901,7 +3178,7 @@ for slotNumber = 1, 8 do
     local item = merchantDefs[slot]
     if type(item) == "table" and type(item.Name) == "string" then
         local display = item.Name:gsub("(%l)(%u)", "%1 %2")
-        local label = display .. " (" .. tostring(item.Price) .. " Tower Shards)"
+        local label = display .. " (" .. tostring(item.Price) .. ")"
         table.insert(merchantLabels, label)
         merchantByLabel[label] = slot
     end
@@ -3091,7 +3368,9 @@ local function refreshTraitUnits(data)
     for uid, info in pairs(data.Shadows) do
         if type(info) == "table" then
             local shown = info.Custom_Name or info.Name or "Unit"
-            local label = tostring(shown) .. (info.Shiny and " [Shiny]" or "") .. " | " .. tostring(uid)
+            local equipped = type(data.Shadows_Equipped) == "table" and data.Shadows_Equipped[uid] ~= nil
+            local label = tostring(shown) .. (equipped and " (Equipped)" or "")
+                .. (info.Shiny and " [Shiny]" or "") .. " | " .. tostring(uid)
             table.insert(entries, { label = label, uid = uid })
         end
     end
@@ -3248,6 +3527,8 @@ task.spawn(function()
     while state.Running do
         local data = playerDataReady()
         if data then
+            local okWatch, watchErr = pcall(updateAvatarWatcher, data)
+            if not okWatch then warn("[Paraiso Avatar] Watcher:", watchErr) end
             local ok, err = pcall(refreshTraitUnits, data)
             if not ok then warn("[Paraiso Player] Unit refresh:", err) end
             if state.AutoRollTraits then
