@@ -53,6 +53,9 @@ local state = {
     AttackRangeMode = "Use Games Range",
     AutoAntiAFK = false,
     AutoReconnect = false,
+    AutoExecute = false,
+    LoaderURL = "",
+    AutoExecuteTeleportConnection = nil,
     -- Trials, Tower and Raids: independent matchmaking automation.
     AutoJoinTimeTrial = false,
     TrialDifficultyGoal = "Easy",
@@ -78,6 +81,21 @@ local state = {
     RaidLastLeave = -math.huge,
     AutoJoinSoloRaid = false,
     AutoJoinNinjaRaid = false,
+    -- Per-raid farming, wave targets and independent leave actions.
+    AutoFarmSoloRaid = false,
+    AutoFarmNinjaRaid = false,
+    AutoLeaveSoloRaid = false,
+    AutoLeaveNinjaRaid = false,
+    SoloLeaveWave = 5,
+    NinjaLeaveWave = 5,
+    SoloLastLeave = -math.huge,
+    NinjaLastLeave = -math.huge,
+    -- Creation/join requests are not ACKs. Track the replicated room instead.
+    NinjaCreatePendingUntil = -math.huge,
+    NinjaLastCreateAt = -math.huge,
+    SoloLastRequestAt = -math.huge,
+    NinjaLastJoinAt = -math.huge,
+    NinjaLastStatus = nil,
     TrialLastLeave = -math.huge,
     LastSeenMode = nil,
     AntiAFKConnection = nil,
@@ -399,7 +417,10 @@ local function changeTarget()
     state.FarmTarget = nil
     state.LastMove = 0
     stopMoving()
-    if not (state.AutoFarm or hasActiveQuestTarget()) or state.Position ~= "Below" then
+    if not (state.AutoFarm or hasActiveQuestTarget()
+        or state.AutoFarmTrial or state.AutoFarmTower
+        or state.AutoFarmSoloRaid or state.AutoFarmNinjaRaid)
+        or state.Position ~= "Below" then
         removeBelowPlatform()
     end
 end
@@ -674,7 +695,11 @@ local function activeModeFarm()
     local mode = player:GetAttribute("Mode")
     if mode == "Trial" and state.AutoFarmTrial then return "Trial" end
     if mode == "Tower" and state.AutoFarmTower then return "Tower" end
-    if mode == "Raid" and state.AutoFarmRaid then return "Raid" end
+    if mode == "Raid" then
+        local raidId = player:GetAttribute("RaidId")
+        if raidId == "Solo City" and state.AutoFarmSoloRaid then return "Raid" end
+        if raidId == "Ninja Village" and state.AutoFarmNinjaRaid then return "Raid" end
+    end
     return nil
 end
 
@@ -762,7 +787,8 @@ end
 local function disconnectSettingsConnections()
     for _, name in ipairs({
         "AntiAFKConnection", "AntiAFKInputConnection", "AntiAFKMovementConnection",
-        "ReconnectPromptConnection", "ReconnectOverlayConnection"
+        "ReconnectPromptConnection", "ReconnectOverlayConnection",
+        "AutoExecuteTeleportConnection"
     }) do
         local connection = state[name]
         state[name] = nil
@@ -777,12 +803,19 @@ function state.Stop()
     state.AutoAntiAFK = false
     state.AntiAFKLoopToken = (state.AntiAFKLoopToken or 0) + 1
     state.AutoReconnect = false
+    state.AutoExecute = false
     state.AutoJoinTimeTrial = false
     state.AutoCreateJoinTower = false
     state.AutoJoinRaid = false
     state.AutoFarmTrial = false
     state.AutoFarmTower = false
     state.AutoFarmRaid = false
+    state.AutoFarmSoloRaid = false
+    state.AutoFarmNinjaRaid = false
+    state.AutoLeaveSoloRaid = false
+    state.AutoLeaveNinjaRaid = false
+    state.AutoJoinSoloRaid = false
+    state.AutoJoinNinjaRaid = false
     state.AutoLeaveTrial = false
     disconnectSettingsConnections()
     state.AutoFarm = false
@@ -2006,36 +2039,102 @@ local function ownRaidRoom(raidRoot, raidId)
     return nil
 end
 
+-- Note: FireServer reports only that the client sent a request. Room creation
+-- is confirmed solely by a replicated owner-owned queue, not by pcall().
+local function ninjaRaidFeedback(status, message)
+    if state.NinjaLastStatus == status then return end
+    state.NinjaLastStatus = status
+    if status == "waiting" or status == "joined" or status == "creating" then
+        -- No popup flood while simply waiting for the scheduled raid.
+        return
+    end
+    pcall(function()
+        window:Notify({ title = "Ninja Village Raid", content = message, duration = 5 })
+    end)
+    warn("[Paraiso Ninja Raid] " .. message)
+end
+
 local function tryJoinRaid(now)
-    if player:GetAttribute("RaidRoom") ~= nil or player:GetAttribute("Mode") == "Raid" then return end
-    if not canEnterNewMode() or now - state.RaidLastRequest < 12 then return end
+    if player:GetAttribute("Mode") == "Raid" then return end
+    if not canEnterNewMode() then return end
     local raid = gameModes and gameModes:FindFirstChild("Raid")
-    if readModeValue(raid, "Open") ~= true then return end
+    if not raid then
+        if state.AutoJoinNinjaRaid then ninjaRaidFeedback("missing", "Raid state has not loaded yet") end
+        return
+    end
+    -- The game's own Raid_Info script gates creation by both Open and Active.
     local active = readModeValue(raid, "Active")
-    if type(active) ~= "string" then return end
+    local open = readModeValue(raid, "Open") == true
+    if not open then
+        if state.AutoJoinNinjaRaid then ninjaRaidFeedback("waiting", "Waiting for the Ninja Village raid to open") end
+        return
+    end
+
     if active == "Solo City" and state.AutoJoinSoloRaid then
-        -- Solo City: join the currently open public raid. No key creation needed.
+        if player:GetAttribute("RaidRoom") then return end
+        if now - state.SoloLastRequestAt < 10 then return end
         local room = availableRaidRoom(raid, active)
-        local result
+        -- Solo City is free. Prefer a named queue; the portal's Join action
+        -- also sends a no-room argument, as in the original client script.
+        local ok
         if room then
-            result = sendModeRequest("Gamemodes", "Raid", "Join", room.Name)
+            ok = sendModeRequest("Gamemodes", "Raid", "Join", room.Name)
         else
-            -- The game's prompt UI also contains a direct Join action.
-            result = sendModeRequest("Gamemodes", "Raid", "Join")
+            ok = sendModeRequest("Gamemodes", "Raid", "Join")
         end
-        if result then state.RaidLastRequest = now end
-    elseif active == "Ninja Village" and state.AutoJoinNinjaRaid then
-        -- Ninja Village: create your own key-paid queue and join ONLY your queue.
-        local own = ownRaidRoom(raid, active)
-        if own then
+        if ok then state.SoloLastRequestAt = now end
+        return
+    end
+
+    if active ~= "Ninja Village" or not state.AutoJoinNinjaRaid then
+        if state.AutoJoinNinjaRaid then
+            ninjaRaidFeedback("waiting", "Ninja Village is not the active raid")
+        end
+        return
+    end
+
+    local own = ownRaidRoom(raid, "Ninja Village")
+    if own then
+        -- Creating may already place the creator in the queue. Joining twice
+        -- would be unnecessary and can be rejected by the server.
+        if tostring(player:GetAttribute("RaidRoom")) == own.Name then
+            ninjaRaidFeedback("joined", "Joined your Ninja Village raid room")
+            return
+        end
+        if now - state.NinjaLastJoinAt >= 4 then
             if sendModeRequest("Gamemodes", "Raid", "Join", own.Name) then
-                state.RaidLastRequest = now
-            end
-        elseif raidHasKeyForAction(active, "Create") then
-            if sendModeRequest("Gamemodes", "Raid", "Create", active) then
-                state.RaidLastRequest = now
+                state.NinjaLastJoinAt = now
+                ninjaRaidFeedback("joined", "Join requested for your Ninja Village room")
             end
         end
+        return
+    end
+
+    -- Never join another player's room when own-room mode is selected.
+    -- Check key availability before spending one on the server.
+    if player:GetAttribute("RaidRoom") ~= nil then return end
+    if now < state.NinjaCreatePendingUntil then return end
+    if not raidHasKeyForAction("Ninja Village", "Create") then
+        ninjaRaidFeedback("key", "Cannot create: 1 Raid Key required (or inventory not loaded)")
+        return
+    end
+    if now - state.NinjaLastCreateAt < 18 then return end
+
+    if sendModeRequest("Gamemodes", "Raid", "Create", "Ninja Village") then
+        state.NinjaLastCreateAt = now
+        state.NinjaCreatePendingUntil = now + 9
+        ninjaRaidFeedback("creating", "Create requested; waiting for room replication")
+        -- The request being sent does NOT mean that the server created a room.
+        task.delay(9, function()
+            if not state.Running or not state.AutoJoinNinjaRaid then return end
+            if not ownRaidRoom(raid, "Ninja Village")
+                and player:GetAttribute("RaidRoom") == nil
+                and readModeValue(raid, "Open") == true
+                and readModeValue(raid, "Active") == "Ninja Village" then
+                ninjaRaidFeedback("unconfirmed",
+                    "Create sent but no room appeared. Check key, raid timer and server restrictions.")
+            end
+        end)
     end
 end
 
@@ -2085,7 +2184,11 @@ local trialFarmToggle = state.UiLayout.trialRow:CreateToggle({
     callback = function(value)
         state.AutoFarmTrial = value == true
         changeTarget()
-        if not value and not state.AutoFarm and not hasActiveQuestTarget() then returnAboveMap() end
+        if not value and not state.AutoFarm and not hasActiveQuestTarget()
+            and not state.AutoFarmTrial and not state.AutoFarmTower
+            and not state.AutoFarmSoloRaid and not state.AutoFarmNinjaRaid then
+            returnAboveMap()
+        end
     end,
 })
 local trialLeaveInput = modesTab:CreateInput({
@@ -2136,7 +2239,11 @@ local towerFarmToggle = state.UiLayout.towerRow:CreateToggle({
     callback = function(value)
         state.AutoFarmTower = value == true
         changeTarget()
-        if not value and not state.AutoFarm and not hasActiveQuestTarget() then returnAboveMap() end
+        if not value and not state.AutoFarm and not hasActiveQuestTarget()
+            and not state.AutoFarmTrial and not state.AutoFarmTower
+            and not state.AutoFarmSoloRaid and not state.AutoFarmNinjaRaid then
+            returnAboveMap()
+        end
     end,
 })
 
@@ -2160,62 +2267,98 @@ local towerLeaveToggle = modesTab:CreateToggle({
     end
 })
 
-modesTab:CreateSection({ name = "Raids", icon = "swords" })
--- Separate paths because Solo City joins when open; Ninja Village needs a key.
-raidToggle = modesTab:CreateToggle({
+-- Each raid has independent farming and wave settings. Joining alone never
+-- enables farming; Auto Farm Solo/Ninja only acts in the matching RaidId.
+modesTab:CreateSection({ name = "Solo City Raid", icon = "swords" })
+local soloRaidRow = modesTab:CreateGroup()
+raidToggle = soloRaidRow:CreateToggle({
     name = "Auto Join Solo City Raid", value = false,
     flag = "Paraiso_AutoJoinSoloRaid_V1",
     callback = function(value)
         state.AutoJoinSoloRaid = value == true
         state.AutoJoinRaid = state.AutoJoinSoloRaid or state.AutoJoinNinjaRaid
-        state.RaidLastRequest = -math.huge
+        state.SoloLastRequestAt = -math.huge
         if value then
             if trialToggle then trialToggle:Set(false) end
             if towerToggle then towerToggle:Set(false) end
         end
     end
 })
-ninjaRaidToggle = modesTab:CreateToggle({
+local soloFarmToggle = soloRaidRow:CreateToggle({
+    name = "Auto Farm Solo City Raid", value = false,
+    flag = "Paraiso_AutoFarmSoloRaid_V2",
+    callback = function(value)
+        state.AutoFarmSoloRaid = value == true
+        changeTarget()
+        if not value and not state.AutoFarm and not hasActiveQuestTarget()
+            and not state.AutoFarmTrial and not state.AutoFarmTower
+            and not state.AutoFarmSoloRaid and not state.AutoFarmNinjaRaid then
+            returnAboveMap()
+        end
+    end
+})
+local soloLeaveInput = modesTab:CreateInput({
+    name = "Leave Solo City At Wave", value = "5", numeric = true,
+    placeholder = "Wave 1-5", flag = "Paraiso_SoloLeaveWave_V2",
+    callback = function(text)
+        local wave = tonumber(text)
+        if wave then state.SoloLeaveWave = math.clamp(math.floor(wave), 1, 5) end
+    end
+})
+local soloLeaveToggle = modesTab:CreateToggle({
+    name = "Auto Leave Solo City Raid", value = false,
+    flag = "Paraiso_AutoLeaveSoloRaid_V2",
+    callback = function(value)
+        state.AutoLeaveSoloRaid = value == true
+        state.SoloLastLeave = -math.huge
+    end
+})
+
+modesTab:CreateSection({ name = "Ninja Village Raid", icon = "swords" })
+local ninjaRaidRow = modesTab:CreateGroup()
+ninjaRaidToggle = ninjaRaidRow:CreateToggle({
     name = "Auto Create / Join Ninja Raid", value = false,
     flag = "Paraiso_AutoJoinNinjaRaid_V1",
     callback = function(value)
         state.AutoJoinNinjaRaid = value == true
         state.AutoJoinRaid = state.AutoJoinSoloRaid or state.AutoJoinNinjaRaid
-        state.RaidLastRequest = -math.huge
+        state.NinjaLastCreateAt = -math.huge
+        state.NinjaLastJoinAt = -math.huge
+        state.NinjaCreatePendingUntil = -math.huge
+        state.NinjaLastStatus = nil
         if value then
             if trialToggle then trialToggle:Set(false) end
             if towerToggle then towerToggle:Set(false) end
         end
     end
 })
-local raidFarmToggle = modesTab:CreateToggle({
-    name = "Auto Farm Raids", value = false,
-    flag = "Paraiso_AutoFarmRaids",
+local ninjaFarmToggle = ninjaRaidRow:CreateToggle({
+    name = "Auto Farm Ninja Village Raid", value = false,
+    flag = "Paraiso_AutoFarmNinjaRaid_V2",
     callback = function(value)
-        state.AutoFarmRaid = value == true
+        state.AutoFarmNinjaRaid = value == true
         changeTarget()
-        if not value and not state.AutoFarm and not hasActiveQuestTarget() then
+        if not value and not state.AutoFarm and not hasActiveQuestTarget()
+            and not state.AutoFarmTrial and not state.AutoFarmTower
+            and not state.AutoFarmSoloRaid and not state.AutoFarmNinjaRaid then
             returnAboveMap()
         end
     end
 })
-local raidLeaveInput = modesTab:CreateInput({
-    name = "Leave Raid At Wave", numeric = true,
-    value = "5", placeholder = "Enter wave number",
-    flag = "Paraiso_RaidLeaveWave_V1",
+local ninjaLeaveInput = modesTab:CreateInput({
+    name = "Leave Ninja Village At Wave", value = "5", numeric = true,
+    placeholder = "Wave 1-5", flag = "Paraiso_NinjaLeaveWave_V2",
     callback = function(text)
         local wave = tonumber(text)
-        if wave and wave >= 1 then
-            state.RaidLeaveWave = math.clamp(math.floor(wave), 1, 5)
-        end
+        if wave then state.NinjaLeaveWave = math.clamp(math.floor(wave), 1, 5) end
     end
 })
-local raidLeaveToggle = modesTab:CreateToggle({
-    name = "Auto Leave Raid", value = false,
-    flag = "Paraiso_AutoLeaveRaid_V1",
+local ninjaLeaveToggle = modesTab:CreateToggle({
+    name = "Auto Leave Ninja Village Raid", value = false,
+    flag = "Paraiso_AutoLeaveNinjaRaid_V2",
     callback = function(value)
-        state.AutoLeaveRaid = value == true
-        state.RaidLastLeave = -math.huge
+        state.AutoLeaveNinjaRaid = value == true
+        state.NinjaLastLeave = -math.huge
     end
 })
 
@@ -2231,13 +2374,16 @@ state.AutoJoinNinjaRaid = ninjaRaidToggle.value == true
 state.AutoJoinRaid = state.AutoJoinSoloRaid or state.AutoJoinNinjaRaid
 state.AutoFarmTrial = trialFarmToggle.value == true
 state.AutoFarmTower = towerFarmToggle.value == true
-state.AutoFarmRaid = raidFarmToggle.value == true
+state.AutoFarmSoloRaid = soloFarmToggle.value == true
+state.AutoFarmNinjaRaid = ninjaFarmToggle.value == true
 state.AutoLeaveTrial = trialLeaveToggle.value == true
 state.TrialLeaveWave = math.max(1, math.floor(tonumber(trialLeaveInput.value) or 5))
 state.AutoLeaveTower = towerLeaveToggle.value == true
 state.TowerLeaveWave = math.clamp(math.floor(tonumber(towerLeaveInput.value) or 10), 1, 70)
-state.AutoLeaveRaid = raidLeaveToggle.value == true
-state.RaidLeaveWave = math.clamp(math.floor(tonumber(raidLeaveInput.value) or 5), 1, 5)
+state.AutoLeaveSoloRaid = soloLeaveToggle.value == true
+state.AutoLeaveNinjaRaid = ninjaLeaveToggle.value == true
+state.SoloLeaveWave = math.clamp(math.floor(tonumber(soloLeaveInput.value) or 5), 1, 5)
+state.NinjaLeaveWave = math.clamp(math.floor(tonumber(ninjaLeaveInput.value) or 5), 1, 5)
 if state.AutoJoinRaid then
     if state.AutoJoinTimeTrial then trialToggle:Set(false) end
     if state.AutoCreateJoinTower then towerToggle:Set(false) end
@@ -2279,11 +2425,18 @@ task.spawn(function()
                 sendModeRequest("Gamemodes", "Tower", "Leave")
             end
         end
-        if player:GetAttribute("Mode") == "Raid" and state.AutoLeaveRaid
-            and now - state.RaidLastLeave >= 12 then
+        if player:GetAttribute("Mode") == "Raid" then
+            local raidId = player:GetAttribute("RaidId")
             local wave = readActiveWave("Raid")
-            if wave and wave >= state.RaidLeaveWave then
-                state.RaidLastLeave = now
+            if wave and raidId == "Solo City" and state.AutoLeaveSoloRaid
+                and wave >= state.SoloLeaveWave
+                and now - state.SoloLastLeave >= 12 then
+                state.SoloLastLeave = now
+                sendModeRequest("Gamemodes", "Raid", "Leave")
+            elseif wave and raidId == "Ninja Village" and state.AutoLeaveNinjaRaid
+                and wave >= state.NinjaLeaveWave
+                and now - state.NinjaLastLeave >= 12 then
+                state.NinjaLastLeave = now
                 sendModeRequest("Gamemodes", "Raid", "Leave")
             end
         end
@@ -3790,6 +3943,125 @@ local reconnectToggle = state.UiLayout.settingsRow:CreateToggle({
         if state.AutoReconnect then enableAutoReconnect() else disableAutoReconnect() end
     end
 })
+
+-- Save/Load use Rayfield's official configuration API and existing fileName.
+-- Keeping ParaisoAnimeCombat in the window configuration retains old saves.
+settingsTab:CreateSection({ name = "Quick Save / Load", icon = "save" })
+state.UiLayout.saveActions = settingsTab:CreateGroup()
+state.UiLayout.saveActions:CreateButton({
+    name = "Save Settings",
+    icon = "save",
+    callback = function()
+        local ok, result = pcall(function() return window:Save() end)
+        window:Notify({
+            title = "Paraiso Settings",
+            content = (ok and result ~= false) and "Settings saved." or "Save unavailable in this client.",
+            duration = 4,
+        })
+    end,
+})
+state.UiLayout.saveActions:CreateButton({
+    name = "Load Settings",
+    icon = "folder-open",
+    callback = function()
+        local ok, result = pcall(function() return window:Load() end)
+        window:Notify({
+            title = "Paraiso Settings",
+            content = (ok and result ~= false) and "Saved settings loaded." or "Could not load saved settings.",
+            duration = 4,
+        })
+    end,
+})
+
+-- The built-in Rayfield Configurations panel also supports named presets,
+-- so we deliberately do not duplicate its Save / Load / Delete controls.
+settingsTab:CreateSection({ name = "Auto Execute", icon = "refresh-cw" })
+
+local function validLoaderURL(value)
+    return type(value) == "string"
+        and value:match("^https://[^%s]+$") ~= nil
+        and value:find("<", 1, true) == nil
+        and value:find(">", 1, true) == nil
+end
+
+local function findTeleportQueue()
+    if type(queue_on_teleport) == "function" then return queue_on_teleport end
+    if type(syn) == "table" and type(syn.queue_on_teleport) == "function" then
+        return syn.queue_on_teleport
+    end
+    if type(env.queue_on_teleport) == "function" then return env.queue_on_teleport end
+    return nil
+end
+
+local loaderURLInput = settingsTab:CreateInput({
+    name = "Your Raw Script URL",
+    value = "",
+    placeholder = "https://your-host/Paraiso_Anime.lua",
+    flag = "Paraiso_LoaderURL",
+    callback = function(value)
+        state.LoaderURL = tostring(value or "")
+    end,
+})
+
+local autoExecuteToggle = settingsTab:CreateToggle({
+    name = "Auto Execute on Teleport",
+    value = false,
+    flag = "Paraiso_AutoExecute",
+    callback = function(value)
+        state.AutoExecute = value == true
+        if state.AutoExecute and not validLoaderURL(state.LoaderURL) then
+            window:Notify({
+                title = "Auto Execute",
+                content = "Paste your OWN hosted raw HTTPS script URL first.",
+                duration = 5,
+            })
+        end
+    end,
+})
+
+-- Queue the loader ONLY when a teleport actually starts. This means turning
+-- the toggle OFF before teleporting prevents a new loader from being queued.
+-- queue_on_teleport is an optional client feature, not a Roblox/Rayfield API;
+-- this does NOT enable auto-execution on fresh Roblox launches.
+state.AutoExecuteTeleportConnection = player.OnTeleport:Connect(function(teleportState)
+    if not state.Running or not state.AutoExecute
+        or teleportState ~= Enum.TeleportState.Started then return end
+
+    if not validLoaderURL(state.LoaderURL) then
+        window:Notify({
+            title = "Auto Execute",
+            content = "Missing valid raw HTTPS script URL. Not queued.",
+            duration = 5,
+        })
+        return
+    end
+
+    local queue = findTeleportQueue()
+    if not queue then
+        window:Notify({
+            title = "Auto Execute",
+            content = "Teleport auto-execution is unsupported in this client.",
+            duration = 5,
+        })
+        return
+    end
+
+    -- %q safely quotes the user-provided URL as a Lua string literal.
+    local loader = string.format('loadstring(game:HttpGet(%q))()', state.LoaderURL)
+    local ok, err = pcall(queue, loader)
+    if not ok then
+        warn("[Paraiso Auto Execute] Could not queue loader:", err)
+        window:Notify({
+            title = "Auto Execute",
+            content = "Could not queue loader; check console.",
+            duration = 5,
+        })
+    end
+end)
+
+-- Values restored by Rayfield are available on element handles as their .value.
+state.LoaderURL = tostring(loaderURLInput.value or "")
+state.AutoExecute = autoExecuteToggle.value == true
 
 settingsTab:CreateSection({ name = "Interface", icon = "panel-left" })
 settingsTab:CreateButton({
