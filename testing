@@ -54,7 +54,7 @@ local state = {
     AutoAntiAFK = false,
     AutoReconnect = false,
     AutoExecute = false,
-    LoaderURL = "",
+    LoaderURL = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing",
     AutoExecuteTeleportConnection = nil,
     -- Trials, Tower and Raids: independent matchmaking automation.
     AutoJoinTimeTrial = false,
@@ -98,6 +98,14 @@ local state = {
     NinjaLastStatus = nil,
     TrialLastLeave = -math.huge,
     LastSeenMode = nil,
+    -- Volatile world return spot, not a Rayfield setting. Do not persist an
+    -- old coordinate into another session/world.
+    ModeReturnSpot = nil,
+    ModeReturnLastWorldSpot = nil,
+    ModeReturnRestoring = false,
+    ModeReturnCooldownUntil = -math.huge,
+    ModeReturnBlocked = { Trial = false, Raid = false, Tower = false },
+    ModeReturnOpenSeenClosed = { Trial = false, Raid = false },
     AntiAFKConnection = nil,
     ReconnectPromptConnection = nil,
     ReconnectOverlayConnection = nil,
@@ -784,6 +792,8 @@ local function updateAutoFarm()
     end
 end
 
+local saveSettingsNow -- assigned once the Rayfield window and flags exist
+
 local function disconnectSettingsConnections()
     for _, name in ipairs({
         "AntiAFKConnection", "AntiAFKInputConnection", "AntiAFKMovementConnection",
@@ -797,6 +807,8 @@ local function disconnectSettingsConnections()
 end
 
 function state.Stop()
+    -- Save while the UI still has its REAL toggle values, before shutdown.
+    if saveSettingsNow then pcall(saveSettingsNow) end
     state.Running = false
     state.AutoClick = false
     state.AutoAttack = false
@@ -841,6 +853,8 @@ function state.Stop()
     state.QuestWorld = nil
     state.QuestProgressState = nil
     -- Also recover safely when the script is re-executed or unloaded.
+    state.ModeReturnRestoring = false
+    state.ModeReturnSpot = nil
     returnAboveMap()
     changeTarget()
     if state.Window then
@@ -859,12 +873,46 @@ local window = Rayfield:CreateWindow({
     showIconOnly = true,
     theme = "amethyst",
     configuration = {
-        autoSave = true,
-        autoLoad = true,
-        fileName = "ParaisoAnimeCombat"
+        autoSave = false,
+        autoLoad = false,
+        fileName = "ParaisoSavingStableV2"
     }
 })
 state.Window = window
+
+-- PERSISTENCE: the previous automatic load/save could run while this large
+-- interface was still creating controls and updating dynamic option lists.
+-- Keep the SAME Rayfield storage format, but perform a single Load AFTER all
+-- tabs are built, then save on changed live flags.  No external JSON backup.
+local function saveSettingsNowNative()
+    local ok, saved = pcall(function() return window:Save() end)
+    local pathOK, folder, path = pcall(function() return window:GetPath() end)
+    local diskOK, data = false, nil
+    if pathOK and type(path) == "string" and type(readfile) == "function" then
+        diskOK, data = pcall(readfile, path)
+    end
+    local verified = ok and saved == true and diskOK
+        and type(data) == "string" and #data > 0
+    local message = string.format(
+        "Save=%s | disk verified=%s | path=%s | readfile=%s | writefile=%s",
+        tostring(ok and saved), tostring(verified), tostring(path),
+        tostring(type(readfile) == "function"),
+        tostring(type(writefile) == "function")
+    )
+    print("[Paraiso Save] " .. message)
+    state.LastSaveStatus = message
+    return verified, message
+end
+saveSettingsNow = saveSettingsNowNative
+
+local function loadSettingsNative()
+    local ok, loaded = pcall(function() return window:Load() end)
+    local message = "Load=" .. tostring(ok and loaded)
+    print("[Paraiso Save] " .. message)
+    return ok and loaded == true, message
+end
+state.RestorePreferredSettings = loadSettingsNative
+
 -- Sidebar categories and responsive columns keep the large UI easy to navigate.
 -- Group references live in state to avoid the Luau local-register limit.
 state.UiLayout = {}
@@ -1887,7 +1935,10 @@ end
 
 local function canEnterNewMode()
     local mode = player:GetAttribute("Mode")
-    return mode == nil or mode == "" or mode == "World" or mode == "Normal" or mode == "None"
+    if mode ~= nil and mode ~= "" and mode ~= "World" and mode ~= "Normal" and mode ~= "None" then
+        return false
+    end
+    return not state.ModeReturnRestoring and os.clock() >= state.ModeReturnCooldownUntil
 end
 
 local function sendModeRequest(...)
@@ -1895,11 +1946,156 @@ local function sendModeRequest(...)
     local ok, err = pcall(function()
         bridge:FireServer(table.unpack(args, 1, args.n))
     end)
-    if not ok then
-        warn("[Paraiso Modes] Request failed:", err)
-    end
+    if not ok then warn("[Paraiso Modes] Request failed:", err) end
     return ok
 end
+
+-- Isolate return logic so the large main chunk avoids Luau's 200-local limit.
+function state.InitializeModeReturn()
+    local function isInGameMode()
+        local mode = player:GetAttribute("Mode")
+        return mode == "Trial" or mode == "Tower" or mode == "Raid"
+    end
+    local function isInWorld()
+        local mode = player:GetAttribute("Mode")
+        return mode == nil or mode == "" or mode == "World" or mode == "Normal" or mode == "None"
+    end
+    -- Automatically remembers the original spot BEFORE creating/joining a game
+    -- mode. A single snapshot survives the entire queue -> run -> results cycle.
+    -- If farming Below, remember the pre-void surface spot instead of a point
+    -- underground. No toggle or new saved flag is needed.
+    local function rememberModeReturnSpot(modeName)
+        if not isInWorld() or state.ModeReturnRestoring then return end
+        local existing = state.ModeReturnSpot
+        if existing then
+            -- Do not replace the original location with a lobby/queue location.
+            if existing.entered or os.clock() - existing.at < 90 then return end
+        end
+        local root = getParts()
+        local cf = root and root.CFrame
+        if state.WasBelowFarming and state.BelowReturnCFrame then
+            cf = state.BelowReturnCFrame
+        end
+        if not cf then return end
+        state.ModeReturnSpot = {
+            cf = cf,
+            world = getWorld() or state.CurrentWorld,
+            at = os.clock(),
+            entered = false,
+            requestedMode = modeName,
+        }
+        print("[Paraiso Modes] Return position saved for " .. modeName)
+    end
+
+    -- Called by the existing Mode-change watcher as soon as the player leaves.
+    -- The server can reposition the character *after* clearing Mode, so delay the
+    -- restoration until character + world + result UI have settled.
+    local function beginModeReturn()
+        local saved = state.ModeReturnSpot
+        if not saved or not saved.entered or state.ModeReturnRestoring then return end
+        state.ModeReturnRestoring = true
+        state.ModeReturnCooldownUntil = os.clock() + 20
+        local completedMode = saved.completedMode or saved.requestedMode
+        if completedMode == "Tower" then
+            -- Tower costs a key. Avoid re-spending keys just after an auto-leave.
+            -- Toggling auto-create off/on allows another run.
+            state.ModeReturnBlocked.Tower = true
+        elseif completedMode == "Trial" or completedMode == "Raid" then
+            -- Wait for this event to close before auto-joining the next opening.
+            state.ModeReturnBlocked[completedMode] = true
+            state.ModeReturnOpenSeenClosed[completedMode] = false
+        end
+        stopMoving()
+        task.spawn(function()
+            task.wait(2.0)
+            local deadline = os.clock() + 35
+            local lastPortalRequest = -math.huge
+            local lastReason = ""
+            local restored = false
+            while state.Running and state.ModeReturnSpot == saved and os.clock() < deadline do
+                if not isInWorld() then
+                    lastReason = "Waiting for mode to end"
+                    task.wait(0.5)
+                else
+                    local gui = player:FindFirstChild("PlayerGui")
+                    local resultGui = gui and gui:FindFirstChild("GameResultGui")
+                    local result = resultGui and resultGui:FindFirstChild("Game Result")
+                    if result and result:IsA("GuiObject") and result.Visible then
+                        lastReason = "Waiting for results screen"
+                        task.wait(0.4)
+                    else
+                        local currentWorld = getWorld()
+                        if saved.world and currentWorld and saved.world ~= currentWorld then
+                            -- The server may return you to a different world.
+                            -- Request normal portal travel back before restoring.
+                            if os.clock() - lastPortalRequest >= 6 then
+                                lastPortalRequest = os.clock()
+                                sendModeRequest("General", "Portal", "Teleport", saved.world)
+                            end
+                            lastReason = "Waiting to return to " .. tostring(saved.world)
+                            task.wait(0.6)
+                        else
+                            local root, humanoid = getParts()
+                            if root and humanoid and player.Character then
+                                -- A small lift prevents clipping into the ground.
+                                local destination = saved.cf + Vector3.new(0, 2.5, 0)
+                                cancelTween()
+                                humanoid:MoveTo(root.Position)
+                                root.AssemblyLinearVelocity = Vector3.zero
+                                root.AssemblyAngularVelocity = Vector3.zero
+                                player.Character:PivotTo(destination)
+                                root.AssemblyLinearVelocity = Vector3.zero
+                                root.AssemblyAngularVelocity = Vector3.zero
+                                humanoid:MoveTo(root.Position)
+                                task.wait(1.25)
+                                local verify = getParts()
+                                if verify and isInWorld() and
+                                    (verify.Position - destination.Position).Magnitude < 14 then
+                                    restored = true
+                                    break
+                                end
+                                lastReason = "Waiting for stable character position"
+                            else
+                                lastReason = "Waiting for character respawn"
+                            end
+                            task.wait(0.5)
+                        end
+                    end
+                end
+            end
+            if not state.Running or state.ModeReturnSpot ~= saved then return end
+            if restored then
+                print("[Paraiso Modes] Returned to original location after " .. tostring(completedMode))
+            else
+                warn("[Paraiso Modes] Could not restore the saved spot: " .. lastReason)
+            end
+            state.ModeReturnSpot = nil
+            state.ModeReturnCooldownUntil = os.clock() + 12
+            state.ModeReturnRestoring = false
+        end)
+    end
+
+    -- Trial/Raid timers may stay open for a moment after leaving. Do not
+    -- instantly queue another run. Auto-join re-arms on the next open cycle.
+    local function updateModeRejoinGates()
+        local trial = gameModes and gameModes:FindFirstChild("Trial")
+        if state.ModeReturnBlocked.Trial and readModeValue(trial, "Open") ~= true then
+            state.ModeReturnBlocked.Trial = false
+        end
+        local raid = gameModes and gameModes:FindFirstChild("Raid")
+        if state.ModeReturnBlocked.Raid and readModeValue(raid, "Open") ~= true then
+            state.ModeReturnBlocked.Raid = false
+        end
+    end
+
+    state.RememberModeReturnSpot = rememberModeReturnSpot
+    state.BeginModeReturn = beginModeReturn
+    state.UpdateModeRejoinGates = updateModeRejoinGates
+    state.IsInWorld = isInWorld
+    state.IsInGameMode = isInGameMode
+
+end -- state.InitializeModeReturn
+state.InitializeModeReturn()
 
 local function tryJoinTimeTrial(now)
     -- Game's own GamemodeNotify does exactly this: when Trial.Open == true,
@@ -1907,7 +2103,8 @@ local function tryJoinTimeTrial(now)
     if not canEnterNewMode() then return end
     local trialFolder = gameModes and gameModes:FindFirstChild("Trial")
     if readModeValue(trialFolder, "Open") ~= true then return end
-    if now - state.TrialLastJoin < 18 then return end
+    if now - state.TrialLastJoin < 18 or state.ModeReturnBlocked.Trial then return end
+    state.RememberModeReturnSpot("Trial")
     if sendModeRequest("Gamemodes", "Trial", "Join") then
         state.TrialLastJoin = now
     end
@@ -1947,13 +2144,14 @@ local function tryJoinOrCreateTower(now)
     -- Never join another player's Tower queue.
     if player:GetAttribute("TowerRoom") ~= nil then return end
     if player:GetAttribute("Mode") == "Tower" then return end
-    if not canEnterNewMode() then return end
+    if not canEnterNewMode() or state.ModeReturnBlocked.Tower then return end
 
     local room = ownTowerRoom()
     if room then
         -- The server may auto-assign the owner on creation. If it does not,
         -- join the room whose replicated OwnerUserId matches LocalPlayer.
         if now - state.TowerLastRequest >= 3 then
+            state.RememberModeReturnSpot("Tower")
             if sendModeRequest("Gamemodes", "Tower", "Join", room.Name) then
                 state.TowerLastRequest = now
             end
@@ -1966,6 +2164,7 @@ local function tryJoinOrCreateTower(now)
     if now - state.TowerLastRequest < 20 then return end
     if not towerKeysAvailable() then return end
 
+    state.RememberModeReturnSpot("Tower")
     if sendModeRequest("Gamemodes", "Tower", "Create", nil) then
         state.TowerLastRequest = now
         state.TowerCreatePendingUntil = now + 12
@@ -2056,7 +2255,7 @@ end
 
 local function tryJoinRaid(now)
     if player:GetAttribute("Mode") == "Raid" then return end
-    if not canEnterNewMode() then return end
+    if not canEnterNewMode() or state.ModeReturnBlocked.Raid then return end
     local raid = gameModes and gameModes:FindFirstChild("Raid")
     if not raid then
         if state.AutoJoinNinjaRaid then ninjaRaidFeedback("missing", "Raid state has not loaded yet") end
@@ -2077,6 +2276,7 @@ local function tryJoinRaid(now)
         -- Solo City is free. Prefer a named queue; the portal's Join action
         -- also sends a no-room argument, as in the original client script.
         local ok
+        state.RememberModeReturnSpot("Raid")
         if room then
             ok = sendModeRequest("Gamemodes", "Raid", "Join", room.Name)
         else
@@ -2102,6 +2302,7 @@ local function tryJoinRaid(now)
             return
         end
         if now - state.NinjaLastJoinAt >= 4 then
+            state.RememberModeReturnSpot("Raid")
             if sendModeRequest("Gamemodes", "Raid", "Join", own.Name) then
                 state.NinjaLastJoinAt = now
                 ninjaRaidFeedback("joined", "Join requested for your Ninja Village room")
@@ -2120,6 +2321,7 @@ local function tryJoinRaid(now)
     end
     if now - state.NinjaLastCreateAt < 18 then return end
 
+    state.RememberModeReturnSpot("Raid")
     if sendModeRequest("Gamemodes", "Raid", "Create", "Ninja Village") then
         state.NinjaLastCreateAt = now
         state.NinjaCreatePendingUntil = now + 9
@@ -2222,6 +2424,7 @@ towerToggle = state.UiLayout.towerRow:CreateToggle({
     flag = "Paraiso_AutoCreateJoinTower",
     callback = function(value)
         state.AutoCreateJoinTower = value == true
+        if value then state.ModeReturnBlocked.Tower = false end
         state.TowerLastRequest = -math.huge
         state.TowerCreatePendingUntil = -math.huge
         if value then
@@ -2395,6 +2598,7 @@ end
 -- are NEVER modified by matchmaking features.
 task.spawn(function()
     while state.Running do
+        state.UpdateModeRejoinGates()
         local inTrial = player:GetAttribute("Mode") == "Trial"
         local trialFolder = gameModes and gameModes:FindFirstChild("Trial")
         local currentWave = inTrial and tonumber(readModeValue(trialFolder, "Wave")) or 0
@@ -2956,7 +3160,39 @@ end)
 task.spawn(function()
     while state.Running do
         local nowMode = player:GetAttribute("Mode")
+        -- Keep a rolling safe position for manual joins as well. The snapshot
+        -- taken immediately before an automated join always takes precedence.
+        if state.IsInWorld() and not state.ModeReturnSpot
+            and not state.ModeReturnRestoring then
+            local root = getParts()
+            if root then
+                state.ModeReturnLastWorldSpot = {
+                    cf = (state.WasBelowFarming and state.BelowReturnCFrame) or root.CFrame,
+                    world = getWorld() or state.CurrentWorld,
+                    at = os.clock(),
+                }
+            end
+        end
+        local returning = state.ModeReturnSpot
+        if state.IsInGameMode() and not returning then
+            local previousSpot = state.ModeReturnLastWorldSpot
+            if previousSpot and os.clock() - previousSpot.at < 15 then
+                state.ModeReturnSpot = {
+                    cf = previousSpot.cf, world = previousSpot.world,
+                    at = previousSpot.at, entered = true,
+                    completedMode = nowMode, requestedMode = nowMode,
+                }
+                returning = state.ModeReturnSpot
+            end
+        end
+        if returning and state.IsInGameMode() then
+            returning.entered = true
+            returning.completedMode = nowMode
+        end
         if nowMode ~= state.LastSeenMode then
+            if returning and returning.entered and state.IsInWorld() then
+                state.BeginModeReturn()
+            end
             -- Never return to an old game-mode floor after a teleport out.
             if state.WasBelowFarming then
                 clearReturnPosition()
@@ -2965,7 +3201,11 @@ task.spawn(function()
             changeTarget()
             state.LastSeenMode = nowMode
         end
-        if state.AutoFarm or hasActiveQuestTarget() or activeModeFarm() then
+        if state.ModeReturnRestoring then
+            -- Freeze only movement (not toggles) while the game transitions
+            -- and the saved position is being restored.
+            stopMoving()
+        elseif state.AutoFarm or hasActiveQuestTarget() or activeModeFarm() then
             local ok, err = pcall(updateAutoFarm)
             if not ok then warn("[Paraiso] Farm/Quest movement:", err) end
         else
@@ -3711,6 +3951,9 @@ end
 initializePlayerSystems()
 
 -- ============================== SETTINGS ==============================
+-- Isolate Settings to prevent Luau exceeding 200 active local registers.
+-- Keep all Settings declarations inside this function instead of in script scope.
+function state.InitializeSettings()
 local TeleportService = game:GetService("TeleportService")
 local settingsTab = window:CreateTab({ name = "Settings", icon = "settings" })
 settingsTab:CreateSection({ name = "Session", icon = "shield" })
@@ -3944,19 +4187,19 @@ local reconnectToggle = state.UiLayout.settingsRow:CreateToggle({
     end
 })
 
--- Save/Load use Rayfield's official configuration API and existing fileName.
--- Keeping ParaisoAnimeCombat in the window configuration retains old saves.
+-- Manual controls use exactly the same Rayfield configuration as change-based saving.
 settingsTab:CreateSection({ name = "Quick Save / Load", icon = "save" })
 state.UiLayout.saveActions = settingsTab:CreateGroup()
 state.UiLayout.saveActions:CreateButton({
     name = "Save Settings",
     icon = "save",
     callback = function()
-        local ok, result = pcall(function() return window:Save() end)
+        local ok, message = saveSettingsNow()
         window:Notify({
             title = "Paraiso Settings",
-            content = (ok and result ~= false) and "Settings saved." or "Save unavailable in this client.",
-            duration = 4,
+            content = (message or (ok and "Settings saved." or "Unable to save in this client."))
+                .. (state.GetSaveDebug and (" | " .. state.GetSaveDebug()) or ""),
+            duration = 5,
         })
     end,
 })
@@ -3964,12 +4207,8 @@ state.UiLayout.saveActions:CreateButton({
     name = "Load Settings",
     icon = "folder-open",
     callback = function()
-        local ok, result = pcall(function() return window:Load() end)
-        window:Notify({
-            title = "Paraiso Settings",
-            content = (ok and result ~= false) and "Saved settings loaded." or "Could not load saved settings.",
-            duration = 4,
-        })
+        local ok, message = state.RestorePreferredSettings()
+        window:Notify({ title = "Paraiso Settings", content = message, duration = 5 })
     end,
 })
 
@@ -3993,18 +4232,10 @@ local function findTeleportQueue()
     return nil
 end
 
-local loaderURLInput = settingsTab:CreateInput({
-    name = "Your Raw Script URL",
-    value = "",
-    placeholder = "https://your-host/Paraiso_Anime.lua",
-    flag = "Paraiso_LoaderURL",
-    callback = function(value)
-        state.LoaderURL = tostring(value or "")
-    end,
-})
-
+-- Fixed GitHub source. No URL textbox or separate URL save flag.
+-- To change this URL, edit state.LoaderURL near the top of the script.
 local autoExecuteToggle = settingsTab:CreateToggle({
-    name = "Auto Execute on Teleport",
+    name = "Auto Execute",
     value = false,
     flag = "Paraiso_AutoExecute",
     callback = function(value)
@@ -4012,7 +4243,7 @@ local autoExecuteToggle = settingsTab:CreateToggle({
         if state.AutoExecute and not validLoaderURL(state.LoaderURL) then
             window:Notify({
                 title = "Auto Execute",
-                content = "Paste your OWN hosted raw HTTPS script URL first.",
+                content = "The configured GitHub raw loader URL is invalid.",
                 duration = 5,
             })
         end
@@ -4046,7 +4277,7 @@ state.AutoExecuteTeleportConnection = player.OnTeleport:Connect(function(telepor
         return
     end
 
-    -- %q safely quotes the user-provided URL as a Lua string literal.
+    -- %q safely quotes the fixed GitHub URL as a Lua string literal.
     local loader = string.format('loadstring(game:HttpGet(%q))()', state.LoaderURL)
     local ok, err = pcall(queue, loader)
     if not ok then
@@ -4059,8 +4290,7 @@ state.AutoExecuteTeleportConnection = player.OnTeleport:Connect(function(telepor
     end
 end)
 
--- Values restored by Rayfield are available on element handles as their .value.
-state.LoaderURL = tostring(loaderURLInput.value or "")
+-- Auto Execute uses the fixed GitHub URL, never an input field.
 state.AutoExecute = autoExecuteToggle.value == true
 
 settingsTab:CreateSection({ name = "Interface", icon = "panel-left" })
@@ -4072,12 +4302,98 @@ settingsTab:CreateButton({
     end
 })
 
--- Rayfield Gen2 can restore saved values without firing a callback. Apply them
--- after the controls exist so restored toggles work immediately.
+-- Saved flags are restored once below, after every control has been created.
+-- Restoring them here through :Load() fires the element callbacks.
 state.AutoAntiAFK = antiAfkToggle.value == true
 if state.AutoAntiAFK then enableAntiAFK() end
 state.AutoReconnect = reconnectToggle.value == true
 if state.AutoReconnect then enableAutoReconnect() end
 
--- Diagnostic messages remain internal so the Settings tab stays compact.
+-- Debug path without allocating three more locals in this large script.
+do
+    local ok, _, path = pcall(function() return window:GetPath() end)
+    print("[Paraiso Save] Deferred Load + change-based native saving | path="
+        .. tostring(ok and path or "unavailable"))
+end
+
+end -- state.InitializeSettings
+state.InitializeSettings()
+
+-- Save/load manager has its own scope to prevent the Luau 200-local limit.
+-- Unlike several earlier versions, no Save is allowed to overwrite the file
+-- while the initial 6-tab interface is still registering its controls.
+function state.InitializePersistence()
+    local HttpService = game:GetService("HttpService")
+    local previousFingerprint = nil
+    local lastFailedFingerprint = nil
+
+    local function fingerprint()
+        local fields = {}
+        local flagCount = 0
+        local ok, err = pcall(function()
+            -- Rayfield Gen2's documented live Flags iteration syntax.
+            for flag, value in window.Flags do
+                if type(flag) == "string" then
+                    local encodedOK, encoded = pcall(function()
+                        return HttpService:JSONEncode(value)
+                    end)
+                    fields[#fields + 1] = flag .. "="
+                        .. (encodedOK and encoded or tostring(value))
+                    flagCount += 1
+                end
+            end
+        end)
+        if not ok then return nil, 0, tostring(err) end
+        table.sort(fields)
+        return table.concat(fields, "\n"), flagCount
+    end
+
+    -- Exactly one restore, after all 6 tabs and flags exist.
+    local loadOk, loadResult = pcall(function() return window:Load() end)
+    local initialFingerprint, initialCount, fingerprintErr = fingerprint()
+    previousFingerprint = initialFingerprint
+    print(string.format(
+        "[Paraiso Save] initial Load=%s | flags=%d | file=ParaisoSavingStableV2.rfld | fingerprint=%s",
+        tostring(loadOk and loadResult), initialCount,
+        fingerprintErr or "ok"
+    ))
+    if not initialFingerprint then
+        warn("[Paraiso Save] Cannot enumerate Rayfield flags:", fingerprintErr)
+        return
+    end
+
+    -- Save only after a REAL user/UI flag change; avoid writing defaults
+    -- during startup.  :Save() is Rayfield's native, tested persistence API.
+    task.spawn(function()
+        while state.Running do
+            task.wait(0.75)
+            local current = fingerprint()
+            if current and current ~= previousFingerprint then
+                -- Debounce rapid dropdown edits and toggles.
+                task.wait(0.55)
+                current = fingerprint()
+                if current and current ~= previousFingerprint then
+                    local saved, detail = saveSettingsNowNative()
+                    if saved then
+                        previousFingerprint = current
+                        lastFailedFingerprint = nil
+                    elseif lastFailedFingerprint ~= current then
+                        lastFailedFingerprint = current
+                        warn("[Paraiso Save] Save unsuccessful:", detail)
+                    end
+                end
+            end
+        end
+    end)
+
+    state.GetSaveDebug = function()
+        local _, count, err = fingerprint()
+        local pathOK, _, configPath = pcall(function() return window:GetPath() end)
+        return string.format("flags=%d | path=%s | status=%s",
+            count, tostring(pathOK and configPath or "unknown"),
+            tostring(err or "ok"))
+    end
+end
+state.InitializePersistence()
+
 print("[Paraiso] Loaded: Farm, Units, Game Modes, Misc, Player, Settings | Compact UI")
