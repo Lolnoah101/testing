@@ -147,6 +147,10 @@ local state = {
     CleanupCycleStartCount = 0,
     CleanupBlockedSignature = nil,
     CleanupBlockedReason = nil,
+    CleanupBlockedUntil = 0,
+    CleanupRetryCount = 0,
+    FuseBatchLimit = nil, -- Adaptive fallback: start bulk, shrink only when unconfirmed.
+    SellBatchLimit = nil,
     NextFuseTargetIndex = 1,
     StarWorld = nil,
     OpenAmount = "Open 3",
@@ -1284,6 +1288,20 @@ local function unitInventorySignature(data)
     return joinedIds(sortedIds(ids))
 end
 
+-- A second signature observes changes that do not alter unit IDs (locking,
+-- equip changes or levels). Only the ID signature confirms material deletion.
+function state.UnitEligibilitySignature(data)
+    local parts = {}
+    for id, owned in pairs(data.Shadows) do
+        parts[#parts + 1] = table.concat({
+            tostring(id), tostring(owned.Level), tostring(owned.Locked),
+            tostring(owned.Shiny), tostring(data.Shadows_Equipped[id] ~= nil)
+        }, ":")
+    end
+    table.sort(parts)
+    return table.concat(parts, "|")
+end
+
 unitsTab:CreateSection({ name = "Equipment", icon = "shield-check" })
 local equipBestToggle = unitsTab:CreateToggle({
     name = "Equip Best Units",
@@ -1481,7 +1499,8 @@ local function updateUnitsInventory()
     end
 
     local now = os.clock()
-    local inventorySignature = unitInventorySignature(data)
+    local inventorySignature = unitInventorySignature(data) -- material IDs
+    local eligibilitySignature = state.UnitEligibilitySignature(data) -- states/levels too
     local capacity = getInventoryCapacity(data)
     if type(capacity) ~= "number" or capacity < 1 then
         setCleanupStatus("Cannot determine unit inventory capacity")
@@ -1494,34 +1513,66 @@ local function updateUnitsInventory()
     local prefix = string.format("Inventory: %d/%d | Cleanup starts at %d (%d%%). ",
         ownedCount, capacity, threshold, state.CleanupThreshold)
 
-    -- A changed set of unit IDs indicates a different inventory snapshot.
-    if state.LastFuseInventorySignature ~= inventorySignature then
-        state.LastFuseInventorySignature = inventorySignature
+    -- Unlock cleanup when new units arrive OR when lock/equip/level changes.
+    -- ID-only checks previously left the automation blocked indefinitely.
+    if state.LastFuseInventorySignature ~= eligibilitySignature then
+        state.LastFuseInventorySignature = eligibilitySignature
         state.FuseAttemptedBatches = {}
         state.LastSellSignature = nil
         state.CleanupBlockedSignature = nil
         state.CleanupBlockedReason = nil
+        state.CleanupBlockedUntil = 0
+        state.CleanupRetryCount = 0
+    end
+
+    local function scheduleRetry(kind, attemptedCount, reason)
+        state.CleanupRetryCount = math.min((state.CleanupRetryCount or 0) + 1, 8)
+        local delaySeconds = math.min(300, 20 * (2 ^ (state.CleanupRetryCount - 1)))
+        state.CleanupBlockedSignature = eligibilitySignature
+        state.CleanupBlockedUntil = now + delaySeconds
+        state.CleanupBlockedReason = reason
+        -- Keep the cleanup cycle running even if inventory dropped below the
+        -- trigger threshold during the failed/slow server update.
+        state.CleanupCycleActive = true
+        if attemptedCount and attemptedCount > 1 then
+            local reduced = math.max(1, math.floor(attemptedCount / 2))
+            if kind == "Bulk Fuse" then
+                state.FuseBatchLimit = math.min(state.FuseBatchLimit or math.huge, reduced)
+            elseif kind == "Bulk Sell" then
+                state.SellBatchLimit = math.min(state.SellBatchLimit or math.huge, reduced)
+            end
+        end
+        local status = string.format("%s Retry in %ds (attempt %d; %s batch limit=%s).",
+            reason, delaySeconds, state.CleanupRetryCount,
+            kind, tostring(kind == "Bulk Fuse" and (state.FuseBatchLimit or "all")
+                or (state.SellBatchLimit or "all")))
+        setCleanupStatus(prefix .. status)
+        warn("[Paraiso Units] " .. status)
     end
 
     local pending = state.PendingCleanupAction
     if pending then
         if pending.inventorySignature ~= inventorySignature then
-            -- Confirmed that the server's replicated inventory has changed.
+            -- A change in material IDs confirms an actual fusion or sale.
             state.PendingCleanupAction = nil
-        elseif now - pending.sentAt < 5 then
+            state.CleanupRetryCount = 0
+            state.CleanupBlockedSignature = nil
+            state.CleanupBlockedUntil = 0
+            if pending.kind == "Bulk Fuse" and state.FuseBatchLimit then
+                state.FuseBatchLimit = math.min(128, state.FuseBatchLimit * 2)
+            elseif pending.kind == "Bulk Sell" and state.SellBatchLimit then
+                state.SellBatchLimit = math.min(128, state.SellBatchLimit * 2)
+            end
+        elseif now - pending.sentAt < 12 then
             setCleanupStatus(prefix .. string.format(
-                "Waiting for %s to update inventory (%d unit IDs requested).",
-                pending.kind, pending.count))
+                "Waiting for %s confirmation (%d IDs).", pending.kind, pending.count))
             return
         else
-            -- FireServer doesn't report whether the server accepted the batch.
-            -- Don't spam the same destructive request without confirmation.
+            -- Server rejected or delayed a request: never freeze forever.
+            -- Retry with exponential backoff and smaller batches.
             state.PendingCleanupAction = nil
-            state.CleanupCycleActive = false
-            state.CleanupBlockedSignature = inventorySignature
-            state.CleanupBlockedReason = pending.kind
-                .. " did not change inventory; server may have rejected the request."
-            setCleanupStatus(prefix .. state.CleanupBlockedReason)
+            scheduleRetry(pending.kind, pending.count,
+                pending.kind .. " was not confirmed by inventory replication.")
             return
         end
     end
@@ -1545,10 +1596,17 @@ local function updateUnitsInventory()
         return true
     end
 
-    if state.CleanupBlockedSignature == inventorySignature then
-        setCleanupStatus(prefix .. (state.CleanupBlockedReason
-            or "Waiting for inventory to change before retrying cleanup."))
-        -- Do not start another cycle against an unchanged rejected snapshot.
+    if state.CleanupBlockedSignature == eligibilitySignature
+        and now < (state.CleanupBlockedUntil or math.huge) then
+        local untilRetry = state.CleanupBlockedUntil
+        if untilRetry == math.huge then
+            setCleanupStatus(prefix .. (state.CleanupBlockedReason
+                or "Waiting for eligible units or settings to change."))
+        else
+            setCleanupStatus(prefix .. string.format("%s Next retry in %ds.",
+                state.CleanupBlockedReason or "Cleanup temporarily paused.",
+                math.ceil(untilRetry - now)))
+        end
         return
     end
 
@@ -1632,8 +1690,16 @@ local function updateUnitsInventory()
             group[#group + 1] = id
         end
         local destination = rotatedTargets[1]
-        local batch = groups[1] -- Entire group, never capped to 10 IDs.
-
+        local batch = groups[1]
+        if state.FuseBatchLimit and #batch > state.FuseBatchLimit then
+            local limited = {}
+            for index = 1, state.FuseBatchLimit do
+                limited[index] = batch[index]
+            end
+            batch = limited
+        end
+        -- Starts with the entire eligible group. Smaller batches are only
+        -- used as a recovery strategy after an unconfirmed server request.
         state.LastInventoryActionAt = now
         local ok, requestError = pcall(function()
             bridge:FireServer("General", "Shadows", "Fuse", destination, batch)
@@ -1648,10 +1714,8 @@ local function updateUnitsInventory()
                 "Full cleanup: fusing %d materials into 1 equipped unit; %d eligible material IDs found across %d targets.",
                 #batch, #materialIds, #targetIds))
         else
-            state.CleanupCycleActive = false
-            state.CleanupBlockedSignature = inventorySignature
-            state.CleanupBlockedReason = "Bulk Fuse request failed: " .. tostring(requestError)
-            setCleanupStatus(prefix .. state.CleanupBlockedReason)
+            scheduleRetry("Bulk Fuse", #batch,
+                "Bulk Fuse request errored: " .. tostring(requestError))
         end
         return
     end
@@ -1659,23 +1723,28 @@ local function updateUnitsInventory()
     -- Fuse first when a rarity is selected for both options. Sell the
     -- remaining selected-rarity units in one request afterward.
     if state.AutoSell and hasSelections(state.SellRarities) and #sellIds > 0 then
+        local sellBatch = sellIds
+        if state.SellBatchLimit and #sellIds > state.SellBatchLimit then
+            sellBatch = {}
+            for index = 1, state.SellBatchLimit do
+                sellBatch[index] = sellIds[index]
+            end
+        end
         state.LastInventoryActionAt = now
         local ok, requestError = pcall(function()
-            bridge:FireServer("General", "Shadows", "Sell_Bulk", sellIds)
+            bridge:FireServer("General", "Shadows", "Sell_Bulk", sellBatch)
         end)
         if ok then
             state.PendingCleanupAction = {
                 kind = "Bulk Sell", inventorySignature = inventorySignature,
-                count = #sellIds, sentAt = os.clock()
+                count = #sellBatch, sentAt = os.clock()
             }
             setCleanupStatus(prefix .. string.format(
-                "Full cleanup: requested bulk sale of ALL %d eligible selected-rarity units.",
-                #sellIds))
+                "Full cleanup: requested sale of %d eligible units (%d total remaining).",
+                #sellBatch, #sellIds))
         else
-            state.CleanupCycleActive = false
-            state.CleanupBlockedSignature = inventorySignature
-            state.CleanupBlockedReason = "Bulk Sell request failed: " .. tostring(requestError)
-            setCleanupStatus(prefix .. state.CleanupBlockedReason)
+            scheduleRetry("Bulk Sell", #sellBatch,
+                "Bulk Sell request errored: " .. tostring(requestError))
         end
         return
     end
@@ -1696,7 +1765,8 @@ local function updateUnitsInventory()
     end
     -- Avoid immediately restarting at the same inventory count if every
     -- remaining item is protected or no selected materials remain.
-    state.CleanupBlockedSignature = inventorySignature
+    state.CleanupBlockedSignature = eligibilitySignature
+    state.CleanupBlockedUntil = math.huge -- no eligible action; wait for a change
     state.CleanupBlockedReason = detail
     setCleanupStatus(prefix .. detail)
 end
