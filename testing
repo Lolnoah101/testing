@@ -1,3 +1,4 @@
+-- Fixes: independently recoverable unit cleanup and non-sticky Trial/Raid rejoin gates.
 -- Paraiso de Anime MINIUPDATE | Rayfield Gen2
 -- Farm tab (complete): Current-world MULTI-SELECT mobs, Reload Mobs,
 -- Teleport/Tween/Legit, Above/Below/Behind, Farm Distance,
@@ -105,6 +106,7 @@ local state = {
     ModeReturnRestoring = false,
     ModeReturnCooldownUntil = -math.huge,
     ModeReturnBlocked = { Trial = false, Raid = false, Tower = false },
+    ModeReturnBlockedAt = { Trial = -math.huge, Raid = -math.huge, Tower = -math.huge },
     ModeReturnOpenSeenClosed = { Trial = false, Raid = false },
     AntiAFKConnection = nil,
     ReconnectPromptConnection = nil,
@@ -149,6 +151,10 @@ local state = {
     CleanupBlockedReason = nil,
     CleanupBlockedUntil = 0,
     CleanupRetryCount = 0,
+    -- Each cleanup operation now has an independent retry gate. A rejected
+    -- fusion must NOT block selling eligible, separately selected units.
+    CleanupRetryAt = { Fuse = 0, Sell = 0 },
+    CleanupFailures = { Fuse = 0, Sell = 0 },
     FuseBatchLimit = nil, -- Adaptive fallback: start bulk, shrink only when unconfirmed.
     SellBatchLimit = nil,
     NextFuseTargetIndex = 1,
@@ -834,9 +840,14 @@ function state.Stop()
     state.AutoJoinNinjaRaid = false
     state.AutoLeaveTrial = false
     disconnectSettingsConnections()
+    for _, connection in ipairs(state.ModeReturnGateConnections or {}) do
+        pcall(function() connection:Disconnect() end)
+    end
+    state.ModeReturnGateConnections = nil
     state.AutoFarm = false
     state.AutoOpenStars = false
     state.AutoEquipBest = false
+    state.AutoEquipRelics = false
     state.AutoFuse = false
     state.AutoSell = false
     state.CleanupCycleActive = false
@@ -1313,6 +1324,241 @@ local equipBestToggle = unitsTab:CreateToggle({
     end
 })
 
+-- AUTO-EQUIP RELICS (the game's Relics, not the global Rune slots).
+-- Isolated scope avoids Luau's 200-local/register ceiling in the main script.
+function state.InitializeRelicAutoEquip()
+    state.AutoEquipRelics = false
+    state.RelicEquipPreset = "Damage"
+    state.RelicEquipPending = nil
+    state.RelicEquipNextAction = 0
+    state.RelicEquipRetryAfter = 0
+    state.RelicEquipStatus = "Waiting"
+
+    local relicDefinitions
+    local sharedRelics = shared and shared:FindFirstChild("Relics")
+    if sharedRelics and sharedRelics:IsA("ModuleScript") then
+        local ok, result = pcall(require, sharedRelics)
+        if ok and type(result) == "table" then relicDefinitions = result end
+    end
+
+    local shadowStats
+    local statsModule = shared and shared:FindFirstChild("Shadow_Stats")
+    if statsModule and statsModule:IsA("ModuleScript") then
+        local ok, result = pcall(require, statsModule)
+        if ok and type(result) == "table" then shadowStats = result end
+    end
+
+    unitsTab:CreateSection({ name = "Auto Equip Relics", icon = "gem" })
+    local presetDropdown = unitsTab:CreateDropdown({
+        name = "Relic Preset",
+        options = { "Damage", "Luck", "Coins", "Ultimate Damage" },
+        value = "Damage",
+        multiSelect = false,
+        flag = "Paraiso_RelicEquipPreset_V1",
+        callback = function(choice)
+            local preset = type(choice) == "table" and choice[1] or choice
+            if preset == "Damage" or preset == "Luck" or preset == "Coins"
+                or preset == "Ultimate Damage" then
+                state.RelicEquipPreset = preset
+                state.RelicEquipPending = nil
+                state.RelicEquipRetryAfter = 0
+            end
+        end
+    })
+    local autoEquipToggle = unitsTab:CreateToggle({
+        name = "Auto Equip Relics",
+        value = false,
+        flag = "Paraiso_AutoEquipRelics_V1",
+        callback = function(enabled)
+            state.AutoEquipRelics = enabled == true
+            state.RelicEquipPending = nil
+            state.RelicEquipRetryAfter = 0
+        end
+    })
+    -- The main save manager calls :Load() after ALL tabs have registered.
+    state.RelicEquipPreset = (presetDropdown.value or {})[1] or "Damage"
+    state.AutoEquipRelics = autoEquipToggle.value == true
+
+    local function equippedUnitRank(data, id)
+        local owned = data.Shadows[id]
+        local def = owned and getUnitDefinition(owned)
+        if not owned or not def then return -math.huge end
+        -- Use the game's own damage calculation, excluding existing Relics,
+        -- so moving a Relic doesn't reorder the units in a feedback loop.
+        if shadowStats and type(shadowStats.calculate_stats_with_multiplier) == "function"
+            and type(shadowStats.calculate_stats) == "function" then
+            local ownedWithoutRelic = table.clone(owned)
+            ownedWithoutRelic.Relic = nil
+            local ok, score = pcall(function()
+                local base = shadowStats:calculate_stats(def, ownedWithoutRelic)
+                return shadowStats:calculate_stats_with_multiplier(
+                    data, def, ownedWithoutRelic, base, 1, 1)
+            end)
+            if ok and type(score) == "number" and score > 0 then return score end
+        end
+        -- Fallback if this game version changes the shared stat API.
+        local level = math.max(0, tonumber(owned.Level) or 0)
+        local base = tonumber(def.Damage) or 1
+        local rarity = rarityRank[def.Rarity] or 1
+        return base * (3 ^ (level / 10)) * rarity
+            * (owned.Shiny and 1.75 or 1)
+    end
+
+    local function normalizeID(value)
+        return value == nil and nil or tostring(value)
+    end
+
+    local function runOnce()
+        if not state.AutoEquipRelics then return end
+        local now = os.clock()
+        if now < state.RelicEquipRetryAfter then return end
+        local data = getInventoryData()
+        if not data or type(data.Relics) ~= "table" then
+            state.RelicEquipStatus = "Waiting for Relics inventory"
+            return
+        end
+        local defs = nativeController and nativeController.Shared
+            and nativeController.Shared.Relics or relicDefinitions
+        if type(defs) ~= "table" then
+            state.RelicEquipStatus = "Waiting for Relics definitions"
+            return
+        end
+
+        local pending = state.RelicEquipPending
+        if pending then
+            local item = data.Relics[pending.relic]
+            local current = item and normalizeID(item.Shadow)
+            local confirmed = (pending.kind == "Unequip" and current == nil)
+                or (pending.kind == "Equip" and current == pending.target)
+            if confirmed then
+                state.RelicEquipPending = nil
+                state.RelicEquipNextAction = now + 1.5
+            elseif now - pending.sentAt <= 8 then
+                state.RelicEquipStatus = "Waiting for " .. pending.kind .. " confirmation"
+                return
+            else
+                -- A remote returning without an error is NOT server acceptance.
+                state.RelicEquipStatus = pending.kind .. " was not confirmed; retrying later"
+                state.RelicEquipPending = nil
+                state.RelicEquipRetryAfter = now + 20
+                return
+            end
+        end
+        if now < state.RelicEquipNextAction then return end
+
+        local units = {}
+        for uid in pairs(data.Shadows_Equipped) do
+            if data.Shadows[uid] then
+                units[#units + 1] = { id = uid, score = equippedUnitRank(data, uid) }
+            end
+        end
+        table.sort(units, function(a, b)
+            if a.score ~= b.score then return a.score > b.score end
+            return tostring(a.id) < tostring(b.id)
+        end)
+        if #units == 0 then
+            state.RelicEquipStatus = "No equipped units"
+            return
+        end
+
+        local relics = {}
+        for rid, item in pairs(data.Relics) do
+            if type(item) == "table" then
+                local def = defs[item.Name]
+                local perk = def and def.Perks
+                local strength = perk and tonumber(perk[state.RelicEquipPreset]) or 0
+                if strength and strength > 0 then
+                    relics[#relics + 1] = { id = rid, strength = strength }
+                end
+            end
+        end
+        table.sort(relics, function(a, b)
+            if a.strength ~= b.strength then return a.strength > b.strength end
+            return tostring(a.id) < tostring(b.id)
+        end)
+        if #relics == 0 then
+            state.RelicEquipStatus = "No matching " .. state.RelicEquipPreset .. " Relics"
+            return
+        end
+
+        -- Assign the best Relic to the strongest equipped Shadow, etc.
+        local desiredByRelic = {}
+        local desiredByUnit = {}
+        for index = 1, math.min(#units, #relics) do
+            desiredByRelic[normalizeID(relics[index].id)] = normalizeID(units[index].id)
+            desiredByUnit[normalizeID(units[index].id)] = normalizeID(relics[index].id)
+        end
+
+        local function send(kind, rid, target)
+            local ok = pcall(function()
+                if kind == "Unequip" then
+                    bridge:FireServer("General", "Relics", "Unequip", rid)
+                else
+                    bridge:FireServer("General", "Relics", "Equip", target, rid)
+                end
+            end)
+            if ok then
+                state.RelicEquipPending = {
+                    kind = kind, relic = rid, target = normalizeID(target), sentAt = now
+                }
+                state.RelicEquipStatus = kind .. " requested; waiting for server"
+            else
+                state.RelicEquipRetryAfter = now + 20
+                state.RelicEquipStatus = "Relic remote failed; retry pending"
+            end
+        end
+
+        -- Free any desired Relic still attached to a different unit (including
+        -- an unequipped unit), and free outdated Relics occupying target slots.
+        for rid, item in pairs(data.Relics) do
+            if type(item) == "table" and item.Shadow then
+                local unitID = normalizeID(item.Shadow)
+                local ridText = normalizeID(rid)
+                local intendedOwner = desiredByRelic[ridText]
+                if intendedOwner and intendedOwner ~= unitID then
+                    send("Unequip", rid)
+                    return
+                end
+                if desiredByUnit[unitID] and desiredByUnit[unitID] ~= ridText then
+                    send("Unequip", rid)
+                    return
+                end
+            end
+        end
+
+        -- Only equip to a genuinely free slot, one confirmed remote at a time.
+        local occupied = {}
+        for _, item in pairs(data.Relics) do
+            if type(item) == "table" and item.Shadow then
+                occupied[normalizeID(item.Shadow)] = true
+            end
+        end
+        for index = 1, math.min(#units, #relics) do
+            local targetID, relicID = units[index].id, relics[index].id
+            local relic = data.Relics[relicID]
+            if relic and normalizeID(relic.Shadow) ~= normalizeID(targetID)
+                and not relic.Shadow and not occupied[normalizeID(targetID)] then
+                send("Equip", relicID, targetID)
+                return
+            end
+        end
+        state.RelicEquipStatus = "Best " .. state.RelicEquipPreset .. " Relics equipped"
+    end
+
+    task.spawn(function()
+        while state.Running do
+            local ok, err = pcall(runOnce)
+            if not ok then
+                state.RelicEquipStatus = "Equipment check error: " .. tostring(err)
+                warn("[Paraiso Auto Equip Relics]", err)
+                state.RelicEquipRetryAfter = os.clock() + 15
+            end
+            task.wait(2.5)
+        end
+    end)
+end
+state.InitializeRelicAutoEquip()
+
 -- Auto-lock uses the native Shadows/Lock toggle only on units currently unlocked.
 -- Locked units are already excluded from Auto Fuse and Auto Sell.
 state.AutoLockUnits = false
@@ -1522,29 +1768,30 @@ local function updateUnitsInventory()
         state.CleanupBlockedSignature = nil
         state.CleanupBlockedReason = nil
         state.CleanupBlockedUntil = 0
-        state.CleanupRetryCount = 0
+        -- Per-operation failures persist until the corresponding operation
+        -- succeeds. Otherwise unrelated inventory changes defeat backoff.
     end
 
     local function scheduleRetry(kind, attemptedCount, reason)
-        state.CleanupRetryCount = math.min((state.CleanupRetryCount or 0) + 1, 8)
-        local delaySeconds = math.min(300, 20 * (2 ^ (state.CleanupRetryCount - 1)))
-        state.CleanupBlockedSignature = eligibilitySignature
-        state.CleanupBlockedUntil = now + delaySeconds
-        state.CleanupBlockedReason = reason
-        -- Keep the cleanup cycle running even if inventory dropped below the
-        -- trigger threshold during the failed/slow server update.
+        local action = kind == "Bulk Fuse" and "Fuse" or "Sell"
+        local failures = math.min((state.CleanupFailures[action] or 0) + 1, 7)
+        local delaySeconds = math.min(180, 15 * (2 ^ (failures - 1)))
+        state.CleanupFailures[action] = failures
+        state.CleanupRetryAt[action] = now + delaySeconds
+        -- Keep the overall cycle alive, but delay ONLY the failed action.
+        -- An unconfirmed Fuse no longer prevents a valid Sell from running.
         state.CleanupCycleActive = true
         if attemptedCount and attemptedCount > 1 then
             local reduced = math.max(1, math.floor(attemptedCount / 2))
-            if kind == "Bulk Fuse" then
+            if action == "Fuse" then
                 state.FuseBatchLimit = math.min(state.FuseBatchLimit or math.huge, reduced)
-            elseif kind == "Bulk Sell" then
+            else
                 state.SellBatchLimit = math.min(state.SellBatchLimit or math.huge, reduced)
             end
         end
-        local status = string.format("%s Retry in %ds (attempt %d; %s batch limit=%s).",
-            reason, delaySeconds, state.CleanupRetryCount,
-            kind, tostring(kind == "Bulk Fuse" and (state.FuseBatchLimit or "all")
+        local status = string.format("%s Next %s retry in %ds (failed %d time(s), batch limit=%s).",
+            reason, action, delaySeconds, failures,
+            tostring(action == "Fuse" and (state.FuseBatchLimit or "all")
                 or (state.SellBatchLimit or "all")))
         setCleanupStatus(prefix .. status)
         warn("[Paraiso Units] " .. status)
@@ -1552,10 +1799,25 @@ local function updateUnitsInventory()
 
     local pending = state.PendingCleanupAction
     if pending then
-        if pending.inventorySignature ~= inventorySignature then
-            -- A change in material IDs confirms an actual fusion or sale.
+        -- Summoning can add unrelated units while cleanup waits. That must
+        -- NOT be mistaken for confirmation that Fuse/Sell actually worked.
+        local consumedOne = false
+        if type(pending.materialIds) == "table" then
+            for _, usedId in ipairs(pending.materialIds) do
+                if data.Shadows[usedId] == nil then
+                    consumedOne = true
+                    break
+                end
+            end
+        else
+            consumedOne = pending.inventorySignature ~= inventorySignature
+        end
+        if consumedOne then
+            -- At least one of the requested material IDs actually disappeared.
             state.PendingCleanupAction = nil
-            state.CleanupRetryCount = 0
+            local action = pending.kind == "Bulk Fuse" and "Fuse" or "Sell"
+            state.CleanupFailures[action] = 0
+            state.CleanupRetryAt[action] = 0
             state.CleanupBlockedSignature = nil
             state.CleanupBlockedUntil = 0
             if pending.kind == "Bulk Fuse" and state.FuseBatchLimit then
@@ -1674,7 +1936,7 @@ local function updateUnitsInventory()
     local fusePossible = state.AutoFuse and hasSelections(state.FuseMaterials)
         and #targetIds > 0 and #materialIds > 0
 
-    if fusePossible then
+    if fusePossible and now >= (state.CleanupRetryAt.Fuse or 0) then
         -- Rotate the first destination each time to feed all equipped units
         -- rather than repeatedly putting every material into the first unit.
         local rotation = ((state.NextFuseTargetIndex - 1) % #targetIds) + 1
@@ -1708,7 +1970,7 @@ local function updateUnitsInventory()
             state.NextFuseTargetIndex = rotation + 1
             state.PendingCleanupAction = {
                 kind = "Bulk Fuse", inventorySignature = inventorySignature,
-                count = #batch, sentAt = os.clock()
+                materialIds = batch, count = #batch, sentAt = os.clock()
             }
             setCleanupStatus(prefix .. string.format(
                 "Full cleanup: fusing %d materials into 1 equipped unit; %d eligible material IDs found across %d targets.",
@@ -1722,12 +1984,27 @@ local function updateUnitsInventory()
 
     -- Fuse first when a rarity is selected for both options. Sell the
     -- remaining selected-rarity units in one request afterward.
-    if state.AutoSell and hasSelections(state.SellRarities) and #sellIds > 0 then
-        local sellBatch = sellIds
-        if state.SellBatchLimit and #sellIds > state.SellBatchLimit then
+    if state.AutoSell and hasSelections(state.SellRarities)
+        and now >= (state.CleanupRetryAt.Sell or 0) then
+        local saleCandidates = {}
+        for _, id in ipairs(sellIds) do
+            local owned = data.Shadows[id]
+            local definition = owned and getUnitDefinition(owned)
+            local rarity = definition and definition.Rarity
+            -- Do not accidentally sell fusion materials while Fuse is merely
+            -- cooling down. A unit selected for both operations is fused first.
+            if not (fusePossible and rarity and state.FuseMaterials[rarity]) then
+                saleCandidates[#saleCandidates + 1] = id
+            end
+        end
+        if #saleCandidates == 0 then
+            -- A pending fusion retry is handled below without ending the cycle.
+        else
+        local sellBatch = saleCandidates
+        if state.SellBatchLimit and #saleCandidates > state.SellBatchLimit then
             sellBatch = {}
             for index = 1, state.SellBatchLimit do
-                sellBatch[index] = sellIds[index]
+                sellBatch[index] = saleCandidates[index]
             end
         end
         state.LastInventoryActionAt = now
@@ -1737,15 +2014,36 @@ local function updateUnitsInventory()
         if ok then
             state.PendingCleanupAction = {
                 kind = "Bulk Sell", inventorySignature = inventorySignature,
-                count = #sellBatch, sentAt = os.clock()
+                materialIds = sellBatch, count = #sellBatch, sentAt = os.clock()
             }
             setCleanupStatus(prefix .. string.format(
                 "Full cleanup: requested sale of %d eligible units (%d total remaining).",
-                #sellBatch, #sellIds))
+                #sellBatch, #saleCandidates))
         else
             scheduleRetry("Bulk Sell", #sellBatch,
                 "Bulk Sell request errored: " .. tostring(requestError))
         end
+        return
+        end -- saleCandidates > 0
+    end
+
+    -- If either selected operation has eligible units but is in backoff, DO
+    -- NOT mark cleanup completed. The next pass will retry automatically.
+    local fuseWaiting = fusePossible and now < (state.CleanupRetryAt.Fuse or 0)
+    local sellWaiting = state.AutoSell and #sellIds > 0
+        and now < (state.CleanupRetryAt.Sell or 0)
+    if fuseWaiting or sellWaiting then
+        state.CleanupCycleActive = true
+        local remaining = math.huge
+        if fuseWaiting then
+            remaining = math.min(remaining, state.CleanupRetryAt.Fuse - now)
+        end
+        if sellWaiting then
+            remaining = math.min(remaining, state.CleanupRetryAt.Sell - now)
+        end
+        setCleanupStatus(prefix .. string.format(
+            "Cleanup retry pending: %d fuse materials, %d sell candidates; next attempt in %ds.",
+            #materialIds, #sellIds, math.max(1, math.ceil(remaining))))
         return
     end
 
@@ -1766,7 +2064,9 @@ local function updateUnitsInventory()
     -- Avoid immediately restarting at the same inventory count if every
     -- remaining item is protected or no selected materials remain.
     state.CleanupBlockedSignature = eligibilitySignature
-    state.CleanupBlockedUntil = math.huge -- no eligible action; wait for a change
+    -- Don't freeze this inventory signature forever: a later game-mode exit,
+    -- native Auto Lock change or replication refresh may make it actionable.
+    state.CleanupBlockedUntil = now + 20
     state.CleanupBlockedReason = detail
     setCleanupStatus(prefix .. detail)
 end
@@ -2039,7 +2339,7 @@ function state.InitializeModeReturn()
         local existing = state.ModeReturnSpot
         if existing then
             -- Do not replace the original location with a lobby/queue location.
-            if existing.entered or os.clock() - existing.at < 90 then return end
+            if existing.entered or os.clock() - existing.at < 18 then return end
         end
         local root = getParts()
         local cf = root and root.CFrame
@@ -2070,9 +2370,11 @@ function state.InitializeModeReturn()
             -- Tower costs a key. Avoid re-spending keys just after an auto-leave.
             -- Toggling auto-create off/on allows another run.
             state.ModeReturnBlocked.Tower = true
+            state.ModeReturnBlockedAt.Tower = os.clock()
         elseif completedMode == "Trial" or completedMode == "Raid" then
             -- Wait for this event to close before auto-joining the next opening.
             state.ModeReturnBlocked[completedMode] = true
+            state.ModeReturnBlockedAt[completedMode] = os.clock()
             state.ModeReturnOpenSeenClosed[completedMode] = false
         end
         stopMoving()
@@ -2140,7 +2442,10 @@ function state.InitializeModeReturn()
                 warn("[Paraiso Modes] Could not restore the saved spot: " .. lastReason)
             end
             state.ModeReturnSpot = nil
-            state.ModeReturnCooldownUntil = os.clock() + 12
+            -- The event's own rejoin gate handles repeat joins. Keep only a
+            -- brief movement-settling cooldown rather than blocking the next
+            -- new opening for 12 more seconds.
+            state.ModeReturnCooldownUntil = os.clock() + 3
             state.ModeReturnRestoring = false
         end)
     end
@@ -2148,15 +2453,45 @@ function state.InitializeModeReturn()
     -- Trial/Raid timers may stay open for a moment after leaving. Do not
     -- instantly queue another run. Auto-join re-arms on the next open cycle.
     local function updateModeRejoinGates()
+        -- Reset when the current opening closes. The property-change watcher
+        -- also catches openings that close/reopen between scheduler ticks.
         local trial = gameModes and gameModes:FindFirstChild("Trial")
-        if state.ModeReturnBlocked.Trial and readModeValue(trial, "Open") ~= true then
-            state.ModeReturnBlocked.Trial = false
-        end
         local raid = gameModes and gameModes:FindFirstChild("Raid")
-        if state.ModeReturnBlocked.Raid and readModeValue(raid, "Open") ~= true then
-            state.ModeReturnBlocked.Raid = false
+        for modeName, folder in pairs({ Trial = trial, Raid = raid }) do
+            if folder and state.ModeReturnBlocked[modeName] then
+                local open = readModeValue(folder, "Open")
+                local age = os.clock() - (state.ModeReturnBlockedAt[modeName] or os.clock())
+                if open == false then
+                    state.ModeReturnBlocked[modeName] = false
+                    state.ModeReturnOpenSeenClosed[modeName] = true
+                elseif age >= 600 then
+                    -- Fail-safe only; avoid permanent blockage when a brief
+                    -- Open=false change was missed by the local client.
+                    state.ModeReturnBlocked[modeName] = false
+                    warn("[Paraiso Modes] Expired stale " .. modeName .. " rejoin block")
+                end
+            end
         end
     end
+
+    -- Observe the actual Open value transitions rather than relying on a
+    -- once-per-second poll, which can miss short false states.
+    local function watchOpening(modeName)
+        local folder = gameModes and gameModes:FindFirstChild(modeName)
+        local openValue = folder and folder:FindFirstChild("Open")
+        if openValue and openValue:IsA("ValueBase") then
+            local connection = openValue.Changed:Connect(function(value)
+                if value == false then
+                    state.ModeReturnBlocked[modeName] = false
+                    state.ModeReturnOpenSeenClosed[modeName] = true
+                end
+            end)
+            state.ModeReturnGateConnections = state.ModeReturnGateConnections or {}
+            table.insert(state.ModeReturnGateConnections, connection)
+        end
+    end
+    watchOpening("Trial")
+    watchOpening("Raid")
 
     state.RememberModeReturnSpot = rememberModeReturnSpot
     state.BeginModeReturn = beginModeReturn
@@ -2410,7 +2745,311 @@ local function tryJoinRaid(now)
     end
 end
 
+-- Live Game Mode watchers are read-only Rayfield Gen2 Text cards.
+-- They do not introduce saved flags and will not modify auto-join/farm settings.
+function state.CreateModeWatcher(kind)
+    state.ModeWatcherCards = state.ModeWatcherCards or {}
+    state.ModeWatcherCards[kind] = modesTab:CreateText({
+        name = kind == "Trial" and "Time Trial Status" or "Solo City Raid Status",
+        text = "Checking server status...",
+        icon = "clock",
+    })
+end
+
+function state.StartModeWatchers()
+    task.spawn(function()
+        -- This is the exact shared Raid module used by the game's own
+        -- portal UI for its next-opening countdown.
+        local sharedFolder = ReplicatedStorage:FindFirstChild("Shared")
+        local raidModule = sharedFolder and sharedFolder:FindFirstChild("Raid")
+        local raidShared = nil
+        if raidModule and raidModule:IsA("ModuleScript") then
+            local ok, result = pcall(require, raidModule)
+            if ok and type(result) == "table" then raidShared = result end
+        end
+
+        local function clock(seconds)
+            seconds = math.max(0, math.ceil(seconds))
+            local hours = math.floor(seconds / 3600)
+            local minutes = math.floor((seconds % 3600) / 60)
+            local rest = seconds % 60
+            return string.format("%02d:%02d:%02d", hours, minutes, rest)
+        end
+
+        local function getNumber(folder, name)
+            if not folder then return nil end
+            local number = readModeValue(folder, name)
+            if number == nil then number = folder:GetAttribute(name) end
+            return type(number) == "number" and number or nil
+        end
+
+        local function trialCountdown(folder)
+            if not folder then return nil end
+            local now = Workspace:GetServerTimeNow()
+            -- Only interpret named opening timestamps as next opening times.
+            -- Trial.Timer is the in-run HUD timer, NOT a verified next-open clock.
+            for _, name in ipairs({
+                "NextOpenAt", "NextOpeningAt", "NextStartAt",
+                "NextOpenTime", "NextOpeningTime", "OpensAt",
+            }) do
+                local value = getNumber(folder, name)
+                if value and value > now - 1 and value < now + 14 * 86400 then
+                    return math.max(0, value - now)
+                end
+            end
+            for _, name in ipairs({
+                "TimeUntilOpen", "SecondsUntilOpen", "NextOpenIn", "CountdownToOpen",
+            }) do
+                local value = getNumber(folder, name)
+                if value and value >= 0 then return value end
+            end
+            return nil
+        end
+
+        -- Portal UI discovery (game capture predates the current OPENS AT text).
+        -- Search live TextLabels, including RichText/ContentText, without
+        -- blocking the one-second status watcher on a large Workspace scan.
+        local portalTrialLabel = nil
+        local portalText = nil
+        local lastPortalDiagnostic = "Not scanned yet"
+        local scheduleFoundAt = -math.huge
+
+        local function cleanedText(raw)
+            if type(raw) ~= "string" then return "" end
+            return (raw:gsub("<[^>]*>", " ")
+                :gsub("&nbsp;", " ")
+                :gsub("[%c]", " ")
+                :gsub("%s+", " "))
+        end
+
+        local function scheduleText(raw)
+            local plain = cleanedText(raw)
+            local upper = plain:upper()
+            -- Accept OPENS AT 16:22, OPENS AT:16:22, and OPENS IN: 00:16:22.
+            if upper:match("OPEN[S]?%s+AT%s*:?%s*%d+:%d%d")
+                or upper:match("OPEN[S]?%s+IN%s*:?%s*%d+:%d%d") then
+                return plain
+            end
+            return nil
+        end
+
+        local function labelText(obj)
+            if not obj or not obj.Parent then return nil end
+            if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+                local ok, content = pcall(function() return obj.ContentText end)
+                local formatted = ok and scheduleText(content) or nil
+                if formatted then return formatted end
+                return scheduleText(obj.Text)
+            end
+            if obj:IsA("StringValue") then
+                return scheduleText(obj.Value)
+            end
+            return nil
+        end
+
+        local function isCandidateObject(obj)
+            return obj:IsA("TextLabel") or obj:IsA("TextButton")
+                or obj:IsA("TextBox") or obj:IsA("StringValue")
+        end
+
+        local function candidateScore(obj)
+            local path = obj:GetFullName():lower()
+            local score = 0
+            if path:find("trial", 1, true) then score = score + 50 end
+            if path:find("easy", 1, true) then score = score + 8 end
+            if path:find("portal", 1, true) then score = score + 5 end
+            if path:find("raid", 1, true) then score = score - 70 end
+            if path:find("tower", 1, true) then score = score - 70 end
+            if obj:IsA("GuiObject") and obj.Visible then score = score + 3 end
+            return score
+        end
+
+        local function recordPortalResult(label, text)
+            portalTrialLabel = label
+            portalText = text
+            scheduleFoundAt = os.clock()
+            lastPortalDiagnostic = "Found " .. label:GetFullName()
+            state.TrialPortalDiagnostic = lastPortalDiagnostic
+            print("[Paraiso Trial Watch] " .. lastPortalDiagnostic .. " = " .. text)
+        end
+
+        -- Asynchronous scan: minimize stutter and keep status cards updating.
+        task.spawn(function()
+            local lastResult = nil
+            while state.Running do
+                if portalTrialLabel and portalTrialLabel.Parent then
+                    local current = labelText(portalTrialLabel)
+                    if current then
+                        portalText = current
+                        scheduleFoundAt = os.clock()
+                        task.wait(2)
+                        continue
+                    end
+                end
+
+                portalTrialLabel = nil
+                portalText = nil
+                local candidates, checked, best, bestText, bestScore = {}, 0, nil, nil, -math.huge
+                local seen = {}
+                local roots = {}
+                local function addRoot(candidate)
+                    if candidate then roots[#roots + 1] = candidate end
+                end
+                addRoot(player:FindFirstChild("PlayerGui"))
+                addRoot(Workspace:FindFirstChild("Client"))
+                addRoot(Workspace:FindFirstChild("Server"))
+                addRoot(Workspace)
+                for _, root in ipairs(roots) do
+                    if root then
+                        -- Skip duplicate scanning of descendants of a prior root.
+                        local nodes = root:GetDescendants()
+                        for i, obj in ipairs(nodes) do
+                            if not seen[obj] then
+                                seen[obj] = true
+                                if isCandidateObject(obj) then
+                                    checked = checked + 1
+                                    local content = labelText(obj)
+                                    if content then
+                                        local score = candidateScore(obj)
+                                        if score > bestScore then
+                                            best, bestText, bestScore = obj, content, score
+                                        end
+                                    elseif #candidates < 5 and (obj:IsA("TextLabel") or obj:IsA("TextButton")) then
+                                        local raw = cleanedText(obj.Text)
+                                        if raw:upper():find("OPEN", 1, true) and #raw < 100 then
+                                            candidates[#candidates + 1] = obj:GetFullName() .. " = " .. raw
+                                        end
+                                    end
+                                end
+                            end
+                            if i % 600 == 0 then task.wait() end
+                            if not state.Running then return end
+                        end
+                    end
+                end
+                if best and bestScore >= 0 then
+                    recordPortalResult(best, bestText)
+                else
+                    local diagnostic = "No Trial portal countdown found in " .. tostring(checked) .. " text objects"
+                    state.TrialPortalDiagnostic = diagnostic
+                    if diagnostic ~= lastResult then
+                        warn("[Paraiso Trial Watch] " .. diagnostic)
+                        for _, item in ipairs(candidates) do
+                            print("[Paraiso Trial Watch] Other opening text: " .. item)
+                        end
+                        lastResult = diagnostic
+                    end
+                end
+                task.wait(9)
+            end
+        end)
+
+        local function readTrialPortalSchedule()
+            if portalTrialLabel and portalTrialLabel.Parent then
+                local current = labelText(portalTrialLabel)
+                if current then return current end
+            end
+            if portalText and os.clock() - scheduleFoundAt < 10 then
+                return portalText
+            end
+            return nil
+        end
+
+        local lastTrialText, lastRaidText = nil, nil
+        -- Trial.Timer is the same replicated value read by the native Trial
+        -- HUD and open-event notification. During a closed period, only call
+        -- it an "opens in" countdown after observing that it ticks downward.
+        local lastTrialOpen, lastClosedTrialTimer = nil, nil
+        local closedTrialTimerCountingDown = false
+        while state.Running do
+            local trial = gameModes and gameModes:FindFirstChild("Trial")
+            local trialOpen = readModeValue(trial, "Open")
+            local liveTrialTimer = getNumber(trial, "Timer")
+            if trialOpen ~= lastTrialOpen then
+                lastClosedTrialTimer = nil
+                closedTrialTimerCountingDown = false
+                lastTrialOpen = trialOpen
+            end
+
+            local trialText
+            if trialOpen == true then
+                trialText = "OPEN  |  You can join now"
+                if liveTrialTimer and liveTrialTimer > 0 then
+                    trialText = trialText .. "  |  Time left " .. clock(liveTrialTimer)
+                end
+            elseif trialOpen == false then
+                local seconds = trialCountdown(trial)
+                if liveTrialTimer and liveTrialTimer >= 0 and liveTrialTimer < 86400 then
+                    if lastClosedTrialTimer and liveTrialTimer < lastClosedTrialTimer then
+                        closedTrialTimerCountingDown = true
+                    end
+                    lastClosedTrialTimer = liveTrialTimer
+                end
+                if seconds == nil and closedTrialTimerCountingDown
+                    and liveTrialTimer and liveTrialTimer > 0 then
+                    seconds = liveTrialTimer
+                end
+                -- Use the portal's displayed schedule if the replicated
+                -- timer has no confirmed meaning while the Trial is closed.
+                local portalSchedule = readTrialPortalSchedule()
+                if seconds ~= nil then
+                    trialText = "CLOSED  |  Opens in " .. clock(seconds)
+                elseif portalSchedule then
+                    local trimmed = portalSchedule:gsub("%s+", " ")
+                    trialText = "CLOSED  |  " .. trimmed
+                elseif liveTrialTimer and liveTrialTimer > 0 then
+                    trialText = "CLOSED  |  Trial timer " .. clock(liveTrialTimer)
+                else
+                    trialText = "CLOSED  |  Searching portal time (see console diagnostics)"
+                end
+            else
+                trialText = "UNKNOWN  |  Waiting for Trial.Open"
+            end
+            if trialText ~= lastTrialText then
+                lastTrialText = trialText
+                local card = state.ModeWatcherCards and state.ModeWatcherCards.Trial
+                if card then pcall(function() card:Set(trialText) end) end
+            end
+
+            local raid = gameModes and gameModes:FindFirstChild("Raid")
+            local raidOpen = readModeValue(raid, "Open")
+            local activeRaid = readModeValue(raid, "Active")
+            local raidText
+            if raidOpen == true and activeRaid == "Solo City" then
+                local remaining = getNumber(raid, "Timer")
+                raidText = "OPEN  |  Solo City Raid accepting players"
+                if remaining and remaining > 0 then
+                    raidText = raidText .. "  |  Timer " .. clock(remaining)
+                end
+            else
+                local seconds
+                if raidShared and type(raidShared.Get_Time_Until_Open) == "function" then
+                    local ok, time = pcall(raidShared.Get_Time_Until_Open,
+                        raidShared, Workspace:GetServerTimeNow(), "Solo City")
+                    if ok and type(time) == "number" and time >= 0 then
+                        seconds = time
+                    end
+                end
+                if seconds then
+                    raidText = "CLOSED  |  Solo City opens in " .. clock(seconds)
+                elseif raid then
+                    raidText = "CLOSED  |  Next opening time unavailable"
+                else
+                    raidText = "UNKNOWN  |  Waiting for Raid data"
+                end
+            end
+            if raidText ~= lastRaidText then
+                lastRaidText = raidText
+                local card = state.ModeWatcherCards and state.ModeWatcherCards.SoloRaid
+                if card then pcall(function() card:Set(raidText) end) end
+            end
+            task.wait(1)
+        end
+    end)
+end
+
 modesTab:CreateSection({ name = "Time Trials", icon = "timer" })
+state.CreateModeWatcher("Trial")
 -- These are achievement milestones; the game's Trial Join request has
 -- no difficulty argument, so the dropdown cannot force matchmaking difficulty.
 local trialGoalByName = { Easy = 10, Medium = 20, Hard = 50 }
@@ -2441,6 +3080,9 @@ trialToggle = state.UiLayout.trialRow:CreateToggle({
     callback = function(value)
         state.AutoJoinTimeTrial = value == true
         state.TrialLastJoin = -math.huge
+        if value and not state.ModeReturnRestoring then
+            state.ModeReturnBlocked.Trial = false
+        end
         if value then
             if towerToggle then towerToggle:Set(false) end
             if raidToggle then raidToggle:Set(false) end
@@ -2543,6 +3185,7 @@ local towerLeaveToggle = modesTab:CreateToggle({
 -- Each raid has independent farming and wave settings. Joining alone never
 -- enables farming; Auto Farm Solo/Ninja only acts in the matching RaidId.
 modesTab:CreateSection({ name = "Solo City Raid", icon = "swords" })
+state.CreateModeWatcher("SoloRaid")
 local soloRaidRow = modesTab:CreateGroup()
 raidToggle = soloRaidRow:CreateToggle({
     name = "Auto Join Solo City Raid", value = false,
@@ -2663,6 +3306,8 @@ if state.AutoJoinRaid then
 elseif state.AutoCreateJoinTower and state.AutoJoinTimeTrial then
     trialToggle:Set(false)
 end
+
+state.StartModeWatchers()
 
 -- One scheduler, throttled and cancellable. The Farm, Quest and Units toggles
 -- are NEVER modified by matchmaking features.
