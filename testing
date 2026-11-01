@@ -1,4 +1,5 @@
--- Arise Shadows | Rayfield Gen 2 | Combat + Shadows/Player + Dungeon + Misc + Event + Settings v33 | Own-Queue-Only Dungeon & Halloween Joining | Settings Last
+-- Arise Shadows | Rayfield Gen 2 | Combat + Shadows/Player + Dungeon + Misc + Event + Settings v34 | Rank + Size Filtered Shadow Release | Settings Last
+-- V34: Auto Release requires BOTH selected shadow rank and selected size; unselected sizes protected.
 -- Verified against the supplied game's decompiled CombatController.
 -- Attack: Combat.Request:FireServer("Attack", nil, sequence)
 -- Training attack: Combat.Request:FireServer("Attack")
@@ -1015,6 +1016,7 @@ end
 
 local settings = {
     ReleaseRanks = {},
+    ReleaseSizes = {},
     AriseRanks = {},
     UpgradeKinds = { Base = true },
     EquipAuraStats = { Damage = true },
@@ -1103,10 +1105,34 @@ for _, rank in ipairs(RankConfig.Ranks) do
     table.insert(rankNames, rank.Name)
 end
 PlayerTab:CreateDropdown({
-    name = "Auto Release Ranks", description = "Select ranks to remove from inventory. WARNING: matching existing shadows can also be released permanently.",
+    name = "Auto Release Ranks", description = "First release filter. A shadow must match both a selected rank and a selected size to be released.",
     options = rankNames, multiSelect = true, value = {},
     flag = "AS_ReleaseRanks",
     callback = function(v) settings.ReleaseRanks = setOf(v); Scheduler.poke("Shadows") end,
+})
+-- V34: The game names Behemoth/Titan/etc. 'Sizes' (ShadowConfig.SizeOrder).
+-- An empty size selection intentionally prevents ALL release requests, even
+-- if Auto Release is already enabled in a saved Rayfield configuration.
+PlayerTab:CreateDropdown({
+    name = "Auto Release Sizes",
+    description = "ONLY selected sizes can be released (and only if their rank is also selected). Leave Titan/Behemoth unselected to keep them. Empty selection = release nothing.",
+    -- Local variables remain inside the options closure to avoid Luau's
+    -- 200-local limit on large top-level scripts.
+    options = (function()
+        local names = {}
+        for _, sizeName in ipairs(ShadowConfig.SizeOrder) do
+            table.insert(names, sizeName)
+        end
+        -- Titanic is configured as a special size outside standard SizeOrder.
+        if ShadowConfig.Sizes.Titanic then table.insert(names, "Titanic") end
+        return names
+    end)(),
+    multiSelect = true, value = {},
+    flag = "AS_ReleaseSizes",
+    callback = function(v)
+        settings.ReleaseSizes = setOf(v)
+        Scheduler.poke("Shadows")
+    end,
 })
 -- Rank-filtered automatic Arise uses the normal corpse request, not paid Guarantee.
 CombatTab:CreateSection({ name = "Shadow Arise" })
@@ -1127,7 +1153,7 @@ CombatTab:CreateToggle({
 local autoReleaseStatus
 PlayerTab:CreateToggle({
     name = "Auto Release Shadows",
-    description = "Releases ALL unprotected inventory shadows of selected ranks, including older ones. Permanent: choose ranks carefully.",
+    description = "Releases only shadows matching BOTH selected ranks and sizes. All other sizes are kept; existing matches can be permanently released.",
     flag = "AS_ReleaseShadows", value = false,
     callback = function(v)
         enabled.ReleaseShadows = v == true; Scheduler.pokeAll()
@@ -1135,7 +1161,7 @@ PlayerTab:CreateToggle({
 })
 autoReleaseStatus = PlayerTab:CreateText({
     name = "Auto Release Status",
-    text = "Disabled. Selected-rank shadows, including existing inventory, will be released permanently when enabled.",
+    text = "Disabled. Select ranks AND sizes to release. Unselected sizes are protected. Existing matches can be released permanently.",
 })
 PlayerTab:CreateSection({ name = "Base Upgrades & Income" })
 PlayerTab:CreateDropdown({
@@ -1537,6 +1563,17 @@ local function getReleaseRankName(record)
     return item and item.Name or nil
 end
 
+-- ShadowRow displays record.Size, which contains names such as Titan and Behemoth.
+-- Do not guess an unknown size from Scale: if not known, protect it.
+settings.getReleaseSizeName = function(record)
+    if type(record) ~= "table" then return nil end
+    local sizeName = record.Size
+    if type(sizeName) == "string" and ShadowConfig.Sizes[sizeName] then
+        return sizeName
+    end
+    return nil
+end
+
 local function processReleaseShadows()
     local data = dataNow()
     local owned = data and data.shadows and data.shadows.owned
@@ -1556,11 +1593,16 @@ local function processReleaseShadows()
         if owned[id] == nil then releaseSession.firstSeen[id] = nil end
     end
 
-    local selected, totalOwned, rankMatched, eligible, protected, unknown = 0, 0, 0, 0, 0, 0
-    local awaiting = 0
+    local selectedRanks, selectedSizes = 0, 0
     for _, chosen in pairs(settings.ReleaseRanks) do
-        if chosen == true then selected = selected + 1 end
+        if chosen == true then selectedRanks += 1 end
     end
+    for _, chosen in pairs(settings.ReleaseSizes) do
+        if chosen == true then selectedSizes += 1 end
+    end
+    local totalOwned, rankMatched, sizeMatched, sizeProtected = 0, 0, 0, 0
+    local bothMatched, eligible, protected, unknownRank, unknownSize = 0, 0, 0, 0, 0
+    local awaiting = 0
     local shadows = data.shadows
     local active = shadows.active or {}
     local assigned = {}
@@ -1570,17 +1612,27 @@ local function processReleaseShadows()
 
     local chosenId, oldestReady = nil, -math.huge
     for id, record in pairs(owned) do
-        totalOwned = totalOwned + 1
+        totalOwned += 1
         local rank = getReleaseRankName(record)
-        if not rank then unknown = unknown + 1 end
-        if rank and settings.ReleaseRanks[rank] then
-            rankMatched = rankMatched + 1
+        local sizeName = settings.getReleaseSizeName(record)
+        if not rank then unknownRank += 1 end
+        if not sizeName then unknownSize += 1 end
+
+        local rankOK = rank ~= nil and settings.ReleaseRanks[rank] == true
+        local sizeOK = sizeName ~= nil and settings.ReleaseSizes[sizeName] == true
+        if rankOK then rankMatched += 1 end
+        if sizeOK then sizeMatched += 1 end
+        if rankOK and not sizeOK then sizeProtected += 1 end
+
+        -- BOTH selected filters must match. Nonmatches are never released.
+        if rankOK and sizeOK then
+            bothMatched += 1
             if type(record) ~= "table" or record.Locked or record.Gift
                 or record.CollectibleSerial or active[id] or assigned[id] then
-                protected = protected + 1
+                protected += 1
                 releaseSession.firstSeen[id] = nil
             else
-                eligible = eligible + 1
+                eligible += 1
                 if not releaseSession.firstSeen[id] then
                     releaseSession.firstSeen[id] = now
                 end
@@ -1593,46 +1645,49 @@ local function processReleaseShadows()
                         chosenId, oldestReady = id, age
                     end
                 elseif req then
-                    awaiting = awaiting + 1
+                    awaiting += 1
                 end
             end
         else
+            -- A change to either dropdown immediately removes the candidate.
             releaseSession.firstSeen[id] = nil
         end
     end
 
     local msg = string.format(
-        "Selected ranks: %d | Owned: %d | Matching: %d\nEligible: %d | Protected: %d | Unknown rank: %d\nRequested: %d | Confirmed removed: %d | Awaiting: %d",
-        selected, totalOwned, rankMatched, eligible, protected, unknown,
+        "Selected ranks: %d | Selected sizes: %d | Owned: %d\nRank matched: %d | Size matched: %d | Both: %d\nEligible: %d | Size-protected: %d | Other protected: %d\nUnknown rank/size: %d/%d | Requested: %d | Confirmed removed: %d | Awaiting: %d",
+        selectedRanks, selectedSizes, totalOwned, rankMatched, sizeMatched, bothMatched,
+        eligible, sizeProtected, protected, unknownRank, unknownSize,
         releaseSession.requests, releaseSession.confirmed, awaiting
     )
     if not enabled.ReleaseShadows then
         updateReleaseStatus("OFF | " .. msg)
         return
     end
-    if selected == 0 then
-        updateReleaseStatus("Choose Auto Release Ranks first.\n" .. msg)
+    if selectedRanks == 0 or selectedSizes == 0 then
+        updateReleaseStatus("Select BOTH Auto Release Ranks and Sizes. No releases sent.\n" .. msg)
         return
     end
     if chosenId and now - releaseSession.lastGlobal >= 1.25 then
         releaseSession.lastGlobal = now
         local req = releaseSession.pending[chosenId]
         local ok, err = pcall(function()
-            -- Identical to the Army UI's release confirmation action.
+            -- Same request used by the game's Army UI; size/rank filters
+            -- are enforced locally before the request is sent.
             ShadowManage:FireServer("Release", chosenId, nil)
         end)
         if ok then
             releaseSession.pending[chosenId] = {
                 sentAt = now, count = (req and req.count or 0) + 1
             }
-            releaseSession.requests = releaseSession.requests + 1
-            msg = msg .. "\nSent release for ID " .. tostring(chosenId) .. " (not yet confirmed)"
+            releaseSession.requests += 1
+            msg = msg .. "\nRequested release for matching shadow ID " .. tostring(chosenId)
         else
             msg = msg .. "\nRemote error: " .. tostring(err)
-            warn("[Arise v14] Release request:", err)
+            warn("[Arise v34] Release request:", err)
         end
     elseif eligible == 0 then
-        msg = msg .. "\nNo eligible owned shadows of the selected ranks."
+        msg = msg .. "\nNo unprotected shadows match BOTH selected filters."
     end
     updateReleaseStatus(msg)
 end
