@@ -1,6 +1,6 @@
 --[[
     HollowMoonHub | Attack on Titan: Revolution (Outskirts)
-    Combat v85: slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    Combat v87: pre-cached fast GitHub Auto Execute; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -3807,6 +3807,10 @@ local SESSION_DEFAULT = {
     lastRewardJob = "",
     rewardLatched = false,
     retryLatched = false,
+    webhookLastSentKey = "", -- never send the same completed match twice across script reloads
+    webhookWaveJob = "",
+    webhookWaveSequence = 0,
+    webhookWaveFinalised = false,
 }
 
 local function loadSession()
@@ -4031,10 +4035,21 @@ local function handleResultScreen()
         Farm.retryThisReward = false
         saveSession()
         print("[HollowMoonHub] Completed matches: " .. Farm.session.matches)
+        -- Send before Auto Retry / Leave changes the result screen.
+        if game.PlaceId ~= 14012874501 and type(Farm.onMatchComplete) == "function" then
+            -- Trost reports its own definitive Waves.Finalised transition.
+            Farm.onMatchComplete(job .. ":" .. tostring(Farm.session.matches))
+        end
     elseif Farm.session.retryLatched then
         Farm.retryThisReward = true
     end
     Farm.rewardVisibleLast = true
+    -- Give a pending webhook a bounded time to finish before teleport/retry
+    -- replaces the results UI. Never hold gameplay indefinitely if HTTP fails.
+    if Farm.Webhook and Farm.Webhook.sending
+        and os.clock() - (Farm.Webhook.sendingSince or 0) < 9 then
+        return
+    end
     -- Leave takes precedence over a retry on a result screen.
     if checkAutoLeave() then return end
     if canRetry then tryAutoRetry() end
@@ -4316,10 +4331,10 @@ end
 -- Settings helpers (all optional; executor / Roblox API support varies).
 local TeleportService = game:GetService("TeleportService")
 local AUTOEXEC_FOLDER = "HollowMoonHub"
--- Hosted script; upload THIS complete v84 file to that GitHub path before enabling.
 local AUTOEXEC_URL = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
--- Retain the original enabled file and UI flag for compatibility with v83 saves.
+-- Reuse the old toggle marker and Rayfield flag, so existing saves keep working.
 local AUTOEXEC_FLAG_FILE = AUTOEXEC_FOLDER .. "/AOT_Revolution_v44_enabled.txt"
+local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source.lua"
 local function fileOpsReady()
     return type(writefile) == "function" and type(readfile) == "function"
         and type(makefolder) == "function" and type(isfolder) == "function"
@@ -4336,9 +4351,51 @@ local function queueFunction()
         or (type(ENV.queue_on_teleport) == "function" and ENV.queue_on_teleport)
         or (type(synObj) == "table" and type(synObj.queue_on_teleport) == "function" and synObj.queue_on_teleport)
 end
+
+-- v87: download and validate the current GitHub script WHILE in the present place.
+-- The next teleport can execute it from an executor-local file immediately,
+-- without waiting for a fresh network request. Runs asynchronously.
+Farm.autoExecCacheBusy = false
+Farm.autoExecCacheStatus = "Not prepared"
+Farm.refreshAutoExecCache = function()
+    if Farm.unloaded or not Farm.autoExecute or Farm.autoExecCacheBusy then return end
+    if not ensureAutoFolder() then return end
+    Farm.autoExecCacheBusy = true
+    task.spawn(function()
+        local ok, src = pcall(function() return game:HttpGet(AUTOEXEC_URL) end)
+        if not Farm.autoExecute or Farm.unloaded then
+            Farm.autoExecCacheBusy = false
+            return
+        end
+        if not ok or type(src) ~= "string" or #src < 10000
+            or not src:find("HollowMoonAOTOutskirts", 1, true) then
+            Farm.autoExecCacheStatus = "GitHub source unavailable or not HollowMoonHub AOT"
+            warn("[HollowMoonHub] Auto Execute cache: " .. Farm.autoExecCacheStatus)
+            Farm.autoExecCacheBusy = false
+            return
+        end
+        local compiledOk, fn = pcall(loadstring, src)
+        if not compiledOk or type(fn) ~= "function" then
+            Farm.autoExecCacheStatus = "GitHub script did not compile"
+            warn("[HollowMoonHub] Auto Execute cache: " .. Farm.autoExecCacheStatus)
+            Farm.autoExecCacheBusy = false
+            return
+        end
+        local wrote = pcall(writefile, AUTOEXEC_CACHE_FILE, src)
+        local readOk, verify = pcall(readfile, AUTOEXEC_CACHE_FILE)
+        if wrote and readOk and verify == src then
+            Farm.autoExecCacheStatus = "Cached: ready for fast teleport"
+            print("[HollowMoonHub] Auto Execute prefetched; next teleport uses local cache")
+        else
+            Farm.autoExecCacheStatus = "Cache write failed; GitHub fallback remains available"
+            warn("[HollowMoonHub] " .. Farm.autoExecCacheStatus)
+        end
+        Farm.autoExecCacheBusy = false
+    end)
+end
+
 local function syncAutoExecute()
-    -- A tiny local ON/OFF marker allows a queued loader to be disabled even
-    -- after queue_on_teleport has been called. The full code is never cached.
+    -- The flag remains cancelable even after the executor has queued the loader.
     if not ensureAutoFolder() then
         if Farm.autoExecute then
             warn("[HollowMoonHub] Auto Execute requires executor file APIs to keep the toggle cancelable")
@@ -4352,6 +4409,9 @@ local function syncAutoExecute()
     end
     if not Farm.autoExecute then return end
 
+    -- Warm the cache without holding up the current script or the Settings UI.
+    Farm.refreshAutoExecCache()
+
     local queue = queueFunction()
     if not queue then
         warn("[HollowMoonHub] Auto Execute requires queue_on_teleport support")
@@ -4359,38 +4419,67 @@ local function syncAutoExecute()
     end
     if Farm.queuedAutoExecute then return end
 
-    -- This runs only AFTER a teleport. It fetches the current GitHub version
-    -- each time, rather than executing a stale, embedded copy of the script.
-    local queued = string.format([[
+    -- The queued bootstrap is tiny. Fast path: read cached source on the new
+    -- server. Fallback: fetch latest from GitHub if no valid cache exists.
+    -- It never runs if the original toggle was turned off.
+    local queued = string.format([==[
 task.spawn(function()
-    local okFlag, flag = pcall(function() return readfile(%q) end)
-    if not okFlag or flag ~= "1" then return end
+    local function enabled()
+        if type(readfile) ~= "function" then return false end
+        local ok, flag = pcall(readfile, %q)
+        return ok and flag == "1"
+    end
+    if not enabled() then return end
     if type(loadstring) ~= "function" then
-        warn("[HollowMoonHub] Auto Execute needs loadstring support")
+        warn("[HollowMoonHub] Auto Execute requires loadstring")
         return
     end
-    local okHttp, code = pcall(function() return game:HttpGet(%q) end)
-    if not okHttp or type(code) ~= "string" or code == "" then
-        warn("[HollowMoonHub] GitHub script download failed: " .. tostring(code))
+    local function tryRun(src, origin)
+        if type(src) ~= "string" or #src < 10000
+            or not src:find("HollowMoonAOTOutskirts", 1, true) then
+            return false
+        end
+        local okCompile, fn = pcall(loadstring, src)
+        if not okCompile or type(fn) ~= "function" then
+            warn("[HollowMoonHub] " .. origin .. " source failed to compile")
+            return false
+        end
+        if not enabled() then return true end
+        print("[HollowMoonHub] Auto Execute starting from " .. origin)
+        local okRun, runErr = pcall(fn)
+        if not okRun then
+            warn("[HollowMoonHub] Auto Execute error (" .. origin .. "): " .. tostring(runErr))
+        end
+        -- Never start a second script after a partially completed execution.
+        return true
+    end
+    local okLocal, cached = pcall(readfile, %q)
+    if okLocal and tryRun(cached, "local cache") then return end
+    if not enabled() then return end
+    local okHttp, remote = pcall(function() return game:HttpGet(%q) end)
+    if not okHttp or type(remote) ~= "string" or remote == "" then
+        warn("[HollowMoonHub] Auto Execute GitHub fallback failed: " .. tostring(remote))
         return
     end
-    local compiled, compileErr = loadstring(code)
-    if not compiled then
-        warn("[HollowMoonHub] GitHub script compile failed: " .. tostring(compileErr))
-        return
+    -- Store a working remote copy for the next teleport too.
+    if type(remote) == "string" and #remote > 10000
+        and remote:find("HollowMoonAOTOutskirts", 1, true) then
+        local okSyntax, fn = pcall(loadstring, remote)
+        if okSyntax and type(fn) == "function" and type(writefile) == "function" then
+            pcall(writefile, %q, remote)
+        end
     end
-    local okRun, runErr = pcall(compiled)
-    if not okRun then
-        warn("[HollowMoonHub] GitHub script execution failed: " .. tostring(runErr))
+    if not tryRun(remote, "GitHub fallback") then
+        warn("[HollowMoonHub] Auto Execute GitHub content is not a valid AOT script")
     end
 end)
-]], AUTOEXEC_FLAG_FILE, AUTOEXEC_URL)
+]==], AUTOEXEC_FLAG_FILE, AUTOEXEC_CACHE_FILE, AUTOEXEC_URL, AUTOEXEC_CACHE_FILE)
     local ok, errQueue = pcall(queue, queued)
     if ok then
         Farm.queuedAutoExecute = true
-        print("[HollowMoonHub] GitHub Auto Execute queued for next teleport")
+        print("[HollowMoonHub] Fast Auto Execute queued for next teleport")
     else
-        warn("[HollowMoonHub] GitHub Auto Execute queue failed: " .. tostring(errQueue))
+        warn("[HollowMoonHub] Fast Auto Execute queue failed: " .. tostring(errQueue))
     end
 end
 
@@ -6348,7 +6437,12 @@ end
         if not active then
             W.breakToken=nil
             local f=folder()
-            if f and f:GetAttribute("Finalised")~=nil then waveLeaveTask();return end
+            if f and f:GetAttribute("Finalised")~=nil then
+                local busyWebhook=Farm.Webhook and Farm.Webhook.sending
+                    and os.clock()-(Farm.Webhook.sendingSince or 0)<9
+                if not busyWebhook then waveLeaveTask() end
+                return
+            end
             -- Outside the Skip break, only the emergency blade-supply shortage
             -- may leave combat. Its own worker handles returning to the farm.
             emergencyRefillTask()
@@ -6550,7 +6644,14 @@ end
         W.jobElapsed=(W.jobElapsed or 0)+dt
         if W.leaveElapsed>=0.35 then
             W.leaveElapsed=W.leaveElapsed%0.35
-            waveLeaveTask()
+            if game.PlaceId==TROST and type(Farm.onWavesMatchComplete)=="function" then
+                Farm.onWavesMatchComplete()
+            end
+            local liveWaves=folder()
+            local final=liveWaves and liveWaves:GetAttribute("Finalised")~=nil
+            local busyWebhook=Farm.Webhook and Farm.Webhook.sending
+                and os.clock()-(Farm.Webhook.sendingSince or 0)<9
+            if not (final and busyWebhook) then waveLeaveTask() end
         end
         W.statusElapsed=(W.statusElapsed or 0)+dt
         if W.voteElapsed>=0.2 then
@@ -6579,7 +6680,7 @@ end
         end
     end)
     if game.PlaceId==TROST then startUtilityWatcher() end
-    print(prefix.."v82 Waves auto-leave and hidden blade guard ready; Trost "..TROST)
+    print(prefix.."v86 Waves webhook / auto-leave ready; Trost "..TROST)
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
@@ -6607,6 +6708,364 @@ settingsTab:CreateToggle({
 
 -- Rayfield Gen2 adds a built-in Configurations section when autoSave is enabled.
 -- Use it for named profiles; these buttons are just one-click current-config helpers.
+-- v86: Match-result webhook. Scoped here to stay under Luau's 200-local limit.
+-- The Discord webhook token is a PRIVATE local file, never baked into this
+-- script, Rayfield's saved flags, the GitHub loader, or the ordinary backups.
+Farm.initializeMatchWebhook = function()
+    local PRIVATE_FILE = "HollowMoon_AOT_Webhook_private.json"
+    local prefix = "[HollowMoonHub Webhook] "
+    local hook = {
+        url = "", enabled = false, sending = false, sendingSince = -100,
+        pendingKey = nil, sentThisRun = {}, status = "Webhook not configured",
+    }
+    Farm.Webhook = hook
+
+    local function isValidWebhook(url)
+        return type(url) == "string"
+            and #url < 350
+            and url:match("^https://discord%.com/api/webhooks/%d+/[%w_%-%?=&]+$") ~= nil
+    end
+
+    local function savePrivateUrl()
+        if type(writefile) ~= "function" or type(readfile) ~= "function" then
+            return false, "Local readfile/writefile unavailable; URL lasts until this script stops"
+        end
+        local json = HttpService:JSONEncode({url = hook.url})
+        local ok, err = pcall(writefile, PRIVATE_FILE, json)
+        if not ok then return false, "Could not save private webhook file" end
+        local readOk, saved = pcall(readfile, PRIVATE_FILE)
+        if not readOk or saved ~= json then
+            return false, "Private file verification failed"
+        end
+        return true, "Saved locally"
+    end
+
+    if type(readfile) == "function" then
+        local readOk, raw = pcall(readfile, PRIVATE_FILE)
+        if readOk and type(raw) == "string" and #raw < 2000 then
+            local parsedOk, data = pcall(function() return HttpService:JSONDecode(raw) end)
+            if parsedOk and type(data) == "table" and isValidWebhook(data.url) then
+                hook.url = data.url
+            end
+        end
+    end
+    hook.status = hook.url ~= "" and "Configured (local file)" or "Not configured"
+
+    local statusHandle
+    local function setStatus(message)
+        hook.status = tostring(message)
+        if statusHandle then
+            pcall(function() statusHandle:Set(hook.status) end)
+        end
+    end
+    local function clean(value, maxLength)
+        value = tostring(value or "")
+        value = value:gsub("[%c]", " "):gsub("`", "'"):gsub("@", "＠")
+        value = value:gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+        return value:sub(1, maxLength or 120)
+    end
+    local function formattedNumber(value)
+        local number = tonumber(value)
+        if not number then return nil end
+        local str = tostring(math.floor(number + 0.5))
+        local sign = ""
+        if str:sub(1,1) == "-" then sign, str = "-", str:sub(2) end
+        str = str:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+        return sign .. str
+    end
+    local function getStat(names)
+        local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+        for _, name in ipairs(names) do
+            local value = LocalPlayer:GetAttribute(name)
+            if typeof(value) == "number" then return value end
+            local node = leaderstats and leaderstats:FindFirstChild(name)
+            if node and (node:IsA("IntValue") or node:IsA("NumberValue")) then
+                return node.Value
+            end
+        end
+        return nil
+    end
+    local function addNumberLine(out, label, names)
+        local n = getStat(names)
+        if n ~= nil then
+            out[#out+1] = label .. ": " .. formattedNumber(n)
+        end
+    end
+    local function getRewardsPanel()
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not pg then return nil end
+        for _, node in ipairs(pg:GetDescendants()) do
+            if node.Name == "Rewards" and node:IsA("GuiObject") then
+                local buttons = node:FindFirstChild("Buttons", true)
+                local leave = buttons and buttons:FindFirstChild("Leave_2")
+                if leave and isGuiVisibleThroughParents(leave, pg) then
+                    return node
+                end
+            end
+        end
+        return nil
+    end
+    local function collectRewardLines()
+        local ordinary, special, seen = {}, {}, {}
+        local panel = getRewardsPanel()
+        if not panel then return ordinary, special end
+        for _, node in ipairs(panel:GetDescendants()) do
+            if (node:IsA("TextLabel") or node:IsA("TextButton"))
+                and isGuiVisibleThroughParents(node, panel) then
+                local value = clean(node.Text, 110)
+                local lower = value:lower()
+                local isAction = lower == "retry" or lower == "leave"
+                    or lower == "continue" or lower == "close" or lower == "next"
+                if value ~= "" and not isAction and not seen[value]
+                    and (#ordinary + #special) < 24 then
+                    -- Only share reward-like labels from the RESULTS PANEL.
+                    -- Avoid accidentally sending arbitrary GUI/chat content.
+                    local hasAmount = value:find("%+[%d,]+")
+                        or value:find("[%d,]+%s*[xX]")
+                        or value:find("[xX]%s*[%d,]+")
+                    local hasRewardKeyword = lower:find("reward",1,true)
+                        or lower:find("coin",1,true) or lower:find("gold",1,true)
+                        or lower:find("gem",1,true) or lower:find("xp",1,true)
+                        or lower:find("exp",1,true) or lower:find("drop",1,true)
+                        or lower:find("essence",1,true)
+                    if hasAmount or (hasRewardKeyword and #value > 7) then
+                        seen[value] = true
+                        local isOrdinary = lower:find("coin",1,true)
+                            or lower:find("gold",1,true) or lower:find("gem",1,true)
+                            or lower:find("xp",1,true) or lower:find("exp",1,true)
+                        if isOrdinary then
+                            if #ordinary < 12 then ordinary[#ordinary+1] = value end
+                        elseif #special < 12 then
+                            special[#special+1] = value
+                        end
+                    end
+                end
+            end
+        end
+        return ordinary, special
+    end
+    local function formatField(lines)
+        if #lines == 0 then return "`Not available from game results`" end
+        local raw = table.concat(lines, "\n")
+        if #raw > 990 then raw = raw:sub(1, 985) .. "..." end
+        return "```\n" .. raw .. "\n```"
+    end
+    local function buildEmbed(testMode)
+        local total = {"Matches: " .. tostring(Farm.session and Farm.session.matches or 0)}
+        addNumberLine(total, "Level", {"Level", "level"})
+        addNumberLine(total, "Coins", {"Coins", "coins"})
+        addNumberLine(total, "Gems", {"Gems", "gems"})
+        addNumberLine(total, "Rolls", {"Rolls", "rolls"})
+        addNumberLine(total, "Trait Rerolls", {"Trait_Rerolls", "TraitRerolls"})
+        addNumberLine(total, "Wins", {"Wins", "wins"})
+        addNumberLine(total, "Kills", {"Kills", "kills", "Titans_Killed"})
+        addNumberLine(total, "Boss DMG", {"Boss_Damage", "BossDamage", "BossDMG"})
+        if Farm.Waves and type(Farm.Waves.gold) == "number" then
+            total[#total+1] = "Gold (current): " .. formattedNumber(Farm.Waves.gold)
+        end
+
+        local mode, map = "Missions", "Outskirts"
+        if game.PlaceId == 14012874501 then
+            mode, map = "Waves", "Trost"
+        elseif game.PlaceId == 14916516914 then
+            mode, map = "Lobby", "Town Central"
+        else
+            mode = clean(Farm.lobbyMode or "Missions", 40)
+            map = clean(Farm.lobbyMap or "Unknown", 40)
+        end
+        local info = {"Mode: " .. mode, "Map: " .. map}
+        local difficulty = Workspace:GetAttribute("Difficulty")
+        if difficulty ~= nil then
+            info[#info+1] = "Difficulty: " .. clean(difficulty, 40)
+        end
+        if game.PlaceId == 14012874501 then
+            local f = Workspace:FindFirstChild("Waves")
+            local wave = (f and f:GetAttribute("Wave")) or Workspace:GetAttribute("Wave")
+            if wave ~= nil then info[#info+1] = "Wave: " .. clean(wave, 20) end
+        end
+        local elapsed, source = getMatchElapsed()
+        if type(elapsed) == "number" and elapsed >= 1 then
+            local approx = (source and source:lower():find("local",1,true)) and "~" or ""
+            info[#info+1] = "Time: " .. approx .. formatTime(elapsed)
+        end
+        local wins = getStat({"Win", "Victory"})
+        if wins ~= nil then info[#info+1] = "Victories: " .. formattedNumber(wins) end
+        local ordinary, special = collectRewardLines()
+        if testMode then
+            info[#info+1] = "Type: Test message"
+            ordinary = {"No rewards claimed (test only)"}
+            special = {"No special rewards claimed (test only)"}
+        end
+        local username = clean(LocalPlayer.Name, 64)
+        local fields = {
+            {name="Total Stats",value=formatField(total),inline=true},
+            {name="Info",value=formatField(info),inline=true},
+            {name="User",value=formatField({username}),inline=true},
+            {name="Rewards",value=formatField(ordinary),inline=true},
+            {name="Special Rewards",value=formatField(special),inline=true},
+        }
+        return {
+            title = testMode and "HollowMoonHub • Webhook Test"
+                or "✅ Attack on Titan • Match Complete",
+            color = testMode and 0x5865F2 or 0x57F287,
+            fields = fields,
+            footer = {text="HollowMoonHub • Match Tracker"},
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
+        }
+    end
+    local function requestFunction()
+        if type(request) == "function" then return request end
+        if type(http_request) == "function" then return http_request end
+        if type(ENV.request) == "function" then return ENV.request end
+        if type(ENV.http_request) == "function" then return ENV.http_request end
+        if type(syn) == "table" and type(syn.request) == "function" then return syn.request end
+        if type(http) == "table" and type(http.request) == "function" then return http.request end
+        return nil
+    end
+    local function postEmbed(embed)
+        if not isValidWebhook(hook.url) then return false, "Invalid or missing Discord webhook URL" end
+        local send = requestFunction()
+        if not send then return false, "HTTP request API unavailable in this executor" end
+        local body = HttpService:JSONEncode({
+            username = "HollowMoonHub • Match Tracker",
+            allowed_mentions = {parse={}},
+            embeds = {embed},
+        })
+        local ok, response = pcall(send, {
+            Url=hook.url,Method="POST",Headers={["Content-Type"]="application/json"},
+            Body=body,Timeout=8,
+        })
+        if not ok then return false, "HTTP request failed" end
+        local status = type(response)=="table"
+            and tonumber(response.StatusCode or response.Status or response.status_code)
+            or nil
+        if status == 200 or status == 204 then return true, "Delivered" end
+        if status == 429 then return false, "Discord rate limit (429)" end
+        return false, "Discord HTTP " .. tostring(status or "no status")
+    end
+    local function sendWithRetry(embed, key)
+        if hook.sending then return end
+        hook.sending, hook.sendingSince, hook.pendingKey = true, os.clock(), key
+        task.spawn(function()
+            local sent, reason = false, "Not attempted"
+            for attempt=1,3 do
+                if Farm.unloaded or (key and not hook.enabled) then break end
+                if not isValidWebhook(hook.url) then reason="Webhook not configured"; break end
+                sent, reason = postEmbed(embed)
+                if sent then break end
+                if attempt < 3 then task.wait(attempt * 1.2) end
+            end
+            if sent then
+                if key and Farm.session then
+                    hook.sentThisRun[key] = true
+                    Farm.session.webhookLastSentKey = key
+                    saveSession()
+                end
+                print(prefix .. (key and "Match result delivered" or "Test message delivered"))
+                setStatus(key and "Last match delivered" or "Test delivered")
+            else
+                warn(prefix .. "Not sent: " .. tostring(reason))
+                setStatus("Not sent: " .. tostring(reason))
+            end
+            hook.sending, hook.pendingKey = false, nil
+        end)
+    end
+
+    Farm.onMatchComplete = function(key)
+        if not hook.enabled or hook.url == "" or Farm.unloaded then return end
+        if hook.sending or hook.sentThisRun[key]
+            or (Farm.session and Farm.session.webhookLastSentKey == key) then return end
+        -- Capture now, before the Results panel is replaced by Retry/Leave.
+        local snapshot = buildEmbed(false)
+        sendWithRetry(snapshot, key)
+    end
+
+    -- Trost can finish without the normal Missions Rewards/Leave_2 panel.
+    -- Observe the replicated Finalised transition before auto-leaving.
+    Farm.onWavesMatchComplete = function()
+        if Farm.unloaded or game.PlaceId ~= 14012874501 or not Farm.session then return end
+        local f = Workspace:FindFirstChild("Waves")
+        if not f then return end
+        local job = tostring(game.JobId)
+        if Farm.session.webhookWaveJob ~= job then
+            Farm.session.webhookWaveJob = job
+            Farm.session.webhookWaveSequence = 0
+            Farm.session.webhookWaveFinalised = false
+        end
+        if f:GetAttribute("Finalised") == nil then
+            hook.lastWaveKey = nil
+            if Farm.session.webhookWaveFinalised then
+                Farm.session.webhookWaveFinalised = false
+                saveSession()
+            end
+            return
+        end
+        local sequence = Farm.session.webhookWaveSequence or 0
+        local key = job .. ":waves:" .. tostring(sequence)
+        if Farm.session.webhookWaveFinalised then
+            hook.lastWaveKey = key
+            return
+        end
+        sequence = sequence + 1
+        Farm.session.webhookWaveSequence = sequence
+        Farm.session.webhookWaveFinalised = true
+        hook.lastWaveKey = job .. ":waves:" .. tostring(sequence)
+        saveSession()
+        Farm.onMatchComplete(hook.lastWaveKey)
+    end
+
+    settingsTab:CreateSection({name="Webhook"})
+    settingsTab:CreateToggle({
+        name="Auto Send Match Results",value=false,flag="WebhookAutoSendV86",
+        callback=function(enabled)
+            hook.enabled = enabled == true
+            setStatus(hook.enabled and (hook.url ~= "" and "Ready for match results" or "Add a webhook URL") or "Auto send off")
+        end,
+    })
+    settingsTab:CreateInput({
+        name="Discord Webhook URL",value="",placeholder="Paste URL (stored locally)",
+        flag="WebhookUrlPrivateV86",forgetState=true,
+        callback=function(value)
+            value = tostring(value or ""):match("^%s*(.-)%s*$") or ""
+            if value == "" then return end -- blank input doesn't erase existing secret
+            if not isValidWebhook(value) then
+                setStatus("Invalid URL - use a Discord webhook URL")
+                return
+            end
+            hook.url = value
+            local ok, detail = savePrivateUrl()
+            setStatus(ok and "Webhook URL saved locally" or detail)
+        end,
+    })
+    statusHandle = settingsTab:CreateText({
+        name="Match Webhook",text=hook.status,
+    })
+    settingsTab:CreateButton({
+        name="Send Test Webhook",callback=function()
+            if hook.sending then return end
+            if not isValidWebhook(hook.url) then
+                setStatus("Paste a valid webhook URL first")
+                return
+            end
+            sendWithRetry(buildEmbed(true), nil)
+        end,
+    })
+    settingsTab:CreateButton({
+        name="Clear Saved Webhook",callback=function()
+            hook.url = ""
+            if type(delfile) == "function" then
+                pcall(delfile, PRIVATE_FILE)
+            elseif type(writefile) == "function" then
+                pcall(writefile, PRIVATE_FILE, HttpService:JSONEncode({url=""}))
+            end
+            setStatus("Webhook URL cleared locally")
+        end,
+    })
+    print(prefix .. "Match tracker initialized; URL kept out of GitHub source and settings backup")
+end
+Farm.initializeMatchWebhook()
+Farm.initializeMatchWebhook = nil
+
 settingsTab:CreateSection({ name = "Profiles" })
 settingsTab:CreateButton({
     name = "Save Settings Now",
@@ -6664,6 +7123,7 @@ local ALL_SETTING_FLAGS = {
     "KillLastTitanAt", "KillLastTitanAtTime", "AutoReloadBlades",
     "AutoRefillBlades", "AutoRetry", "AutoLeaveMode", "AutoLeaveValue",
     "AutoLeave", "AntiAFKV44", "AutoReconnectV44", "AutoExecuteV44",
+    "WebhookAutoSendV86",
 }
 -- Restore dependencies first; enable potentially active automation last.
 local RESTORE_FIRST = {
@@ -6683,6 +7143,7 @@ local RESTORE_FIRST = {
     "WavesChoiceArtifactsV76", "WavesAutoBuyArtifactsV73",
     "WavesChoiceMemoriesV76", "WavesAutoBuyMemoriesV73",
     "WavesChoiceShiftingV76", "WavesAutoBuyShiftingV73",
+    "WebhookAutoSendV86",
 }
 local SETTINGS_BACKUP_PATH = PREFERENCES_FILE
 local inPreferencesRestore = false
