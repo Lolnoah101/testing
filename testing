@@ -1,6 +1,6 @@
 --[[
     HollowMoonHub | Attack on Titan: Revolution (Outskirts)
-    Combat v87: pre-cached fast GitHub Auto Execute; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    Combat v89: mobile fast resume + delayed, verified webhook reward extraction; retains v87 pre-cached fast GitHub Auto Execute; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -2864,6 +2864,74 @@ local function stopUtilityWatcherIfIdle()
     end
 end
 
+-- v88 Mobile Fast Resume: on Delta/phone the Gen2 UI download and creation can
+-- take several seconds AFTER Auto Execute starts. Restore a minimal snapshot
+-- of saved combat / survival flags BEFORE any UI work or extra HTTP fetch.
+-- No new UI is created here. The UI later remains the source of truth.
+Farm.fastResumePendingUI = false
+Farm.fastResumeFlags = {}
+Farm.fastResumeStatus = "No startup recovery needed"
+Farm.fastResumeFromSaved = function()
+    local prefs = savedPreferences
+    if type(prefs) ~= "table" then
+        Farm.fastResumeStatus = "No verified local settings backup"
+        return
+    end
+    -- Never start farming in Town Central or unrelated places.
+    if game.PlaceId ~= 13904207646 and game.PlaceId ~= 14012874501 then
+        Farm.fastResumeStatus = "Lobby / unsupported place: no early farming"
+        return
+    end
+    Farm.fastResumePendingUI = true
+    Farm.fastResumeFlags = {
+        AutoFarm = prefs.AutoFarm == true,
+        KillAura = prefs.KillAura == true,
+        AutoReloadBlades = prefs.AutoReloadBlades == true,
+        AutoRefillBlades = prefs.AutoRefillBlades == true,
+        CombatAutoSkillsV46 = prefs.CombatAutoSkillsV46 == true,
+    }
+    Farm.momentumTargetSpeed = math.clamp(tonumber(prefs.MomentumTravelSpeed) or 400,80,2000)
+    Farm.momentumOrbitWidth = math.clamp(tonumber(prefs.MomentumOrbitWidthV69) or 100,25,100)
+    if type(prefs.CombatSkillSlotsV46) == "table" then
+        local slots, seen = {}, {}
+        local function addSlot(slot)
+            local n = tonumber(slot)
+            if n and n >= 1 and n <= 5 and n % 1 == 0 and not seen[n] then
+                seen[n] = true
+                slots[#slots+1] = tostring(n)
+            end
+        end
+        for _, slot in ipairs(prefs.CombatSkillSlotsV46) do addSlot(slot) end
+        for slot, selected in pairs(prefs.CombatSkillSlotsV46) do
+            if selected == true then addSlot(slot) end
+        end
+        if #slots > 0 then Farm.combatSkillSlots = slots end
+    end
+    Farm.utilityAutoReload = Farm.fastResumeFlags.AutoReloadBlades
+    Farm.utilityAutoRefill = Farm.fastResumeFlags.AutoRefillBlades
+    if Farm.utilityAutoReload or Farm.utilityAutoRefill then
+        Farm.utilityElapsed = UTILITY_TICK
+        startUtilityWatcher()
+    end
+    if Farm.fastResumeFlags.AutoFarm then Farm:Start() end
+    if Farm.fastResumeFlags.KillAura then Farm:StartAura() end
+    if Farm.fastResumeFlags.CombatAutoSkillsV46 then
+        Farm.autoCombatSkills = true
+        startOpWatcher()
+    end
+    Farm.fastResumeStatus = "Restored saved gameplay controls before Rayfield"
+    print("[HollowMoonHub] Mobile fast resume: gameplay restored before UI download")
+end
+do
+    local fastBootOk, fastBootErr = pcall(Farm.fastResumeFromSaved)
+    if not fastBootOk then
+        Farm.fastResumePendingUI = false
+        Farm.fastResumeStatus = "Fast resume skipped: " .. tostring(fastBootErr)
+        warn("[HollowMoonHub] " .. Farm.fastResumeStatus)
+    end
+end
+Farm.fastResumeFromSaved = nil
+
 -- ================================================================
 -- v37 session and lobby selection controls
 -- This place dump contains the mission result interactions, but not the
@@ -4046,8 +4114,9 @@ local function handleResultScreen()
     Farm.rewardVisibleLast = true
     -- Give a pending webhook a bounded time to finish before teleport/retry
     -- replaces the results UI. Never hold gameplay indefinitely if HTTP fails.
-    if Farm.Webhook and Farm.Webhook.sending
-        and os.clock() - (Farm.Webhook.sendingSince or 0) < 9 then
+    if Farm.Webhook and (
+        (Farm.Webhook.collecting and os.clock() - (Farm.Webhook.collectingSince or 0) < 6)
+        or (Farm.Webhook.sending and os.clock() - (Farm.Webhook.sendingSince or 0) < 9)) then
         return
     end
     -- Leave takes precedence over a retry on a result screen.
@@ -4914,6 +4983,8 @@ farmTab:CreateToggle({
     value = false,
     flag = "AutoFarm",
     callback = function(enabled)
+        -- Default false callbacks can fire before Gen2 finishes autoLoad.
+        if Farm.fastResumePendingUI and Farm.fastResumeFlags.AutoFarm and not enabled then return end
         if enabled then
             Farm:Start()
         else
@@ -4931,6 +5002,7 @@ farmTab:CreateToggle({
     value = false,
     flag = "KillAura",
     callback = function(enabled)
+        if Farm.fastResumePendingUI and Farm.fastResumeFlags.KillAura and not enabled then return end
         if enabled then
             Farm:StartAura()
         else
@@ -4968,6 +5040,7 @@ farmTab:CreateToggle({
     value = false,
     flag = "CombatAutoSkillsV46",
     callback = function(enabled)
+        if Farm.fastResumePendingUI and Farm.fastResumeFlags.CombatAutoSkillsV46 and not enabled then return end
         Farm.autoCombatSkills = enabled == true
         Farm.combatSkillLastMessage = Farm.autoCombatSkills and "Checking selected hotbar slots" or "Disabled"
         Farm.opLastAttempt = -100
@@ -5067,6 +5140,7 @@ Farm.bladeUiGroup:CreateGroup({direction="column"}):CreateToggle({
     value = false,
     flag = "AutoReloadBlades",
     callback = function(enabled)
+        if Farm.fastResumePendingUI and Farm.fastResumeFlags.AutoReloadBlades and not enabled then return end
         Farm.utilityAutoReload = enabled == true
         if enabled then
             Farm.utilityReloadBackoffUntil = 0
@@ -5096,6 +5170,7 @@ Farm.bladeUiGroup:CreateGroup({direction="column"}):CreateToggle({
     value = false,
     flag = "AutoRefillBlades",
     callback = function(enabled)
+        if Farm.fastResumePendingUI and Farm.fastResumeFlags.AutoRefillBlades and not enabled then return end
         Farm.utilityAutoRefill = enabled == true
         if enabled then
             startUtilityWatcher()
@@ -6438,8 +6513,9 @@ end
             W.breakToken=nil
             local f=folder()
             if f and f:GetAttribute("Finalised")~=nil then
-                local busyWebhook=Farm.Webhook and Farm.Webhook.sending
-                    and os.clock()-(Farm.Webhook.sendingSince or 0)<9
+                local busyWebhook=Farm.Webhook and (
+                    (Farm.Webhook.collecting and os.clock()-(Farm.Webhook.collectingSince or 0)<6)
+                    or (Farm.Webhook.sending and os.clock()-(Farm.Webhook.sendingSince or 0)<9))
                 if not busyWebhook then waveLeaveTask() end
                 return
             end
@@ -6649,8 +6725,9 @@ end
             end
             local liveWaves=folder()
             local final=liveWaves and liveWaves:GetAttribute("Finalised")~=nil
-            local busyWebhook=Farm.Webhook and Farm.Webhook.sending
-                and os.clock()-(Farm.Webhook.sendingSince or 0)<9
+            local busyWebhook=Farm.Webhook and (
+                (Farm.Webhook.collecting and os.clock()-(Farm.Webhook.collectingSince or 0)<6)
+                or (Farm.Webhook.sending and os.clock()-(Farm.Webhook.sendingSince or 0)<9))
             if not (final and busyWebhook) then waveLeaveTask() end
         end
         W.statusElapsed=(W.statusElapsed or 0)+dt
@@ -6717,6 +6794,7 @@ Farm.initializeMatchWebhook = function()
     local hook = {
         url = "", enabled = false, sending = false, sendingSince = -100,
         pendingKey = nil, sentThisRun = {}, status = "Webhook not configured",
+        collecting = false, collectingSince = -100,
     }
     Farm.Webhook = hook
 
@@ -6791,58 +6869,132 @@ Farm.initializeMatchWebhook = function()
             out[#out+1] = label .. ": " .. formattedNumber(n)
         end
     end
-    local function getRewardsPanel()
+    -- v89: Missions and Trost Waves don't necessarily share the same Rewards
+    -- panel, and reward labels often appear after the completion event. Only
+    -- inspect visible game results/reward containers (never arbitrary UI/chat).
+    local function rewardRoots()
         local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        if not pg then return nil end
+        local roots, seen = {}, {}
+        if not pg then return roots end
+        local names = {
+            rewards=true, reward=true, results=true, result=true,
+            matchresults=true, matchresult=true, waveresults=true,
+            waverewards=true, victory=true, victoryrewards=true,
+            loot=true, lootresults=true, drops=true, endresults=true,
+        }
         for _, node in ipairs(pg:GetDescendants()) do
-            if node.Name == "Rewards" and node:IsA("GuiObject") then
-                local buttons = node:FindFirstChild("Buttons", true)
-                local leave = buttons and buttons:FindFirstChild("Leave_2")
-                if leave and isGuiVisibleThroughParents(leave, pg) then
-                    return node
-                end
+            if node:IsA("GuiObject") and names[node.Name:lower()]
+                and isGuiVisibleThroughParents(node, pg) and not seen[node] then
+                -- Nested reward roots are harmless; values are de-duplicated.
+                seen[node] = true
+                roots[#roots+1] = node
+                if #roots >= 20 then break end
             end
         end
-        return nil
+        return roots, pg
     end
+
     local function collectRewardLines()
         local ordinary, special, seen = {}, {}, {}
-        local panel = getRewardsPanel()
-        if not panel then return ordinary, special end
-        for _, node in ipairs(panel:GetDescendants()) do
-            if (node:IsA("TextLabel") or node:IsA("TextButton"))
-                and isGuiVisibleThroughParents(node, panel) then
-                local value = clean(node.Text, 110)
-                local lower = value:lower()
-                local isAction = lower == "retry" or lower == "leave"
-                    or lower == "continue" or lower == "close" or lower == "next"
-                if value ~= "" and not isAction and not seen[value]
-                    and (#ordinary + #special) < 24 then
-                    -- Only share reward-like labels from the RESULTS PANEL.
-                    -- Avoid accidentally sending arbitrary GUI/chat content.
-                    local hasAmount = value:find("%+[%d,]+")
-                        or value:find("[%d,]+%s*[xX]")
-                        or value:find("[xX]%s*[%d,]+")
-                    local hasRewardKeyword = lower:find("reward",1,true)
-                        or lower:find("coin",1,true) or lower:find("gold",1,true)
-                        or lower:find("gem",1,true) or lower:find("xp",1,true)
-                        or lower:find("exp",1,true) or lower:find("drop",1,true)
-                        or lower:find("essence",1,true)
-                    if hasAmount or (hasRewardKeyword and #value > 7) then
-                        seen[value] = true
-                        local isOrdinary = lower:find("coin",1,true)
-                            or lower:find("gold",1,true) or lower:find("gem",1,true)
-                            or lower:find("xp",1,true) or lower:find("exp",1,true)
-                        if isOrdinary then
-                            if #ordinary < 12 then ordinary[#ordinary+1] = value end
-                        elseif #special < 12 then
-                            special[#special+1] = value
+        local roots, pg = rewardRoots()
+        local function ordinaryKind(value)
+            local low = value:lower()
+            return low:find("coin",1,true) or low:find("gold",1,true)
+                or low:find("gem",1,true) or low:find("xp",1,true)
+                or low:find("experience",1,true) or low:find("exp ",1,true)
+                or low:find("cash",1,true) or low:find("currency",1,true)
+                or low:find("money",1,true)
+        end
+        local function hasQuantity(value)
+            return value:find("%+%s*[%d,]+")
+                or value:find("[%d,]+%s*[xX]")
+                or value:find("[xX]%s*[%d,]+")
+                or value:find("[%d,]+%s*$")
+        end
+        local function addLine(value, origin, sourceRoot)
+            value = clean(value, 125)
+            local low = value:lower()
+            if value == "" or seen[value] or #ordinary + #special >= 24 then return end
+            if low == "rewards" or low == "special rewards" or low == "results"
+                or low == "reward" or low == "victory" or low == "continue"
+                or low == "leave" or low == "retry" or low == "close"
+                or low == "claim" or low == "claim all" or low == "next" then return end
+            if not hasQuantity(value) then return end
+            -- Results screens also show wave/time/kill statistics: don't mistake
+            -- those counters for rewards unless there is an explicit reward
+            -- quantity or the label belongs to a dedicated rewards container.
+            local strongQuantity = value:find("%+%s*[%d,]+")
+                or value:find("[xX]%s*[%d,]+")
+                or value:find("[%d,]+%s*[xX]")
+            local source = tostring(sourceRoot or ""):lower()
+            local rewardContainer = source:find("reward", 1, true)
+                or source:find("loot", 1, true)
+                or source:find("drop", 1, true)
+            local rewardLabel = ordinaryKind(value) or low:find("essence",1,true)
+                or low:find("shard",1,true) or low:find("material",1,true)
+                or low:find("drop",1,true) or low:find("reward",1,true)
+            if not strongQuantity and not rewardLabel and not rewardContainer then return end
+            -- A pure amount is only meaningful when the item is known from a
+            -- sibling/parent; no invented item names from unknown counters.
+            if value:match("^[%+%-]?[%d,%.]+$") then return end
+            seen[value] = true
+            if ordinaryKind(value) or (origin and ordinaryKind(origin)) then
+                if #ordinary < 12 then ordinary[#ordinary+1]=value end
+            elseif #special < 12 then special[#special+1]=value end
+        end
+        local function visibleText(node, container)
+            if not (node:IsA("TextLabel") or node:IsA("TextButton"))
+                or not isGuiVisibleThroughParents(node, container) then return "" end
+            -- Some result labels use RichText formatting.
+            return clean(tostring(node.Text or ""):gsub("<[^>]+>", ""), 110)
+        end
+        for _, root in ipairs(roots) do
+            local nodes = root:GetDescendants()
+            -- Include the root if it is itself a reward text label.
+            nodes[#nodes+1] = root
+            for _, node in ipairs(nodes) do
+                local value = visibleText(node, pg)
+                if value ~= "" then
+                    addLine(value, node.Name, root.Name)
+                    -- Game UIs often split item and amount into sibling labels.
+                    if value:match("^[%+%-]?[%d,%.]+$")
+                        or value:match("^[xX]%s*[%d,]+$") then
+                        local parent = node.Parent
+                        if parent then
+                            local label
+                            -- Avoid a scan of the whole GUI, only siblings.
+                            for _, other in ipairs(parent:GetChildren()) do
+                                if other ~= node then
+                                    local candidate=visibleText(other, pg)
+                                    if candidate ~= "" and not candidate:match("^[%+%-]?[%d,%.]+$")
+                                        and not candidate:match("^[xX]%s*[%d,]+$")
+                                        and candidate:lower() ~= "rewards" then
+                                        label=candidate
+                                        break
+                                    end
+                                end
+                            end
+                            if not label then
+                                local parentName = tostring(parent.Name)
+                                local generic = {Frame=true, Container=true,
+                                    Item=true, Reward=true, Row=true, Entry=true,
+                                    Label=true, Value=true, Amount=true, TextLabel=true}
+                                if not generic[parentName] and #parentName >= 3
+                                    and not parentName:match("^%d+$") then
+                                    label = parentName
+                                end
+                            end
+                            if label then
+                                local quantity = value
+                                if quantity:match("^[%d,]+$") then quantity = "+" .. quantity end
+                                addLine(label .. ": " .. quantity, parent.Name, root.Name)
+                            end
                         end
                     end
                 end
             end
         end
-        return ordinary, special
+        return ordinary, special, #roots
     end
     local function formatField(lines)
         if #lines == 0 then return "`Not available from game results`" end
@@ -6850,7 +7002,7 @@ Farm.initializeMatchWebhook = function()
         if #raw > 990 then raw = raw:sub(1, 985) .. "..." end
         return "```\n" .. raw .. "\n```"
     end
-    local function buildEmbed(testMode)
+    local function buildEmbed(testMode, rewardOrdinary, rewardSpecial)
         local total = {"Matches: " .. tostring(Farm.session and Farm.session.matches or 0)}
         addNumberLine(total, "Level", {"Level", "level"})
         addNumberLine(total, "Coins", {"Coins", "coins"})
@@ -6890,7 +7042,8 @@ Farm.initializeMatchWebhook = function()
         end
         local wins = getStat({"Win", "Victory"})
         if wins ~= nil then info[#info+1] = "Victories: " .. formattedNumber(wins) end
-        local ordinary, special = collectRewardLines()
+        local ordinary, special = rewardOrdinary, rewardSpecial
+        if not ordinary or not special then ordinary, special = collectRewardLines() end
         if testMode then
             info[#info+1] = "Type: Test message"
             ordinary = {"No rewards claimed (test only)"}
@@ -6973,11 +7126,47 @@ Farm.initializeMatchWebhook = function()
 
     Farm.onMatchComplete = function(key)
         if not hook.enabled or hook.url == "" or Farm.unloaded then return end
-        if hook.sending or hook.sentThisRun[key]
+        if hook.sending or hook.collecting or hook.sentThisRun[key]
             or (Farm.session and Farm.session.webhookLastSentKey == key) then return end
-        -- Capture now, before the Results panel is replaced by Retry/Leave.
-        local snapshot = buildEmbed(false)
-        sendWithRetry(snapshot, key)
+        hook.collecting = true
+        hook.collectingSince = os.clock()
+        hook.pendingKey = key
+        -- Delayed sampling: result UIs frequently populate reward entries 1-3
+        -- seconds AFTER the complete/finalised signal, especially on mobile.
+        task.spawn(function()
+            local bestOrdinary, bestSpecial = {}, {}
+            local bestCount, lastChange, rootsFound = 0, os.clock(), 0
+            local started = os.clock()
+            while os.clock() - started < 4.2 do
+                if Farm.unloaded or not hook.enabled then
+                    hook.collecting, hook.pendingKey = false, nil
+                    return
+                end
+                local ordinary, special, roots = collectRewardLines()
+                rootsFound = math.max(rootsFound, roots or 0)
+                local count = #ordinary + #special
+                if count > bestCount then
+                    bestCount = count
+                    bestOrdinary, bestSpecial = ordinary, special
+                    lastChange = os.clock()
+                end
+                if bestCount > 0 and os.clock() - lastChange >= 1.0
+                    and os.clock() - started >= 1.2 then break end
+                task.wait(0.3)
+            end
+            if Farm.unloaded or not hook.enabled then
+                hook.collecting, hook.pendingKey = false, nil
+                return
+            end
+            print(prefix .. string.format("Reward scan: %d normal, %d special; %d visible result panels",
+                #bestOrdinary, #bestSpecial, rootsFound))
+            if bestCount == 0 then
+                warn(prefix .. "No visible reward amounts found; server-only rewards cannot be inferred from the UI")
+            end
+            local embed = buildEmbed(false, bestOrdinary, bestSpecial)
+            hook.collecting = false
+            sendWithRetry(embed, key)
+        end)
     end
 
     -- Trost can finish without the normal Missions Rewards/Leave_2 panel.
@@ -7308,6 +7497,38 @@ end)
 end -- initializePreferences; its locals no longer occupy main-chunk registers
 Farm.initializePreferences()
 Farm.initializePreferences = nil
+
+-- v88: End the early-restore guard only after all Gen2 elements and
+-- saved flags are ready. The visible UI now decides whether a toggle is on.
+if Farm.fastResumePendingUI then
+    Farm.fastResumePendingUI = false
+    local function isEnabled(flag, fallback)
+        local ok, value = pcall(function() return window:Get(flag) end)
+        if ok and type(value)=="boolean" then return value end
+        return fallback == true
+    end
+    local wantFarm = isEnabled("AutoFarm", Farm.fastResumeFlags.AutoFarm)
+    local wantAura = isEnabled("KillAura", Farm.fastResumeFlags.KillAura)
+    if wantFarm and not Farm.running then Farm:Start() end
+    if not wantFarm and Farm.running then Farm:Stop() end
+    if wantAura and not Farm.auraEnabled then Farm:StartAura() end
+    if not wantAura and Farm.auraEnabled then Farm:StopAura() end
+    local wantReload = isEnabled("AutoReloadBlades", Farm.fastResumeFlags.AutoReloadBlades)
+    local wantRefill = isEnabled("AutoRefillBlades", Farm.fastResumeFlags.AutoRefillBlades)
+    Farm.utilityAutoReload = wantReload
+    Farm.utilityAutoRefill = wantRefill
+    if wantReload or wantRefill then startUtilityWatcher() else stopUtilityWatcherIfIdle() end
+    local wantSkills = isEnabled("CombatAutoSkillsV46", Farm.fastResumeFlags.CombatAutoSkillsV46)
+    if wantSkills and not Farm.autoCombatSkills then
+        Farm.autoCombatSkills=true
+        startOpWatcher()
+    elseif not wantSkills and Farm.autoCombatSkills then
+        Farm.autoCombatSkills=false
+        Farm.opRunId=Farm.opRunId+1
+        Farm.skillReservation=false
+    end
+    print("[HollowMoonHub] Mobile fast resume reconciled with loaded UI settings")
+end
 
 setupSettingsListeners()
 -- On re-execution after a teleport, refresh queue setup from the restored flag.
