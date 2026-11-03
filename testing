@@ -1,6 +1,6 @@
 --[[
     HollowMoonHub | Attack on Titan: Revolution (Outskirts)
-    Combat v84 UI: compact Gen2 layout + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    Combat v85: slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -227,6 +227,12 @@ local Farm = {
     utilityReloadPending = false, -- RemoteFunction may yield indefinitely
     utilityReloadPendingSince = 0,
     utilityReloadRequestSerial = 0,
+    utilityReloadBackoffUntil = 0,
+    utilityReloadMisses = 0,
+    utilityReloadLastNativeReason = "Not checked",
+    utilityReloadLastNativeReady = false,
+    utilityReloadLastBlockLogged = nil,
+    bladeRecoveryActive = false, -- hidden priority latch; does not add UI
     utilityRecoveredStalls = 0,
     attackSerial = 0,
     attackStartedAt = 0,
@@ -943,6 +949,24 @@ bridge.OnInvoke = function(command, payload)
         return false, "Character not ready"
     end
     local slash = host.Cache.Variables.Slash
+    -- This is the native combat Host's actual idle state. The outer
+    -- Farm.attacking flag often ends before Slash.Slashing/Transition does.
+    if command == "reload_window" then
+        local v = host.Cache.Variables
+        local reasons = {}
+        if host.Invoked then reasons[#reasons + 1] = "network action active" end
+        if host.Skill then reasons[#reasons + 1] = "skill active" end
+        if slash.Slashing or slash.Transition or slash.Holding then
+            reasons[#reasons + 1] = "slash animation active"
+        end
+        if v.Reload or v.Full_Reload then reasons[#reasons + 1] = "reload animation active" end
+        if v.Heavy and (v.Heavy.Hitting or v.Heavy.Transition) then
+            reasons[#reasons + 1] = "heavy attack active"
+        end
+        if v.Block then reasons[#reasons + 1] = "blocking" end
+        return #reasons == 0, #reasons == 0 and "native combat idle"
+            or table.concat(reasons, ", ")
+    end
     if command == "skill_window" then
         if host.Invoked or host.Skill or slash.Slashing or slash.Transition then
             return false, "Current slash/skill hasn't finished"
@@ -1423,7 +1447,7 @@ end
 
 local function tryAttack(runId, withAura)
     local now = os.clock()
-    if Farm.utilityBusy or Farm.attacking then return end
+    if Farm.utilityBusy or Farm.attacking or Farm.bladeRecoveryActive then return end
     -- Let ready skills start without fighting the repeating Kill Aura slash.
     if (Farm.skillPriorityUntil or 0) > now then return end
     -- Do not start a slash when our only valid target is protected.
@@ -1451,7 +1475,7 @@ local function tryAttack(runId, withAura)
             (withAura and Farm.auraEnabled) or
             (not withAura and Farm.running and Farm.runId == runId)
         )
-        if not allowed then return end
+        if not allowed or Farm.utilityBusy or Farm.bladeRecoveryActive then return end
 
         -- If a previous release failed, don't mistake an already-held slash
         -- for a fresh attack. Attempt normal release before starting again.
@@ -1555,7 +1579,8 @@ local function requestCombatSkill()
     -- One user-facing toggle: Auto Skills. Specials are detected from the hotbar.
     if not Farm.autoCombatSkills then return end
     if Farm.skillReservation or Farm.unloaded or Farm.attacking
-        or Farm.utilityBusy or Farm.waitingFreezeActive then return end
+        or Farm.utilityBusy or Farm.bladeRecoveryActive
+        or Farm.waitingFreezeActive then return end
     if not hasAuraTarget() then
         Farm.combatSkillLastMessage = "No available Titan target"
         return
@@ -1595,6 +1620,10 @@ local function requestCombatSkill()
         while not Farm.unloaded and os.clock() < Farm.skillReservationDeadline do
             if not Farm.autoCombatSkills then
                 result = "Auto Skills disabled"
+                break
+            end
+            if Farm.bladeRecoveryActive or Farm.utilityBusy then
+                result = "Blade recovery/utility action has priority"
                 break
             end
             -- Keep new slashes paused even if the Actor request yields.
@@ -1732,7 +1761,8 @@ function Farm:StartAura()
             or (Farm.auraMode == "Aggressive" and 0.06 or 0.12)
         if Farm.auraHeartbeatElapsed < tickInterval then return end
         Farm.auraHeartbeatElapsed = 0
-        if Farm.attacking or Farm.utilityBusy or Farm.skillReservation then return end
+        if Farm.attacking or Farm.utilityBusy or Farm.skillReservation
+            or Farm.bladeRecoveryActive then return end
         local now = os.clock()
         local gap = ATTACK_GAP
         if now >= Farm.auraBackoffUntil then
@@ -2447,94 +2477,152 @@ local function refreshPOST()
     return POST
 end
 
--- Broken blades must reserve a brief attack-free window. Previously a
--- Heartbeat tick during Turbo Kill Aura often returned because Farm.attacking
--- was true, starving reload indefinitely.
+-- Prefer the game's native Actor Host state over the outer attack flag.
+-- This readiness probe never changes game state or sends a reload request.
+local function nativeReloadWindow()
+    if Farm.attacking or Farm.attackHeld or Farm.skillReservation then
+        return false, "outer slash/skill still running"
+    end
+    if os.clock() < (Farm.skillPriorityUntil or 0) then
+        return false, "recent skill still settling"
+    end
+    local bridge, reason = resolveSlashBridge()
+    if not bridge then
+        -- In environments without Actor access, retain a conservative pause.
+        -- A failed fallback request is still verified against the blade rig.
+        local elapsed = os.clock() - (Farm.lastSlashAttempt or -100)
+        return elapsed > 2.2, "Actor state unavailable (" .. tostring(reason) .. ")"
+    end
+    local ok, ready, detail = pcall(function()
+        return bridge:Invoke("reload_window")
+    end)
+    if not ok then
+        return false, "Actor reload check failed: " .. tostring(ready)
+    end
+    return ready == true, tostring(detail or "unknown combat state")
+end
+
+-- Broken blades own a combat-free window until the game confirms recovery.
+-- This keeps Turbo Kill Aura and Auto Skills from jumping into the gaps
+-- between individual reload retries.
 -- HollowMoonWaveBladeGuardV82: the server may hold InvokeServer indefinitely.
 -- A watchdog releases ONLY the reload-owned busy flag; requests are still
 -- spaced apart so a stalled server response does not spam duplicate reloads.
 local function tryBladeReload()
     if Farm.utilityBusy or Farm.unloaded or not Farm.utilityAutoReload then return end
-    local now=os.clock()
+    local now = os.clock()
+    if now < (Farm.utilityReloadBackoffUntil or 0) then return end
     if Farm.utilityReloadPending then
         if now - Farm.utilityReloadPendingSince < 14 then return end
-        -- A dead RemoteFunction request cannot keep auto reload disabled forever.
-        Farm.utilityReloadRequestSerial=Farm.utilityReloadRequestSerial+1
-        Farm.utilityReloadPending=false
-        Farm.utilityRecoveredStalls=Farm.utilityRecoveredStalls+1
-        utilityLog("Blade reload server request stalled for 14s; allowing a fresh retry")
+        -- An old yielded RemoteFunction cannot claim a later worker's result.
+        Farm.utilityReloadRequestSerial = Farm.utilityReloadRequestSerial + 1
+        Farm.utilityReloadPending = false
+        Farm.utilityRecoveredStalls = Farm.utilityRecoveredStalls + 1
+        Farm.utilityReloadBackoffUntil = now + 1.5
+        utilityLog("Reload server request timed out; retrying after cooldown")
+        return
     end
     if now - Farm.utilityLastReload < BLADE_RELOAD_COOLDOWN then return end
-    Farm.utilityLastReload=now
-    Farm.utilityReloadAttempt=Farm.utilityReloadAttempt+1
-    local attempt=Farm.utilityReloadAttempt
-    Farm.utilityBusy=true
-    Farm.utilityBusyOwner="blade-reload"
-    Farm.utilityBusySince=now
+    Farm.utilityLastReload = now
+    Farm.utilityReloadAttempt = Farm.utilityReloadAttempt + 1
+    local attempt = Farm.utilityReloadAttempt
+    Farm.utilityBusy = true
+    Farm.utilityBusyOwner = "blade-reload"
+    Farm.utilityBusySince = now
+
     task.spawn(function()
-        local ok,err=pcall(function()
-            -- Let the in-progress swing finish; block NEW slashes meanwhile.
-            local deadline=os.clock()+2.2
-            while Farm.attacking and not Farm.unloaded and os.clock()<deadline do
-                task.wait(0.05)
+        local ok, err = pcall(function()
+            local deadline = os.clock() + 4.5
+            local quietSince = nil
+            local lastReason = "Not checked"
+            while not Farm.unloaded and Farm.utilityAutoReload
+                and os.clock() < deadline do
+                if Farm.utilityBusyOwner ~= "blade-reload"
+                    or Farm.utilityReloadAttempt ~= attempt then return end
+                if Farm.attackHeld and not Farm.attacking then
+                    -- Finish a slash the script previously started before reloading.
+                    setAttackHeld(false)
+                end
+                local ready, reason = nativeReloadWindow()
+                Farm.utilityReloadLastNativeReady = ready
+                Farm.utilityReloadLastNativeReason = reason
+                lastReason = reason
+                if ready then
+                    quietSince = quietSince or os.clock()
+                    if os.clock() - quietSince >= 0.2 then break end
+                else
+                    quietSince = nil
+                end
+                task.wait(0.1)
             end
             if Farm.unloaded or not Farm.utilityAutoReload then return end
-            if Farm.attacking then
-                utilityLog("Blade reload: current slash remains active; retrying automatically")
+            if Farm.utilityBusyOwner ~= "blade-reload"
+                or Farm.utilityReloadAttempt ~= attempt then return end
+            if not quietSince or os.clock() - quietSince < 0.2 then
+                Farm.utilityReloadBackoffUntil = os.clock() + 0.75
+                if Farm.utilityReloadLastBlockLogged ~= lastReason then
+                    Farm.utilityReloadLastBlockLogged = lastReason
+                    utilityLog("Reload waiting for " .. tostring(lastReason))
+                end
                 return
             end
-            if Farm.attackHeld then
-                setAttackHeld(false)
-                if Farm.attackHeld then
-                    utilityLog("Blade reload: slash release still pending; retrying")
+            Farm.utilityReloadLastBlockLogged = nil
+            local blades = inspectBlades()
+            if not blades or blades.working or blades.sparePairs < 1 then return end
+            local remote = refreshGET()
+            if not remote or not remote:IsA("RemoteFunction") then
+                Farm.utilityReloadBackoffUntil = os.clock() + 2
+                utilityLog("GET reload remote unavailable; retrying after cooldown")
+                return
+            end
+            Farm.utilityReloadRequestSerial = Farm.utilityReloadRequestSerial + 1
+            local serial = Farm.utilityReloadRequestSerial
+            Farm.utilityReloadPending = true
+            Farm.utilityReloadPendingSince = os.clock()
+            local accepted, response = pcall(function()
+                return remote:InvokeServer("Blades", "Reload")
+            end)
+            if serial ~= Farm.utilityReloadRequestSerial then return end
+            Farm.utilityReloadPending = false
+            if not accepted then
+                Farm.utilityReloadMisses = Farm.utilityReloadMisses + 1
+                Farm.utilityReloadBackoffUntil = os.clock() + 3
+                utilityLog("Reload request error; will retry: " .. tostring(response))
+                return
+            end
+            -- Nil return is inconclusive. Wait for actual equipped blades,
+            -- rather than treating successful pcall as successful reload.
+            local confirmDeadline = os.clock() + 1.25
+            repeat
+                if Farm.unloaded or not Farm.utilityAutoReload then return end
+                local after = inspectBlades()
+                if after and after.working then
+                    Farm.utilityReloadMisses = 0
+                    Farm.utilityReloadBackoffUntil = 0
+                    Farm.utilityReloadLastBlockLogged = nil
+                    utilityLog("Blades reloaded; " .. tostring(after.sparePairs) .. " spare pairs remain")
                     return
                 end
-            end
-            local blades=inspectBlades()
-            if not blades then
-                utilityLog("Blade rig not ready; waiting for character/rig")
-                return
-            end
-            if blades.working or blades.sparePairs<1 then return end
-            local remote=refreshGET()
-            if not remote or not remote:IsA("RemoteFunction") then
-                utilityLog("GET remote unavailable; reload retry scheduled")
-                return
-            end
-            Farm.utilityReloadRequestSerial=Farm.utilityReloadRequestSerial+1
-            local serial=Farm.utilityReloadRequestSerial
-            Farm.utilityReloadPending=true
-            Farm.utilityReloadPendingSince=os.clock()
-            -- This call may yield: the independent heartbeat watchdog will
-            -- release our utility lock after 5 seconds if necessary.
-            local accepted,response=pcall(function()
-                return remote:InvokeServer("Blades","Reload")
-            end)
-            if serial~=Farm.utilityReloadRequestSerial then return end
-            Farm.utilityReloadPending=false
-            if not accepted then
-                utilityLog("Blade reload remote error; will retry: "..tostring(response))
-                return
-            end
-            task.wait(0.3)
-            if Farm.unloaded or not Farm.utilityAutoReload then return end
-            local after=inspectBlades()
-            if after and after.working then
-                utilityLog("Blades reloaded; "..tostring(after.sparePairs).." spare pairs remain")
-            elseif response==true then
-                utilityLog("Reload accepted; waiting for blade rig update, then retrying if needed")
-            else
-                utilityLog("Reload not confirmed ("..tostring(response).."); automatic retry scheduled")
+                task.wait(0.12)
+            until os.clock() >= confirmDeadline
+            Farm.utilityReloadMisses = Farm.utilityReloadMisses + 1
+            local misses = Farm.utilityReloadMisses
+            Farm.utilityReloadBackoffUntil = os.clock() + math.min(5, 1.5 + misses * 0.6)
+            if misses == 1 or misses % 3 == 0 then
+                utilityLog("Reload not confirmed (response=" .. tostring(response)
+                    .. "); retry " .. tostring(misses)
+                    .. " after native combat idle")
             end
         end)
         if not ok and not Farm.unloaded then
-            utilityLog("Blade reload worker error: "..tostring(err))
+            Farm.utilityReloadBackoffUntil = os.clock() + 2
+            utilityLog("Reload worker recovered from error: " .. tostring(err))
         end
-        -- Never release a lock that the Waves worker or refill owns now.
-        if Farm.utilityBusyOwner=="blade-reload" and Farm.utilityReloadAttempt==attempt then
-            Farm.utilityBusyOwner=nil
-            Farm.utilityBusySince=0
-            Farm.utilityBusy=false
+        if Farm.utilityBusyOwner == "blade-reload"
+            and Farm.utilityReloadAttempt == attempt then
+            Farm.utilityBusyOwner = nil
+            Farm.utilityBusySince = 0
+            Farm.utilityBusy = false
         end
     end)
 end
@@ -2670,7 +2758,7 @@ local function bladeUtilityTick()
     -- Only unlock a utility operation that THIS watcher owns. During Waves,
     -- utilityBusy belongs to the crate/upgrade workflow and must be preserved.
     if Farm.utilityBusy and Farm.utilityBusyOwner then
-        local maxAge=Farm.utilityBusyOwner=="blade-reload" and 5.0 or 15.0
+        local maxAge=Farm.utilityBusyOwner=="blade-reload" and 10.0 or 15.0
         if os.clock()-Farm.utilityBusySince > maxAge then
             local stalled=Farm.utilityBusyOwner
             if stalled=="station-refill" then
@@ -2708,6 +2796,12 @@ local function bladeUtilityTick()
     end
     Farm.bladeWatcherState=state
     Farm.bladeLastObserved=blades
+    -- Hidden priority bit. It is set BEFORE checking utilityBusy so it
+    -- remains active even when a prior reload attempt has failed/yielded.
+    Farm.bladeRecoveryActive = blades ~= nil and (
+        (not blades.working and Farm.utilityAutoReload)
+        or (blades.sparePairs == 0 and Farm.utilityAutoRefill)
+    ) or false
     if state~=Farm.bladeWatcherLastPrint then
         Farm.bladeWatcherLastPrint=state
         Farm.bladeWatcherLastChange=os.clock()
@@ -4193,6 +4287,7 @@ function Farm:Unload()
     saveSession()
     self.utilityAutoReload = false
     self.utilityAutoRefill = false
+    self.bladeRecoveryActive = false
     self.lastTitanEnabled = false
     self.lastTitanReserved = nil
     if self.timerStatusConnection then
@@ -4885,9 +4980,16 @@ Farm.bladeUiGroup:CreateGroup({direction="column"}):CreateToggle({
     callback = function(enabled)
         Farm.utilityAutoReload = enabled == true
         if enabled then
+            Farm.utilityReloadBackoffUntil = 0
+            Farm.utilityReloadMisses = 0
             Farm.utilityElapsed = UTILITY_TICK -- inspect blades on the next Heartbeat
             startUtilityWatcher()
         else
+            Farm.bladeRecoveryActive = false
+            -- Old yielded calls cannot retain priority when manually disabled.
+            Farm.utilityReloadRequestSerial = Farm.utilityReloadRequestSerial + 1
+            Farm.utilityReloadPending = false
+            Farm.utilityReloadBackoffUntil = 0
             -- Turning Auto Reload off cancels only its own busy latch.
             -- The outstanding remote still has a separate cooldown/timeout guard.
             if Farm.utilityBusyOwner == "blade-reload" then
