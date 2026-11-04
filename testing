@@ -311,9 +311,9 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v103"
+Farm.buildVersion = "v106"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
-print("[HollowMoonHub] Running v103 (game-load combat readiness recovery)")
+print("[HollowMoonHub] Running v106 (cinematic prompt E input + raid movement)")
 
 -- Blade switching is an asynchronous inventory action: it does not need
 -- character control. Movement pauses ONLY for station trips, Waves workflows,
@@ -568,17 +568,64 @@ local function getNape(model)
     return nil
 end
 
+-- v105: Raid maps sometimes place NPC models one or more folders below
+-- Workspace.Titans, whereas ordinary Missions use direct children. Cache
+-- discovery briefly instead of repeatedly walking large trees on Heartbeat.
+-- Only accept models with a living Humanoid and the same Nape hitbox contract.
+function Farm:GetFarmTargetModels()
+    local now = os.clock()
+    if self.targetModelCache and now - (self.targetModelScannedAt or 0) < 0.45 then
+        return self.targetModelCache
+    end
+    local found, seen = {}, {}
+    local function add(model)
+        if not model or seen[model] or not model:IsA("Model") then return end
+        if getNape(model) then
+            seen[model] = true
+            found[#found + 1] = model
+        end
+    end
+    local function scan(container)
+        if not container then return end
+        add(container)
+        for _, child in ipairs(container:GetChildren()) do
+            add(child)
+            if not (child:IsA("Model") and getNape(child)) then
+                -- A raid NPC can be grouped beneath a container Model/Folder.
+                for _, nested in ipairs(child:GetDescendants()) do
+                    if nested:IsA("Model") then add(nested) end
+                end
+            end
+        end
+    end
+    local primary = Workspace:FindFirstChild("Titans")
+    if primary then scan(primary) end
+    if #found == 0 then
+        local nested = Workspace:FindFirstChild("Titans", true)
+        if nested and nested ~= primary then scan(nested) end
+    end
+    if #found == 0 then
+        for _, containerName in ipairs({"Enemies", "Bosses", "Mobs", "NPCs", "Raid"}) do
+            local container = Workspace:FindFirstChild(containerName, true)
+            if container then scan(container) end
+            if #found > 0 then break end
+        end
+    end
+    self.targetModelCache = found
+    self.targetModelScannedAt = now
+    self.targetModelSource = #found > 0
+        and (primary and "Titans / raid nested" or "nested raid targets")
+        or (primary and "no valid napes in Titans" or "no raid Titan container")
+    return found
+end
+
 -- Keep ONE living Titan completely protected BEFORE it becomes the last one.
 -- Waiting until the count reaches 1 is too late: an aura swing may hit both of
 -- the final two Titans in the same registration batch.
 local function getLivingTitans()
-    local folder = Workspace:FindFirstChild("Titans")
     local alive = {}
-    if not folder then return alive end
-    for _, model in ipairs(folder:GetChildren()) do
-        if getNape(model) then
-            alive[#alive + 1] = model
-        end
+    for _, model in ipairs(Farm:GetFarmTargetModels()) do
+        if getNape(model) then alive[#alive + 1] = model end
     end
     return alive
 end
@@ -699,12 +746,9 @@ local function hasAuraTarget()
 end
 
 local function findClosestTitan(fromPosition)
-    local titans = Workspace:FindFirstChild("Titans")
-    if not titans then return nil end
-
     local closest, bestDistance = nil, math.huge
     local reserved = getReservedLastTitan()
-    for _, model in ipairs(titans:GetChildren()) do
+    for _, model in ipairs(Farm:GetFarmTargetModels()) do
         local nape = getNape(model)
         -- Farm all other Titans first; only follow the reserved Titan when
         -- it is the sole remaining target, without attacking until the time.
@@ -723,10 +767,8 @@ end
 -- Here the selected farm target and closest Titan get priority on every swing;
 -- remaining slots rotate fairly instead of monopolizing the same few Titans.
 local function getAuraNapes(fromPosition)
-    local folder = Workspace:FindFirstChild("Titans")
     local targets = {}
-    if not folder then return targets end
-    for _, titan in ipairs(folder:GetChildren()) do
+    for _, titan in ipairs(Farm:GetFarmTargetModels()) do
         local nape = getNape(titan)
         if nape then
             targets[#targets + 1] = {
@@ -2524,23 +2566,25 @@ end
 function Farm:SyncFarmMode()
     if self.unloaded then return end
     local wanted = nil
-    if game.PlaceId == 14012874501 then
-        local active = false
-        if self.Waves and type(self.Waves.isActive) == "function" then
-            local ok, value = pcall(self.Waves.isActive)
-            active = ok and value == true
-        else
-            -- Early mobile restore runs before the Waves UI is constructed.
-            local folder = Workspace:FindFirstChild("Waves")
-            local objectives = folder and folder:FindFirstChild("Objectives")
-            active = objectives ~= nil and objectives:FindFirstChild("Waves") ~= nil
+    if game.PlaceId ~= 14916516914 then
+        local wavesActive = false
+        if game.PlaceId == 14012874501 then
+            if self.Waves and type(self.Waves.isActive) == "function" then
+                local ok, value = pcall(self.Waves.isActive)
+                wavesActive = ok and value == true
+            else
+                -- Early mobile restore, before the Waves controller exists.
+                local wf = Workspace:FindFirstChild("Waves")
+                local objectives = wf and wf:FindFirstChild("Objectives")
+                wavesActive = objectives ~= nil and objectives:FindFirstChild("Waves") ~= nil
+            end
         end
-        if active and self.waveFarmEnabled then wanted = "waves" end
-    elseif game.PlaceId ~= 14916516914 then
-        -- Missions and Raids can run in several different place IDs.
-        -- The live Titans folder identifies a supported combat map, while
-        -- Town Central remains explicitly excluded.
-        if self.generalFarmEnabled and Workspace:FindFirstChild("Titans") then
+        -- A Trost RAID is not the Waves mode. Only active Waves objectives
+        -- use the independent Auto Farm Waves toggle. Ordinary Auto Farm
+        -- owns every other gameplay map, including non-Waves Trost raids.
+        if wavesActive then
+            if self.waveFarmEnabled then wanted = "waves" end
+        elseif self.generalFarmEnabled then
             wanted = "regular"
         end
     end
@@ -2553,8 +2597,46 @@ function Farm:SyncFarmMode()
     end
 end
 
--- Quiet mode watcher: match maps may spawn their Titans folder AFTER the
--- script starts. Reconcile independently of the Rayfield UI and Waves tab.
+-- v104: Diagnostics stay OUT of Rayfield. A saved ON toggle can look
+-- broken if there is no character, no Titan nape, or a station utility owns
+-- movement. Report the actual reason rather than silently appearing idle.
+function Farm:ReportFarmMovementStatus()
+    if self.unloaded or not self.generalFarmEnabled or game.PlaceId == 14916516914 then return end
+    if self.farmOwner == "waves" then return end
+    local message
+    local root = getPlayerRoot()
+    local candidates = self:GetFarmTargetModels()
+    if not self.running or self.farmOwner ~= "regular" then
+        message = "Regular Auto Farm ON, no movement controller (PlaceId="..game.PlaceId..")"
+    elseif not root then
+        message = "Auto Farm waiting for character/HumanoidRootPart"
+    elseif movementUtilityBusy() then
+        message = "Movement paused by utility: "..tostring(self.utilityBusyOwner or "unknown")
+    elseif root.Anchored and not self.waitingFreezeActive then
+        message = "Movement paused: character root anchored"
+    elseif #candidates == 0 then
+        local folder = Workspace:FindFirstChild("Titans")
+        message = "No living Titan with Hitboxes.Hit.Nape; "
+            .. tostring(self.targetModelSource or "source unknown")
+            .. "; direct Titans children="..tostring(folder and #folder:GetChildren() or 0)
+            .. "; PlaceId="..tostring(game.PlaceId)
+    elseif self.method == "Momentum (Physics)" and self.airStartRoot ~= root then
+        message = "Movement acquiring air start; valid targets="..#candidates
+    else
+        message = "Movement active; targets="..#candidates
+            .. "; target="..tostring(self.target and self.target.Name or "acquiring")
+    end
+    local now = os.clock()
+    if message ~= self.lastFarmMovementReport
+        or (now - (self.lastFarmMovementReportAt or 0)) > 25 then
+        self.lastFarmMovementReport = message
+        self.lastFarmMovementReportAt = now
+        print("[HollowMoonHub/Farm] "..message)
+    end
+end
+
+-- Quiet mode watcher: the game can spawn Titans AFTER the script starts.
+-- Reconcile independently of UI and report only meaningful status changes.
 Farm.farmModeConnection = RunService.Heartbeat:Connect(function(dt)
     if Farm.unloaded then
         if Farm.farmModeConnection then
@@ -2567,6 +2649,11 @@ Farm.farmModeConnection = RunService.Heartbeat:Connect(function(dt)
     if Farm.farmModeElapsed >= 0.4 then
         Farm.farmModeElapsed = 0
         Farm:SyncFarmMode()
+        Farm.farmDiagnosticElapsed = (Farm.farmDiagnosticElapsed or 0) + 0.4
+        if Farm.farmDiagnosticElapsed >= 5 then
+            Farm.farmDiagnosticElapsed = 0
+            Farm:ReportFarmMovementStatus()
+        end
     end
 end)
 
@@ -3112,9 +3199,12 @@ Farm.fastResumeFromSaved = function()
         Farm.fastResumeStatus = "No verified local settings backup"
         return
     end
-    -- Never start farming in Town Central or unrelated places.
-    if game.PlaceId ~= 13904207646 and game.PlaceId ~= 14012874501 then
-        Farm.fastResumeStatus = "Lobby / unsupported place: no early farming"
+    -- v104: Restore saved intent on raid places too. The v103 allowlist only
+    -- covered Outskirts and Trost, so other Raid/Mission places waited for
+    -- the full Rayfield UI before their saved Auto Farm flag was restored.
+    -- Town Central remains excluded, and the Waves toggle remains separate.
+    if game.PlaceId == 14916516914 then
+        Farm.fastResumeStatus = "Town Central: no early farming"
         return
     end
     Farm.fastResumePendingUI = true
@@ -4814,7 +4904,7 @@ local AUTOEXEC_FOLDER = "HollowMoonHub"
 local AUTOEXEC_URL = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
 -- Reuse the old toggle marker and Rayfield flag, so existing saves keep working.
 local AUTOEXEC_FLAG_FILE = AUTOEXEC_FOLDER .. "/AOT_Revolution_v44_enabled.txt"
-local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source_unpinned_v103.lua"
+local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source_unpinned_v106.lua"
 Farm.autoExecUICacheFile = AUTOEXEC_FOLDER .. "/AOT_Gen2_cached.lua"
 Farm.gen2Url = "https://sirius.menu/gen2"
 local function fileOpsReady()
@@ -4981,7 +5071,7 @@ task.spawn(function()
         -- Never start a second script after a partially completed execution.
         return true
     end
-    print("[HollowMoonHub v103] Teleport loader: checking local cache")
+    print("[HollowMoonHub v106] Teleport loader: checking local cache")
     local okLocal, cached = pcall(readfile, %q)
     if okLocal and tryRun(cached, "local cache") then return end
     if not enabled() then return end
@@ -6847,6 +6937,94 @@ end
         else log("Blessing spin rejected; will recheck cost/stock") end
         return true
     end
+    -- v106: Cinematic prompts can appear in Missions/Raids, not just Trost
+    -- and Town Central. The old native Actor skip was only polled every 5s
+    -- in two places, and did not respond to the on-screen "SKIP [E]" button.
+    -- Never press E when only the ordinary Waves "Skip" vote is visible.
+    local function visibleCinematicSkipPrompt()
+        local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not gui then return false end
+        local function visibleThroughGui(node)
+            local current = node
+            while current and current ~= gui do
+                if current:IsA("GuiObject") and not current.Visible then return false end
+                if current:IsA("ScreenGui") and not current.Enabled then return false end
+                current = current.Parent
+            end
+            return current == gui
+        end
+        local function compact(raw)
+            return tostring(raw or ""):gsub("<[^>]+>", ""):upper():gsub("%s+", "")
+        end
+        for _, node in ipairs(gui:GetDescendants()) do
+            if (node:IsA("TextLabel") or node:IsA("TextButton"))
+                and visibleThroughGui(node) then
+                local label = compact(node.Text)
+                if label:find("SKIP[E]", 1, true)
+                    or label:find("SKIP(E)", 1, true)
+                    or label:find("[E]SKIP", 1, true)
+                    or label:find("PRESSETOSKIP", 1, true) then
+                    return true
+                end
+                -- Some cinematic layouts put SKIP and [E] into separate
+                -- labels under a single button/frame. Require a visible E
+                -- key prompt in that same parent, not a generic Skip label.
+                if label == "SKIP" and node.Parent and node.Parent:IsA("GuiObject") then
+                    for _, sibling in ipairs(node.Parent:GetChildren()) do
+                        if sibling ~= node
+                            and (sibling:IsA("TextLabel") or sibling:IsA("TextButton"))
+                            and visibleThroughGui(sibling) then
+                            local key = compact(sibling.Text)
+                            if key == "[E]" or key == "(E)" then return true end
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end
+    local function cinematicPromptStep(dt)
+        W.cinematicWatchElapsed = (W.cinematicWatchElapsed or 0) + dt
+        if W.cinematicWatchElapsed < 0.30 then return end
+        W.cinematicWatchElapsed = 0
+        if Farm.unloaded or not W.miscFlags.cinematic then
+            W.cinematicPromptActive = false
+            W.cinematicAttempts = 0
+            return
+        end
+        local shown = visibleCinematicSkipPrompt()
+        if not shown then
+            W.cinematicPromptActive = false
+            W.cinematicAttempts = 0
+            return
+        end
+        if not W.cinematicPromptActive then
+            W.cinematicPromptActive = true
+            W.cinematicAttempts = 0
+            W.cinematicLastPressAt = -100
+        end
+        local now = os.clock()
+        if W.cinematicPressBusy or (W.cinematicAttempts or 0) >= 6
+            or now - (W.cinematicLastPressAt or -100) < 1.10 then return end
+        W.cinematicPressBusy = true
+        W.cinematicAttempts = (W.cinematicAttempts or 0) + 1
+        W.cinematicLastPressAt = now
+        task.spawn(function()
+            -- Reuse the existing native input helper (VirtualInputManager or
+            -- supported keypress/keyrelease fallback). Always key-up on success.
+            local called, succeeded, message = pcall(Farm.pressSkillHotkey, "E")
+            W.cinematicPressBusy = false
+            if called and succeeded then
+                if W.cinematicAttempts == 1 then
+                    print("[HollowMoonHub/Cinematics] Visible SKIP [E]; sent E input")
+                end
+            elseif os.clock() - (W.cinematicLastWarning or -100) >= 8 then
+                W.cinematicLastWarning = os.clock()
+                warn("[HollowMoonHub/Cinematics] Skip input unavailable: "
+                    .. tostring(called and message or succeeded))
+            end
+        end)
+    end
     local function miscTask()
         if game.PlaceId~=lobby and game.PlaceId~=TROST then return end
         if W.miscFlags.cinematic and game.PlaceId==TROST then
@@ -7412,6 +7590,9 @@ end
             if W.connection then W.connection:Disconnect();W.connection=nil end
             return
         end
+        -- Cinematic E input runs independently of Waves state so it also
+        -- works in Missions and Raids. It is gated by the saved Misc toggle.
+        cinematicPromptStep(dt)
         W.farmSyncElapsed = (W.farmSyncElapsed or 0) + dt
         if W.farmSyncElapsed >= 0.3 then
             W.farmSyncElapsed = 0
@@ -7487,7 +7668,7 @@ end
     end)
     Farm:SyncFarmMode()
     if wavesActive() then startUtilityWatcher() end
-    print(prefix.."v103 Auto Leave diagnostics and Waves-only farm ready; Trost "..TROST)
+    print(prefix.."v106 cinematic E watcher and Waves-only farm ready; Trost "..TROST)
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
@@ -8078,11 +8259,11 @@ Farm.initializeMatchWebhook = function()
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test (v103)"
+            title = testMode and "HollowMoonHub • Webhook Test (v104)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v103"},
+            footer = {text="HollowMoonHub • Match Tracker • v104"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
