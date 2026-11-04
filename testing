@@ -1,6 +1,6 @@
 --[[
     HollowMoonHub | Attack on Titan: Revolution (Outskirts)
-    Combat v92: Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    Combat v109: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -19,6 +19,7 @@
     out-of-range, excessive or otherwise invalid hit registrations.
 ]]
 
+-- v109: routine script print/warn calls were removed, including Actor and queued-loader logs.
 -- v90 Delta: never wait for the entire place to finish loading before
 -- restoring saved gameplay settings. Some mobile clients signal Loaded
 -- significantly later than LocalPlayer and the executor become usable.
@@ -311,9 +312,9 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v107"
+Farm.buildVersion = "v109"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
-print("[HollowMoonHub] Running v107 (GitHub-only Auto Execute)")
+do end
 
 -- Blade switching is an asynchronous inventory action: it does not need
 -- character control. Movement pauses ONLY for station trips, Waves workflows,
@@ -430,7 +431,7 @@ local function resetMatchTimer()
     Farm.matchServerAnchorAt = nil
     Farm.matchServerActive = false
     Farm.lastTitanReserved = nil
-    print("[HollowMoonHub] Match timer manually reset to 0:00. It will not reset again from Workspace.Seconds changes.")
+    do end
 end
 
 local function cancelTween()
@@ -568,19 +569,42 @@ local function getNape(model)
     return nil
 end
 
+-- v109: On phones a raid Titan's visual rig can replicate before its
+-- dedicated Nape hitbox. This anchor is for NAVIGATION ONLY. Slash/hit
+-- registration still requires getNape(), never this fallback part.
+function Farm:GetNavigationAnchor(model)
+    if not model or not model:IsA("Model") or not model.Parent then return nil end
+    if model == LocalPlayer.Character or Players:GetPlayerFromCharacter(model) then return nil end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return nil end
+    local primary = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+    local fake = model:FindFirstChild("Fake")
+    local head = (fake and fake:FindFirstChild("Head")) or model:FindFirstChild("Head")
+    local part = primary or head
+    return (part and part:IsA("BasePart")) and part or nil
+end
+
 -- v105: Raid maps sometimes place NPC models one or more folders below
 -- Workspace.Titans, whereas ordinary Missions use direct children. Cache
 -- discovery briefly instead of repeatedly walking large trees on Heartbeat.
 -- Only accept models with a living Humanoid and the same Nape hitbox contract.
 function Farm:GetFarmTargetModels()
     local now = os.clock()
-    if self.targetModelCache and now - (self.targetModelScannedAt or 0) < 0.45 then
+    -- On low-end/mobile clients, avoid expensive repeated Workspace tree scans
+    -- while raid rigs are still streaming. A cached scan still refreshes when ready.
+    local interval = self.targetModelCache and #self.targetModelCache > 0 and 0.45 or 0.9
+    if self.targetModelCache and now - (self.targetModelScannedAt or 0) < interval then
         return self.targetModelCache
     end
     local found, seen = {}, {}
+    local navigation, navSeen = {}, {}
     local function add(model)
-        if not model or seen[model] or not model:IsA("Model") then return end
-        if getNape(model) then
+        if not model or not model:IsA("Model") then return end
+        if not navSeen[model] and Farm:GetNavigationAnchor(model) then
+            navSeen[model] = true
+            navigation[#navigation + 1] = model
+        end
+        if not seen[model] and getNape(model) then
             seen[model] = true
             found[#found + 1] = model
         end
@@ -612,11 +636,29 @@ function Farm:GetFarmTargetModels()
         end
     end
     self.targetModelCache = found
+    self.navigationCandidateModels = navigation
     self.targetModelScannedAt = now
     self.targetModelSource = #found > 0
         and (primary and "Titans / raid nested" or "nested raid targets")
         or (primary and "no valid napes in Titans" or "no raid Titan container")
     return found
+end
+
+-- Used only when a moving raid boss is visible but its Nape has not
+-- replicated yet. Enables movement to acquire the boss without sending any hits.
+function Farm:GetClosestNavigationTarget(fromPosition)
+    self:GetFarmTargetModels()
+    local nearest, anchor, minDistance = nil, nil, math.huge
+    for _, model in ipairs(self.navigationCandidateModels or {}) do
+        local part = Farm:GetNavigationAnchor(model)
+        if part then
+            local distance = (part.Position - fromPosition).Magnitude
+            if distance < minDistance then
+                nearest, anchor, minDistance = model, part, distance
+            end
+        end
+    end
+    return nearest, anchor
 end
 
 -- Keep ONE living Titan completely protected BEFORE it becomes the last one.
@@ -727,9 +769,7 @@ local function updateLastTitanWaitFreeze()
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
     root.Anchored = true
-    print(string.format(
-        "[HollowMoonHub] Final Titan held. Air freeze ON until %s (elapsed %s).",
-        Farm.lastTitanAtText, formatTime(elapsed)))
+    do end
     return true
 end
 
@@ -937,7 +977,7 @@ local Players = game:GetService("Players")
 local character = Players.LocalPlayer.Character
 local actor = character and character:FindFirstChildOfClass("Actor")
 if not actor then
-    warn("[HollowMoonHub v32] Character Actor missing inside actor context")
+    do end
     return
 end
 local bridge = actor:FindFirstChild("HollowMoonClientSlashV74")
@@ -1339,7 +1379,7 @@ local function slashStatus(message)
     Farm.slashStatus = message
     if Farm.slashStatusLastPrint ~= message then
         Farm.slashStatusLastPrint = message
-        warn("[HollowMoonHub v32] " .. message)
+        do end
     end
 end
 
@@ -1422,8 +1462,8 @@ end
 
 local function printSlashStatus()
     local actor = getClientActor()
-    print("[HollowMoonHub v32] Character Actor: " .. tostring(actor and actor:GetFullName() or "missing"))
-    print("[HollowMoonHub v32] run_on_actor: " .. tostring(getActorRunner() ~= nil))
+    do end
+    do end
     local bridge, reason = resolveSlashBridge()
     if not bridge then
         slashStatus(reason)
@@ -1479,10 +1519,9 @@ function Farm:CombatStartupReady()
     local now = os.clock()
     if now < state.nextCheck then return false end
     state.nextCheck = now + 0.7 -- avoid expensive Actor scans every frame
-    if not game:IsLoaded() then
-        state.reason = "Roblox place still loading"
-        return false
-    end
+    -- v109: game:IsLoaded() includes unrelated assets that load slowly on
+    -- mobile. The required RootPart, POST, Actor, and native Host are checked
+    -- separately below; they are the actual combat readiness prerequisites.
     if not root then
         state.reason = "Character/HumanoidRootPart not ready"
         return false
@@ -1521,7 +1560,7 @@ function Farm:CombatStartupReady()
     state.reason = "Ready"
     state.lastCheck = now
     self.attackWarned = false
-    print("[HollowMoonHub v103] Combat ready: place loaded, POST and native Actor Host available")
+    do end
     return true
 end
 
@@ -1539,7 +1578,7 @@ local function registerAuraHits(root)
     if not POST or not POST:IsA("RemoteEvent") then
         if not Farm.remoteWarned then
             Farm.remoteWarned = true
-            warn("[HollowMoonHub] Combat POST not yet replicated; retrying automatically")
+            do end
         end
         return
     end
@@ -1568,7 +1607,7 @@ local function registerAuraHits(root)
                 sent = sent + 1
                 Farm.auraAttempts = Farm.auraAttempts + 1
             else
-                warn("[HollowMoonHub] Nape registration error: " .. tostring(err))
+                do end
             end
         end
     end
@@ -1674,7 +1713,7 @@ local function tryAttack(runId, withAura)
             end
             if not Farm.attackWarned then
                 Farm.attackWarned = true
-                warn("[HollowMoonHub] Client action was rejected; check the executor output for status.")
+                do end
             end
         end
         end)
@@ -1683,7 +1722,7 @@ local function tryAttack(runId, withAura)
             Farm.attackStartedAt=0
         end
         if not completed and not Farm.unloaded then
-            warn("[HollowMoonHub] Attack worker recovered from error: "..tostring(attackError))
+            do end
         end
     end)
 end
@@ -1958,7 +1997,7 @@ function Farm:StartAura()
                 blocked = "No successful slash start yet: " .. tostring(Farm.slashStatus)
             end
             if blocked ~= Farm.auraLastBlockReason then
-                if blocked then warn("[HollowMoonHub/Kill Aura] " .. blocked) end
+                if blocked then do end end
                 Farm.auraLastBlockReason = blocked
             end
         end
@@ -2145,7 +2184,7 @@ local function recoverStalledMomentum(root)
     root.CFrame = root.CFrame + horizontal.Unit*10 + Vector3.new(0,5,0)
     Farm.momentumLastRecoveryAt = now
     Farm.momentumStuckSince = nil
-    warn("[HollowMoonHub v76] Momentum unstuck nudge; physical velocity preserved")
+    do end
 end
 
 -- EXPERIMENTAL: physical momentum travel. Boost input is not required;
@@ -2183,6 +2222,23 @@ function Farm:EnsureAirStart()
     local target = getNape(self.target) and self.target or findClosestTitan(root.Position)
     local nape = getNape(target)
     if not nape then
+        -- v109: Mobile may stream the moving Female Titan's model before Nape.
+        -- Move toward its actual rig without trying to register premature hits.
+        local visibleTarget, visibleAnchor = self:GetClosestNavigationTarget(root.Position)
+        if visibleTarget and visibleAnchor then
+            self.target = visibleTarget
+            cancelTween()
+            resetTweenGoalFilter()
+            removeMomentumDrive()
+            root.CFrame = getFarmCFrame(visibleTarget, visibleAnchor)
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            self.airStartRoot = root
+            self.airStartLiftedRoot = root
+            self.movementElapsed = REPATH_TIME
+            do end
+            return true
+        end
         -- No target spawned yet: leave the ground once, but don't accelerate
         -- horizontally until we can place the character over a real target.
         if self.airStartLiftedRoot ~= root then
@@ -2190,7 +2246,7 @@ function Farm:EnsureAirStart()
             root.CFrame = root.CFrame + Vector3.new(0, self.farmDistance, 0)
             root.AssemblyLinearVelocity = Vector3.zero
             root.AssemblyAngularVelocity = Vector3.zero
-            print("[HollowMoonHub v76] Auto Farm: lifted into air; waiting for a Titan before orbiting")
+            do end
         end
         return false
     end
@@ -2208,9 +2264,7 @@ function Farm:EnsureAirStart()
     self.airStartRoot = root
     self.airStartLiftedRoot = root
     self.movementElapsed = REPATH_TIME
-    print(string.format(
-        "[HollowMoonHub v76] Auto Farm air start: teleported above %s (%d studs over head); starting high-speed orbit",
-        tostring(target.Name), self.farmDistance))
+    do end
     return true
 end
 
@@ -2252,8 +2306,9 @@ local function updateMomentumDrive(dt)
     local speed = math.clamp(tonumber(Farm.momentumTargetSpeed) or 400,80,2000)
     local currentVelocity = root.AssemblyLinearVelocity
     local desiredVelocity = Vector3.new(currentVelocity.X*0.95, 0, currentVelocity.Z*0.95)
-    local nape = getNape(Farm.target)
+    local nape = getNape(Farm.target) or Farm:GetNavigationAnchor(Farm.target)
     if nape then
+        -- Navigation fallback affects only movement; combat still requires Nape.
         local center = getFarmCFrame(Farm.target,nape).Position
         local offset = Vector3.new(root.Position.X-center.X,0,root.Position.Z-center.Z)
         local distance = offset.Magnitude
@@ -2331,6 +2386,12 @@ local function farmStep()
     if not nape then
         Farm.target = findClosestTitan(root.Position)
         nape = getNape(Farm.target)
+        if not nape then
+            -- Only navigation uses a rig part while the streamed hitbox is late.
+            local candidate, anchor = Farm:GetClosestNavigationTarget(root.Position)
+            Farm.target = candidate
+            nape = anchor
+        end
         cancelTween()
         resetTweenGoalFilter()
     end
@@ -2616,8 +2677,9 @@ function Farm:ReportFarmMovementStatus()
         message = "Movement paused: character root anchored"
     elseif #candidates == 0 then
         local folder = Workspace:FindFirstChild("Titans")
-        message = "No living Titan with Hitboxes.Hit.Nape; "
-            .. tostring(self.targetModelSource or "source unknown")
+        local visible = #(self.navigationCandidateModels or {})
+        message = "Nape hitboxes pending="..tostring(visible)
+            .." visible moving raid rigs; "..tostring(self.targetModelSource or "source unknown")
             .. "; direct Titans children="..tostring(folder and #folder:GetChildren() or 0)
             .. "; PlaceId="..tostring(game.PlaceId)
     elseif self.method == "Momentum (Physics)" and self.airStartRoot ~= root then
@@ -2631,7 +2693,7 @@ function Farm:ReportFarmMovementStatus()
         or (now - (self.lastFarmMovementReportAt or 0)) > 25 then
         self.lastFarmMovementReport = message
         self.lastFarmMovementReportAt = now
-        print("[HollowMoonHub/Farm] "..message)
+        do end
     end
 end
 
@@ -2668,7 +2730,7 @@ local STATION_REFILL_COOLDOWN = 9.0
 
 local function utilityLog(message)
     Farm.utilityLastMessage = tostring(message)
-    print("[HollowMoonHub/Utilities] " .. Farm.utilityLastMessage)
+    do end
 end
 
 local function getBladeRig()
@@ -3248,14 +3310,14 @@ Farm.fastResumeFromSaved = function()
         startOpWatcher()
     end
     Farm.fastResumeStatus = "Restored saved gameplay controls before Rayfield"
-    print("[HollowMoonHub] Delta early resume: gameplay restored before full place/UI load")
+    do end
 end
 do
     local fastBootOk, fastBootErr = pcall(Farm.fastResumeFromSaved)
     if not fastBootOk then
         Farm.fastResumePendingUI = false
         Farm.fastResumeStatus = "Fast resume skipped: " .. tostring(fastBootErr)
-        warn("[HollowMoonHub] " .. Farm.fastResumeStatus)
+        do end
     end
 end
 Farm.fastResumeFromSaved = nil
@@ -3462,7 +3524,7 @@ local player = Players.LocalPlayer
 local scripts = player and player:FindFirstChild("PlayerScripts")
 local actor = scripts and scripts:FindFirstChildOfClass("Actor")
 if not actor then
-    warn("[HollowMoonHub Lobby] Lobby Actor missing")
+    do end
     return
 end
 local bridge = actor:FindFirstChild("HollowMoonLobbyQueueV60")
@@ -3557,7 +3619,7 @@ local function invokeGame(host, ...)
                 return nil, "Lobby became busy again before the request; no new request was sent"
             end
         end
-        print(string.format("[HollowMoonHub Lobby] Lobby ready after %.1fs; continuing request",os.clock()-startedAt))
+        do end
     end
     local ok,result=pcall(host.Invoke,host,...)
     if not ok then return nil,tostring(result) end
@@ -3655,7 +3717,7 @@ bridge.OnInvoke=function(command,settings)
                 index,#modifiers,modifier,tostring(lastResponse),
                 tostring(party:GetAttribute("Modifiers") or "")))
         end
-        print(string.format("[HollowMoonHub Lobby] Verified modifier %d/%d: %s",index,#modifiers,modifier))
+        do end
     end
     -- Verify all at once before starting, not merely successful requests.
     for _,modifier in ipairs(modifiers) do
@@ -3704,7 +3766,7 @@ local Players = game:GetService("Players")
 local player = Players.LocalPlayer
 local actor = player:FindFirstChild("PlayerScripts")
 actor = actor and actor:FindFirstChildOfClass("Actor")
-if not actor then warn("[HollowMoonHub Equipment] Lobby Actor not found"); return end
+if not actor then do end; return end
 local old = actor:FindFirstChild("HollowMoonEquipV93")
 if old and not old:IsA("BindableFunction") then old:Destroy(); old=nil end
 local bridge = old or Instance.new("BindableFunction")
@@ -4419,11 +4481,7 @@ local function completedSinceLeaveEnabled()
 end
 
 local function printSessionStatus()
-    print(string.format(
-        "[HollowMoonHub v38] Matches=%d | Since leave enabled=%d | Elapsed=%.1f min | Retry=%s | Leave=%s (%s / %d) | Job=%s",
-        Farm.session.matches, completedSinceLeaveEnabled(), sessionElapsedMinutes(),
-        tostring(Farm.autoRetry), tostring(Farm.autoLeave), Farm.autoLeaveMode,
-        Farm.autoLeaveValue, tostring(game.JobId)))
+    do end
 end
 
 -- Returns true only for a visible results screen with its expected buttons.
@@ -4465,7 +4523,7 @@ local function stopAndLeaveGame(reason)
         Farm.autoLeave = false
         Farm.session.autoLeave = false
         saveSession()
-        print("[HollowMoonHub] Auto Leave: already in Town Central")
+        do end
         return true
     end
 
@@ -4474,7 +4532,7 @@ local function stopAndLeaveGame(reason)
     local remotes = assets and assets:FindFirstChild("Remotes")
     local post = remotes and remotes:FindFirstChild("POST")
     if not post or not post:IsA("RemoteEvent") then
-        warn("[HollowMoonHub] Auto Leave: POST remote not available; will retry")
+        do end
         return false
     end
 
@@ -4484,7 +4542,7 @@ local function stopAndLeaveGame(reason)
     end)
     if not ok then
         Farm.returningToLobby = false
-        warn("[HollowMoonHub] Auto Leave: lobby request failed: " .. tostring(err))
+        do end
         return false
     end
 
@@ -4492,7 +4550,7 @@ local function stopAndLeaveGame(reason)
     Farm.autoLeave = false
     Farm.session.autoLeave = false
     saveSession()
-    print("[HollowMoonHub] Auto Leave: requested Town Central (" .. reason .. ")")
+    do end
     return true
 end
 
@@ -4518,7 +4576,7 @@ local function tryAutoRetry()
     remotes = remotes and remotes:FindFirstChild("Remotes")
     local get = remotes and remotes:FindFirstChild("GET")
     if not get or not get:IsA("RemoteFunction") then
-        warn("[HollowMoonHub] Auto Retry: GET remote unavailable")
+        do end
         return
     end
     -- Identical request to the Outskirts Rewards Retry button.
@@ -4531,11 +4589,11 @@ local function tryAutoRetry()
             Farm.retryThisReward = true
             Farm.session.retryLatched = true
             saveSession()
-            print("[HollowMoonHub] Auto Retry accepted")
+            do end
         elseif not ok then
-            warn("[HollowMoonHub] Auto Retry failed: " .. tostring(accepted))
+            do end
         else
-            warn("[HollowMoonHub] Auto Retry not accepted yet")
+            do end
         end
     end)
 end
@@ -4551,7 +4609,7 @@ local function resetSessionCounter()
     Farm.retryThisReward = false
     Farm.rewardVisibleLast = false
     saveSession()
-    print("[HollowMoonHub] Session counter and Auto Leave timer reset")
+    do end
 end
 
 local function handleResultScreen()
@@ -4577,7 +4635,7 @@ local function handleResultScreen()
             Farm.matchServerActive = false
             Farm.lastTitanReserved = nil
             releaseLastTitanWaitFreeze()
-            print("[HollowMoonHub] New match detected after results; stable timer reset to 0:00.")
+            do end
         end
     end
     if not visible then
@@ -4597,7 +4655,7 @@ local function handleResultScreen()
         Farm.session.retryLatched = false
         Farm.retryThisReward = false
         saveSession()
-        print("[HollowMoonHub] Completed matches: " .. Farm.session.matches)
+        do end
         -- Send before Auto Retry / Leave changes the result screen.
         if game.PlaceId ~= 14012874501 and type(Farm.onMatchComplete) == "function" then
             -- Trost reports its own definitive Waves.Finalised transition.
@@ -4695,7 +4753,7 @@ local function fallbackDirectLobbyJoin(settings)
                 index,#selected,modifier,tostring(lastResponse),
                 tostring(party:GetAttribute("Modifiers") or "")))
         end
-        print(string.format("[HollowMoonHub Lobby] Verified modifier %d/%d: %s",index,#selected,modifier))
+        do end
     end
     for _,modifier in ipairs(selected) do
         if not enabled(modifier) then
@@ -4737,10 +4795,10 @@ local function requestLobbyJoin()
     local preflightOK,preflightMessage=preflightModifierSelection()
     if not preflightOK then
         Farm.lobbyCurrentStatus=preflightMessage
-        warn("[HollowMoonHub Lobby] "..preflightMessage)
+        do end
         return false
     end
-    print("[HollowMoonHub Lobby] "..preflightMessage)
+    do end
     Farm.lobbyJoining = true
     -- Don't block Heartbeat: the game can yield during party creation.
     task.spawn(function()
@@ -4772,9 +4830,9 @@ local function requestLobbyJoin()
         end
         Farm.lobbyCurrentStatus=tostring(detail)
         if success then
-            print("[HollowMoonHub Lobby] "..Farm.lobbyCurrentStatus)
+            do end
         else
-            warn("[HollowMoonHub Lobby] "..Farm.lobbyCurrentStatus)
+            do end
         end
         Farm.lobbyJoining=false
     end)
@@ -4929,20 +4987,20 @@ end
 local function syncAutoExecute()
     if not ensureAutoFolder() then
         if Farm.autoExecute then
-            warn("[HollowMoonHub] Auto Execute requires executor file APIs for an on/off flag")
+            do end
         end
         return
     end
     local saved, errSave = pcall(writefile, AUTOEXEC_FLAG_FILE, Farm.autoExecute and "1" or "0")
     if not saved then
-        warn("[HollowMoonHub] Auto Execute flag write failed: " .. tostring(errSave))
+        do end
         return
     end
     if not Farm.autoExecute then return end
 
     local queue = queueFunction()
     if not queue then
-        warn("[HollowMoonHub] Auto Execute requires queue_on_teleport support")
+        do end
         return
     end
     if Farm.queuedAutoExecute then return end
@@ -4966,7 +5024,7 @@ task.spawn(function()
         return
     end
     if type(loadstring) ~= "function" then
-        warn("[HollowMoonHub] Auto Execute requires loadstring")
+        do end
         env.HollowMoonAOTQueueJob = nil
         return
     end
@@ -4983,17 +5041,17 @@ task.spawn(function()
             if okCompile and type(fn) == "function" then
                 if not enabled() then return end
                 local version = source:match('Farm%%.buildVersion%%s*=%%s*"([^"]+)"') or "unknown"
-                print("[HollowMoonHub] Auto Execute: running GitHub source (" .. version .. ")")
+                do end
                 local okRun, errRun = pcall(fn)
                 if not okRun then
-                    warn("[HollowMoonHub] GitHub script error: " .. tostring(errRun))
+                    do end
                 end
                 return
             end
-            warn("[HollowMoonHub] GitHub script compilation failed: " .. tostring(fn))
+            do end
             return
         end
-        warn("[HollowMoonHub] GitHub download failed (attempt " .. attempt .. "): " .. tostring(source))
+        do end
         if attempt == 1 then task.wait(0.75) end
     end
 end)
@@ -5001,9 +5059,9 @@ end)
     local ok, errQueue = pcall(queue, queued)
     if ok then
         Farm.queuedAutoExecute = true
-        print("[HollowMoonHub] GitHub-only Auto Execute queued for next teleport")
+        do end
     else
-        warn("[HollowMoonHub] GitHub-only Auto Execute queue failed: " .. tostring(errQueue))
+        do end
     end
 end
 
@@ -5015,11 +5073,11 @@ local function reconnectToCurrentPlace(reason)
     task.spawn(function()
         for attempt = 1, 3 do
             if not Farm.autoReconnect or Farm.unloaded then break end
-            print(string.format("[HollowMoonHub] Reconnect attempt %d: %s", attempt, tostring(reason)))
+            do end
             local ok, err = pcall(function()
                 TeleportService:Teleport(game.PlaceId, LocalPlayer)
             end)
-            if not ok then warn("[HollowMoonHub] Reconnect failed: " .. tostring(err)) end
+            if not ok then do end end
             task.wait(attempt * 4)
         end
         Farm.reconnectInProgress = false
@@ -5035,7 +5093,7 @@ local function setupSettingsListeners()
                 vu:CaptureController()
                 vu:ClickButton2(Vector2.zero)
             end)
-            if not ok then warn("[HollowMoonHub] Anti AFK unsupported: " .. tostring(err)) end
+            if not ok then do end end
         end)
     end
     if not Farm.reconnectConnection then
@@ -5071,7 +5129,7 @@ end
 -- v90: Fast resume has already started before this point. The game can
 -- finish loading while those early checks run, without blocking them.
 if not game:IsLoaded() then
-    print("[HollowMoonHub] Early settings restored; waiting for UI readiness")
+    do end
     game.Loaded:Wait()
 end
 
@@ -5086,11 +5144,11 @@ local Rayfield = (function()
                 local loaded, ui = pcall(module)
                 if loaded and type(ui) == "table"
                     and type(ui.CreateWindow) == "function" then
-                    print("[HollowMoonHub] Gen2 loaded from local cache")
+                    do end
                     return ui
                 end
             end
-            warn("[HollowMoonHub] Cached Gen2 unavailable; using live Gen2")
+            do end
         end
     end
     local source = game:HttpGet(Farm.gen2Url)
@@ -5102,7 +5160,7 @@ local Rayfield = (function()
     if ensureAutoFolder() then
         pcall(writefile, Farm.autoExecUICacheFile, source)
     end
-    print("[HollowMoonHub] Gen2 loaded from network")
+    do end
     return ui
 end)()
 -- Rayfield Gen2 persistence:
@@ -5593,9 +5651,9 @@ farmTab:CreateInput({
             Farm.lastTitanAtText = formatTime(parsed)
             Farm.lastTitanReserved = nil
             if getMatchElapsed() >= parsed then releaseLastTitanWaitFreeze() end
-            print("[HollowMoonHub] Last Titan unlock at " .. Farm.lastTitanAtText)
+            do end
         else
-            warn("[HollowMoonHub] Enter MM:SS, e.g. 1:30 or 2:05. Previous time preserved.")
+            do end
         end
     end,
 })
@@ -5610,7 +5668,7 @@ farmTab:CreateToggle({
         if not Farm.lastTitanEnabled then
             releaseLastTitanWaitFreeze()
         end
-        print("[HollowMoonHub] Timed last Titan: " .. tostring(Farm.lastTitanEnabled))
+        do end
     end,
 })
 
@@ -5746,14 +5804,13 @@ farmTab:CreateInput({
     callback = function(value)
         local n = tonumber(value)
         if not n or n < 1 or n > 100000 or n ~= math.floor(n) then
-            warn("[HollowMoonHub] Auto Leave: enter a positive whole number, e.g. 30 or 60")
+            do end
             return
         end
         Farm.autoLeaveValue = n
         Farm.session.autoLeaveValue = n
         saveSession()
-        print("[HollowMoonHub] Leave after " .. tostring(n) ..
-              (Farm.autoLeaveMode == "After X Time" and " minutes" or " completed matches"))
+        do end
     end,
 })
 farmTab:CreateToggle({
@@ -5826,7 +5883,7 @@ Farm.initializeWavesAndMisc = function()
     local prefix="[HollowMoonHub Waves] "
     local function log(msg)
         W.lastAction=tostring(msg)
-        print(prefix..W.lastAction)
+        do end
     end
     local function folder()
         return game.PlaceId==TROST and Workspace:FindFirstChild("Waves") or nil
@@ -6281,7 +6338,7 @@ end
         if type(runner)~="function" then return nil end
         local ok,err=pcall(runner,actor,isWave and waveActorSource or miscActorSource)
         if not ok then
-            if os.clock()-W.lastWarning>10 then warn(prefix.."Actor initialization: "..tostring(err));W.lastWarning=os.clock() end
+            if os.clock()-W.lastWarning>10 then do end;W.lastWarning=os.clock() end
             return nil
         end
         for i=1,8 do
@@ -6407,7 +6464,7 @@ end
         local ok,err=pcall(function() post:FireServer("Waves","Update") end)
         if not ok then
             if os.clock()-W.lastWarning>8 then
-                W.lastWarning=os.clock();warn(prefix.."Vote request error: "..tostring(err))
+                W.lastWarning=os.clock();do end
             end
             return false
         end
@@ -6921,12 +6978,11 @@ end
             W.cinematicPressBusy = false
             if called and succeeded then
                 if W.cinematicAttempts == 1 then
-                    print("[HollowMoonHub/Cinematics] Visible SKIP [E]; sent E input")
+                    do end
                 end
             elseif os.clock() - (W.cinematicLastWarning or -100) >= 8 then
                 W.cinematicLastWarning = os.clock()
-                warn("[HollowMoonHub/Cinematics] Skip input unavailable: "
-                    .. tostring(called and message or succeeded))
+                do end
             end
         end)
     end
@@ -7186,7 +7242,7 @@ end
         if player~=LocalPlayer or not W.flags.leave or game.PlaceId~=TROST then return end
         W.leaveLastTeleportFailure=tostring(result)..": "..tostring(message)
         W.leaveStatus="Teleport to "..tostring(placeId).." failed: "..W.leaveLastTeleportFailure
-        warn(prefix.."Auto Leave: "..W.leaveStatus)
+        do end
     end)
     W.tryLobbyTeleport=function()
         if Farm.unloaded or game.PlaceId~=TROST or not W.flags.leave then return end
@@ -7201,7 +7257,7 @@ end
             end)
             if not ok and game.PlaceId==TROST then
                 W.leaveStatus="Town Central teleport call failed: "..tostring(err)
-                warn(prefix..W.leaveStatus)
+                do end
             end
         end)
     end
@@ -7231,7 +7287,7 @@ end
                 W.leaveStatus=string.format(
                     "Wave %d >= %d; STILL in Trost after %d leave request(s). Server transfer not confirmed.",
                     current,W.leaveAtWave,W.leaveAttempts)
-                warn(prefix..W.leaveStatus.." | Counters: "..W.leaveLastCandidates)
+                do end
             end
             return true
         end
@@ -7246,13 +7302,13 @@ end
             local ok,err=pcall(function() post:FireServer("Functions","Teleport") end)
             if not ok then
                 W.leaveStatus="Native leave request ERROR: "..tostring(err)
-                warn(prefix..W.leaveStatus)
+                do end
             else
                 W.leaveStatus="Native leave submitted (NOT confirmed by server)"
             end
         else
             W.leaveStatus="Native POST remote missing; trying Town Central fallback"
-            warn(prefix..W.leaveStatus)
+            do end
         end
         task.delay(2.5,function()
             if Farm.unloaded or not W.flags.leave or game.PlaceId~=TROST then return end
@@ -7331,19 +7387,19 @@ end
                 local acted=false
                 if W.flags.crate then
                     local okCrate,handledCrate=pcall(crateTask)
-                    if not okCrate then warn(prefix.."Crate worker error: "..tostring(handledCrate)) end
+                    if not okCrate then do end end
                     if okCrate and handledCrate then acted=true end
                 end
                 -- No HQ or market purchase is allowed while ANY selected
                 -- equipment stat still has a level worth attempting.
                 if #equipmentCandidates()>0 then
                     local success,handled=pcall(equipTask)
-                    if not success then warn(prefix.."Equipment job failed: "..tostring(handled)) end
+                    if not success then do end end
                     if success and handled then acted=true end
                 else
                     -- Spend remaining Gold on selected base upgrades first.
                     local success,handled=pcall(baseTask)
-                    if not success then warn(prefix.."Base job failed: "..tostring(handled)) end
+                    if not success then do end end
                     if success and handled then acted=true end
                     if not handled and os.clock()-W.lastBase>=0.42 then
                         -- Non-upgrade jobs are kept, but only run once no
@@ -7351,7 +7407,7 @@ end
                         for offset=0,#extras-1 do
                             local index=(W.actionCursor+offset-1)%#extras+1
                             local okExtra,used=pcall(extras[index])
-                            if not okExtra then warn(prefix.."Wave job failed: "..tostring(used)) end
+                            if not okExtra then do end end
                             if okExtra and used then
                                 W.actionCursor=index%#extras+1
                                 acted=true
@@ -7378,7 +7434,7 @@ end
         Farm.utilityBusy=false
         W.inWorkflow=false
         W.workflowMode=nil
-        if not ok then warn(prefix.."Intermission error: "..tostring(err)) end
+        if not ok then do end end
     end
     local function updateStatus()
         local objective=waveObjective()
@@ -7453,7 +7509,7 @@ end
         flag="WavesLeaveWaveInputV78",callback=function(v)
             local n=tonumber(v)
             if not n or n~=math.floor(n) or n<1 or n>10000 then
-                warn(prefix.."Auto Leave: enter a whole-number wave from 1 to 10000")
+                do end
                 return
             end
             W.leaveAtWave=n
@@ -7566,14 +7622,14 @@ end
             W.worker=true
             task.spawn(function()
                 local ok,err=pcall(waveTick)
-                if not ok then warn(prefix..tostring(err)) end
+                if not ok then do end end
                 W.worker=false
             end)
         end
     end)
     Farm:SyncFarmMode()
     if wavesActive() then startUtilityWatcher() end
-    print(prefix.."v106 cinematic E watcher and Waves-only farm ready; Trost "..TROST)
+    do end
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
@@ -8091,12 +8147,12 @@ Farm.initializeMatchWebhook = function()
         if type(writefile)=="function" then
             local ok=pcall(writefile,"HollowMoon_AOT_RewardDebug_v96.txt",table.concat(lines,"\n"))
             if ok then
-                warn(prefix.."Reward details missing: local UI snapshot saved as HollowMoon_AOT_RewardDebug_v96.txt")
+                do end
             end
         end
         -- Also show a short preview for mobile users who cannot open files.
-        warn(prefix.."Reward details missing. Results UI preview:")
-        for i=1,math.min(#lines,22) do print(prefix..lines[i]) end
+        do end
+        for i=1,math.min(#lines,22) do do end end
     end
     local function formatField(lines)
         if #lines == 0 then return "`Not available from game results`" end
@@ -8220,10 +8276,10 @@ Farm.initializeMatchWebhook = function()
                     Farm.session.webhookLastSentKey = key
                     saveSession()
                 end
-                print(prefix .. (key and "Match result delivered" or "Test message delivered"))
+                do end
                 setStatus(key and "Last match delivered" or "Test delivered")
             else
-                warn(prefix .. "Not sent: " .. tostring(reason))
+                do end
                 setStatus("Not sent: " .. tostring(reason))
             end
             hook.sending, hook.pendingKey = false, nil
@@ -8265,20 +8321,18 @@ Farm.initializeMatchWebhook = function()
                 hook.collecting, hook.pendingKey = false, nil
                 return
             end
-            print(prefix .. string.format("Reward scan: %d rewards, %d drops, %d special, %d stats; %d visible results panels",
-                #bestOrdinary, #bestDrops, #bestSpecial, #bestStats, rootsFound))
+            do end
             if #bestOrdinary == 0 then
-                warn(prefix .. "v96: No Gold/XP/Gems reward amounts found in readable result labels; no values will be invented")
+                do end
             end
             if #bestDrops == 0 then
-                print(prefix .. "v96: No perk/drop entries detected; verify that the reward screen is still visible")
+                do end
             end
             if #bestOrdinary == 0 then
                 writeMissingRewardDiagnostic(key, #bestOrdinary, #bestDrops)
             end
             local embed = buildEmbed(false, bestOrdinary, bestDrops, bestSpecial, bestStats)
-            print(prefix .. "v96 match embed: " .. tostring(#(embed.fields or {})) .. " fields | "
-                .. tostring(embed.footer and embed.footer.text))
+            do end
             hook.collecting = false
             sendWithRetry(embed, key)
         end)
@@ -8365,7 +8419,7 @@ Farm.initializeMatchWebhook = function()
             setStatus("Webhook URL cleared locally")
         end,
     })
-    print(prefix .. "v95 Match tracker ready (strict rewards/drops/special classification)")
+    do end
 end
 Farm.initializeMatchWebhook()
 Farm.initializeMatchWebhook = nil
@@ -8376,8 +8430,8 @@ settingsTab:CreateButton({
     callback = function()
         if type(Farm.settingsCommit) ~= "function" then return end
         local saved, message = Farm.settingsCommit("manual")
-        print("[HollowMoonHub Settings] " .. tostring(message))
-        if not saved then warn("[HollowMoonHub Settings] Save verification FAILED") end
+        do end
+        if not saved then do end end
     end,
 })
 settingsTab:CreateButton({
@@ -8385,7 +8439,7 @@ settingsTab:CreateButton({
     callback = function()
         if type(Farm.settingsRestore) == "function" then
             local count, message = Farm.settingsRestore()
-            print("[HollowMoonHub Settings] " .. tostring(message) .. " (" .. tostring(count) .. " settings)")
+            do end
         end
     end,
 })
@@ -8586,7 +8640,7 @@ Farm.settingsCommit = commitPreferences
 Farm.settingsRestore = restorePreferences
 if savedPreferences then
     local n, msg = restorePreferences()
-    print("[HollowMoonHub Settings] " .. msg .. " (" .. tostring(n) .. ")")
+    do end
 end
 -- Poll only saved flags, not watcher labels, so UI text updates do not generate
 -- unnecessary file writes. Changes are saved even when a dropdown callback
@@ -8594,9 +8648,9 @@ end
 local lastValues = capturePreferenceValues()
 if canUsePreferenceFiles() then
     local ok, msg = commitPreferences("startup")
-    if not ok then warn("[HollowMoonHub Settings] " .. msg) end
+    if not ok then do end end
 else
-    warn("[HollowMoonHub Settings] Auto Save cannot persist: readfile/writefile unavailable")
+    do end
 end
 task.spawn(function()
     while not Farm.unloaded do
@@ -8605,7 +8659,7 @@ task.spawn(function()
         if not samePreferenceValues(lastValues, current) then
             lastValues = current
             local ok, msg = commitPreferences("change")
-            if not ok then warn("[HollowMoonHub Settings] " .. msg) end
+            if not ok then do end end
         end
     end
 end)
@@ -8649,7 +8703,7 @@ Farm.reconcileFastResumeAfterUI = function()
         Farm.opRunId=Farm.opRunId+1
         Farm.skillReservation=false
     end
-    print("[HollowMoonHub] Mobile fast resume reconciled with loaded UI settings")
+    do end
     end
 end
 Farm.reconcileFastResumeAfterUI()
