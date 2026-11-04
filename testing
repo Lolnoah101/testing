@@ -305,10 +305,10 @@ local Farm = {
     lobbyCurrentStatus = "Waiting for lobby",
 }
 ENV.HollowMoonAOTOutskirts = Farm
--- HollowMoonHubBuildV95: visible build stamp and Auto Execute cache signature.
-Farm.buildVersion = "v95"
+-- HollowMoonHubBuildV96: visible build stamp and Auto Execute cache signature.
+Farm.buildVersion = "v96"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
-print("[HollowMoonHub] Running v95 (verified webhook + independent Waves leave watcher)")
+print("[HollowMoonHub] Running v96 (expanded rewards scan and diagnostics)")
 
 -- Blade switching is an asynchronous inventory action: it does not need
 -- character control. Movement pauses ONLY for station trips, Waves workflows,
@@ -4298,7 +4298,7 @@ local function handleResultScreen()
     -- Give a pending webhook a bounded time to finish before teleport/retry
     -- replaces the results UI. Never hold gameplay indefinitely if HTTP fails.
     if Farm.Webhook and (
-        (Farm.Webhook.collecting and os.clock() - (Farm.Webhook.collectingSince or 0) < 6)
+        (Farm.Webhook.collecting and os.clock() - (Farm.Webhook.collectingSince or 0) < 8)
         or (Farm.Webhook.sending and os.clock() - (Farm.Webhook.sendingSince or 0) < 9)) then
         return
     end
@@ -4622,8 +4622,8 @@ Farm.refreshAutoExecCache = function()
             return
         end
         if not ok or type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonHubBuildV95", 1, true) then
-            Farm.autoExecCacheStatus = "GitHub is not serving v95; replace testing with the AOT v95 script"
+            or not src:find("HollowMoonHubBuildV96", 1, true) then
+            Farm.autoExecCacheStatus = "GitHub is not serving v96; replace testing with the AOT v96 script"
             warn("[HollowMoonHub] Auto Execute cache: " .. Farm.autoExecCacheStatus)
             Farm.autoExecCacheBusy = false
             return
@@ -4736,7 +4736,7 @@ task.spawn(function()
     end
     local function tryRun(src, origin)
         if type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonHubBuildV95", 1, true) then
+            or not src:find("HollowMoonHubBuildV96", 1, true) then
             return false
         end
         local okCompile, fn = pcall(loadstring, src)
@@ -4753,7 +4753,7 @@ task.spawn(function()
         -- Never start a second script after a partially completed execution.
         return true
     end
-    print("[HollowMoonHub v95] Teleport loader: checking version-pinned local cache")
+    print("[HollowMoonHub v96] Teleport loader: checking version-pinned local cache")
     local okLocal, cached = pcall(readfile, %q)
     if okLocal and tryRun(cached, "local cache") then return end
     if not enabled() then return end
@@ -4764,7 +4764,7 @@ task.spawn(function()
     end
     -- Store a working remote copy for the next teleport too.
     if type(remote) == "string" and #remote > 10000
-        and remote:find("HollowMoonHubBuildV95", 1, true) then
+        and remote:find("HollowMoonHubBuildV96", 1, true) then
         local okSyntax, fn = pcall(loadstring, remote)
         if okSyntax and type(fn) == "function" and type(writefile) == "function" then
             pcall(writefile, %q, remote)
@@ -7269,7 +7269,10 @@ Farm.initializeMatchWebhook = function()
             matchresults=true, matchresult=true, waveresults=true,
             waverewards=true, victory=true, victoryrewards=true,
             loot=true, lootresults=true, endresults=true, drops=true,
-            endscreen=true, completed=true,
+            endscreen=true, completed=true, rewardsframe=true,
+            rewardspanel=true, rewardscontainer=true, resultsframe=true,
+            rewardscreen=true, rewardpopup=true, rewardlist=true,
+            matchsummary=true, missioncomplete=true, endmatch=true,
         }
         for _, node in ipairs(pg:GetDescendants()) do
             if node:IsA("GuiObject") and names[node.Name:lower()]
@@ -7453,6 +7456,16 @@ Farm.initializeMatchWebhook = function()
                     if value ~= "" then
                         local section = sectionFor(node, root)
                         local context = (tostring(node.Name).." "..tostring(node.Parent and node.Parent.Name or "")):lower()
+                        -- Some games name the parent simply "Inner". Accept
+                        -- explicit item names in a results container even when
+                        -- the UI has no separate Drops heading. Stats are still
+                        -- filtered by addLine and special types remain strict.
+                        if not section then
+                            local low = value:lower()
+                            if isDropItem(low) or isSpecial(low, nil, context) then
+                                section = "rewards"
+                            end
+                        end
                         -- Preserve individual lines in multiline results labels.
                         -- Only split when the original label actually uses newlines.
                         local raw = tostring(node.Text or ""):gsub("<[^>]+>", "")
@@ -7490,7 +7503,172 @@ Farm.initializeMatchWebhook = function()
                 end
             end
         end
+        -- Some reward cards keep the item name and count in ValueBase children
+        -- or attributes rather than TextLabels. Read these only from actual
+        -- results roots; never assume the current inventory equals rewards.
+        if #ordinary == 0 or #drops == 0 or #special == 0 then
+            for _, root in ipairs(roots) do
+                local count = 0
+                for _, node in ipairs(root:GetDescendants()) do
+                    count = count + 1
+                    if count > 450 then break end
+                    local section = sectionFor(node, root)
+                    if section ~= "totals" and section ~= "stats" then
+                        if node:IsA("StringValue") then
+                            local itemName = clean(node.Value,100)
+                            local rarity = node:GetAttribute("Rarity")
+                            local parent = node.Parent
+                            if rarity == nil and parent then rarity=parent:GetAttribute("Rarity") end
+                            if type(rarity)=="string" and rarity~="" then
+                                itemName=itemName.." ("..clean(rarity,25)..")"
+                            end
+                            if isDropItem(itemName:lower()) or isSpecial(itemName:lower(), "drops", "perk") then
+                                addLine(itemName, "drops", "result metadata", true)
+                            end
+                        elseif node:IsA("IntValue") or node:IsA("NumberValue") then
+                            local low=tostring(node.Name):lower()
+                            local parentLow=tostring(node.Parent and node.Parent.Name or ""):lower()
+                            local label = isCurrency(low) and node.Name or (isCurrency(parentLow) and parentLow or nil)
+                            if label and type(node.Value)=="number" and node.Value>0 then
+                                addLine(label..": +"..formattedNumber(node.Value),"rewards","result metadata",true)
+                            end
+                        elseif node:IsA("GuiObject") then
+                            local itemName=node:GetAttribute("ItemName") or node:GetAttribute("DropName")
+                                or node:GetAttribute("RewardName")
+                            local rarity=node:GetAttribute("Rarity")
+                            if type(itemName)=="string" and itemName~="" then
+                                local value=clean(itemName,100)
+                                if type(rarity)=="string" and rarity~="" then
+                                    value=value.." ("..clean(rarity,25)..")"
+                                end
+                                local low=value:lower()
+                                if isDropItem(low) or isSpecial(low,"drops","perk") then
+                                    addLine(value,"drops","result metadata",true)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        -- v96 second pass: detect currency icons/names paired with nearby
+        -- quantities across nested card frames. The previous parser only
+        -- handled immediate siblings. This pass never guesses an amount.
+        if #ordinary == 0 then
+            local currencyKeys = {
+                gold="Gold", coin="Coins", coins="Coins",
+                gems="Gems", gem="Gems", xp="XP", experience="XP",
+                canes="Canes", cane="Canes",
+            }
+            local uniqueCurrency = {}
+            for _, root in ipairs(roots) do
+                local textNodes = {}
+                for _, node in ipairs(root:GetDescendants()) do
+                    if node:IsA("TextLabel") or node:IsA("TextButton") then
+                        local text = visibleText(node)
+                        if text ~= "" then
+                            textNodes[#textNodes+1] = {node=node, text=text}
+                        end
+                    elseif node:IsA("ImageLabel") or node:IsA("ImageButton") then
+                        if isGuiVisibleThroughParents(node, pg) then
+                            textNodes[#textNodes+1] = {node=node, text=node.Name}
+                        end
+                    end
+                    if #textNodes >= 360 then break end
+                end
+                for _, entry in ipairs(textNodes) do
+                    local node = entry.node
+                    local label = entry.text:lower():gsub("[^%a]", "")
+                    local kind = currencyKeys[label]
+                    local section = sectionFor(node, root)
+                    local parentName = tostring(node.Parent and node.Parent.Name or ""):lower()
+                    if kind and section ~= "totals" and section ~= "stats"
+                        and not parentName:find("balance",1,true)
+                        and not parentName:find("total",1,true) then
+                        local nearest, bestScore = nil, math.huge
+                        for _, candidate in ipairs(textNodes) do
+                            if candidate.node ~= node
+                                and (candidate.text:match("^%+?[%d,]+$")
+                                    or candidate.text:match("^[xX]%s*[%d,]+$")) then
+                                local a=node.Parent
+                                local related=false
+                                for _=1,3 do
+                                    if not a or a==root then break end
+                                    if candidate.node:IsDescendantOf(a) then
+                                        related=true;break
+                                    end
+                                    a=a.Parent
+                                end
+                                if related then
+                                    local ap=node.AbsolutePosition
+                                    local bp=candidate.node.AbsolutePosition
+                                    local dx=math.abs(ap.X-bp.X)
+                                    local dy=math.abs(ap.Y-bp.Y)
+                                    if dx<=200 and dy<=110 then
+                                        local score=dx*0.65+dy
+                                        if score<bestScore then nearest,bestScore=candidate,score end
+                                    end
+                                end
+                            end
+                        end
+                        if nearest then
+                            local amount = nearest.text:match("([%d,]+)")
+                            local key = kind..":"..tostring(amount)
+                            if amount and not uniqueCurrency[key] then
+                                uniqueCurrency[key]=true
+                                addLine(kind..": +"..amount,"rewards","reward card",true)
+                            end
+                        end
+                    end
+                end
+            end
+        end
         return ordinary, drops, special, stats, #roots
+    end
+    -- The matching game-place export wasn't available. When rewards still
+    -- aren't readable, keep a small LOCAL diagnostic of the real UI tree so
+    -- we can identify the correct value source without inventing amounts.
+    local function writeMissingRewardDiagnostic(key, numRewards, numDrops)
+        local roots,pg=rewardRoots()
+        local lines={
+            "HollowMoonHub v96 missing rewards diagnostic",
+            "Job: "..clean(game.JobId,60),
+            "Match key: "..clean(key,80),
+            "Parser: "..tostring(numRewards).." reward values; "..tostring(numDrops).." drops",
+            "Results roots: "..tostring(#roots),
+        }
+        for _,root in ipairs(roots) do
+            lines[#lines+1]="ROOT "..clean(root:GetFullName(),180)
+            local count=0
+            for _,node in ipairs(root:GetDescendants()) do
+                if node:IsA("TextLabel") or node:IsA("TextButton")
+                    or node:IsA("StringValue") or node:IsA("IntValue")
+                    or node:IsA("NumberValue") or node:IsA("ImageLabel") then
+                    local raw=""
+                    if node:IsA("TextLabel") or node:IsA("TextButton") then
+                        raw=tostring(node.Text or ""):gsub("<[^>]+>", "")
+                    elseif node:IsA("ValueBase") then raw=tostring(node.Value)
+                    else raw="[image]" end
+                    raw=clean(raw,100)
+                    if raw~="" then
+                        local parents=clean(tostring(node.Parent and node.Parent.Name or ""),50)
+                        lines[#lines+1]=string.format("%s / %s [%s]: %s",
+                            parents,clean(node.Name,60),node.ClassName,raw)
+                        count=count+1
+                    end
+                end
+                if count>=100 then break end
+            end
+        end
+        if type(writefile)=="function" then
+            local ok=pcall(writefile,"HollowMoon_AOT_RewardDebug_v96.txt",table.concat(lines,"\n"))
+            if ok then
+                warn(prefix.."Reward details missing: local UI snapshot saved as HollowMoon_AOT_RewardDebug_v96.txt")
+            end
+        end
+        -- Also show a short preview for mobile users who cannot open files.
+        warn(prefix.."Reward details missing. Results UI preview:")
+        for i=1,math.min(#lines,22) do print(prefix..lines[i]) end
     end
     local function formatField(lines)
         if #lines == 0 then return "`Not available from game results`" end
@@ -7558,11 +7736,11 @@ Farm.initializeMatchWebhook = function()
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test (v95)"
+            title = testMode and "HollowMoonHub • Webhook Test (v96)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v95"},
+            footer = {text="HollowMoonHub • Match Tracker • v96"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
@@ -7637,7 +7815,7 @@ Farm.initializeMatchWebhook = function()
             local bestOrdinary, bestDrops, bestSpecial, bestStats = {}, {}, {}, {}
             local bestScore, lastChange, rootsFound = -1, os.clock(), 0
             local started = os.clock()
-            while os.clock() - started < 4.6 do
+            while os.clock() - started < 7.0 do
                 if Farm.unloaded or not hook.enabled then
                     hook.collecting, hook.pendingKey = false, nil
                     return
@@ -7662,13 +7840,16 @@ Farm.initializeMatchWebhook = function()
             print(prefix .. string.format("Reward scan: %d rewards, %d drops, %d special, %d stats; %d visible results panels",
                 #bestOrdinary, #bestDrops, #bestSpecial, #bestStats, rootsFound))
             if #bestOrdinary == 0 then
-                warn(prefix .. "v95: No Gold/XP/Gems reward amounts found in readable result labels; no values will be invented")
+                warn(prefix .. "v96: No Gold/XP/Gems reward amounts found in readable result labels; no values will be invented")
             end
             if #bestDrops == 0 then
-                print(prefix .. "v95: No perk/drop entries detected; verify that the reward screen is still visible")
+                print(prefix .. "v96: No perk/drop entries detected; verify that the reward screen is still visible")
+            end
+            if #bestOrdinary == 0 then
+                writeMissingRewardDiagnostic(key, #bestOrdinary, #bestDrops)
             end
             local embed = buildEmbed(false, bestOrdinary, bestDrops, bestSpecial, bestStats)
-            print(prefix .. "v95 match embed: " .. tostring(#(embed.fields or {})) .. " fields | "
+            print(prefix .. "v96 match embed: " .. tostring(#(embed.fields or {})) .. " fields | "
                 .. tostring(embed.footer and embed.footer.text))
             hook.collecting = false
             sendWithRetry(embed, key)
