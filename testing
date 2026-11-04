@@ -1,6 +1,6 @@
 --[[
     HollowMoonHub | Attack on Titan: Revolution (Outskirts)
-    Combat v92: Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; retains v87 pre-cached fast GitHub Auto Execute; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    Combat v92: Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -311,9 +311,9 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v106"
+Farm.buildVersion = "v107"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
-print("[HollowMoonHub] Running v106 (cinematic prompt E input + raid movement)")
+print("[HollowMoonHub] Running v107 (GitHub-only Auto Execute)")
 
 -- Blade switching is an asynchronous inventory action: it does not need
 -- character control. Movement pauses ONLY for station trips, Waves workflows,
@@ -4904,7 +4904,6 @@ local AUTOEXEC_FOLDER = "HollowMoonHub"
 local AUTOEXEC_URL = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
 -- Reuse the old toggle marker and Rayfield flag, so existing saves keep working.
 local AUTOEXEC_FLAG_FILE = AUTOEXEC_FOLDER .. "/AOT_Revolution_v44_enabled.txt"
-local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source_unpinned_v106.lua"
 Farm.autoExecUICacheFile = AUTOEXEC_FOLDER .. "/AOT_Gen2_cached.lua"
 Farm.gen2Url = "https://sirius.menu/gen2"
 local function fileOpsReady()
@@ -4924,88 +4923,13 @@ local function queueFunction()
         or (type(synObj) == "table" and type(synObj.queue_on_teleport) == "function" and synObj.queue_on_teleport)
 end
 
--- v87: download and validate the current GitHub script WHILE in the present place.
--- The next teleport can execute it from an executor-local file immediately,
--- without waiting for a fresh network request. Runs asynchronously.
-Farm.autoExecCacheBusy = false
-Farm.autoExecCacheStatus = "Not prepared"
-Farm.refreshAutoExecCache = function()
-    if Farm.unloaded or not Farm.autoExecute or Farm.autoExecCacheBusy then return end
-    if not ensureAutoFolder() then return end
-    Farm.autoExecCacheBusy = true
-    task.spawn(function()
-        local ok, src = pcall(function() return game:HttpGet(AUTOEXEC_URL .. "?t=" .. tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))) end)
-        if not Farm.autoExecute or Farm.unloaded then
-            Farm.autoExecCacheBusy = false
-            return
-        end
-        if not ok or type(src) ~= "string" or #src < 10000
-            or not src:find("ENV.HollowMoonAOTOutskirts = Farm", 1, true) then
-            Farm.autoExecCacheStatus = "GitHub response is not a recognized HollowMoonHub AOT Lua script"
-            warn("[HollowMoonHub] Auto Execute cache: " .. Farm.autoExecCacheStatus)
-            Farm.autoExecCacheBusy = false
-            return
-        end
-        local compiledOk, fn = pcall(loadstring, src)
-        if not compiledOk or type(fn) ~= "function" then
-            Farm.autoExecCacheStatus = "GitHub script did not compile"
-            warn("[HollowMoonHub] Auto Execute cache: " .. Farm.autoExecCacheStatus)
-            Farm.autoExecCacheBusy = false
-            return
-        end
-        local wrote = pcall(writefile, AUTOEXEC_CACHE_FILE, src)
-        local readOk, verify = pcall(readfile, AUTOEXEC_CACHE_FILE)
-        if wrote and readOk and verify == src then
-            Farm.autoExecCacheStatus = "Cached: ready for fast teleport"
-            print("[HollowMoonHub] Auto Execute prefetched; next teleport uses local cache")
-        else
-            Farm.autoExecCacheStatus = "Cache write failed; GitHub fallback remains available"
-            warn("[HollowMoonHub] " .. Farm.autoExecCacheStatus)
-        end
-        Farm.autoExecCacheBusy = false
-    end)
-end
-
--- Cache the same Rayfield Gen2 loader ahead of the *next* teleport.
--- A cache hit avoids another synchronous HTTP request during startup. If the
--- cache is stale or invalid, the normal live Gen2 download still works.
-Farm.refreshGen2Cache = function()
-    if Farm.unloaded or not Farm.autoExecute or Farm.gen2CacheBusy then return end
-    if not ensureAutoFolder() then return end
-    -- A previously loaded Gen2 copy is already saved by loadGen2UI().
-    -- Avoid a needless second HTTP request on bandwidth-limited phones.
-    local present, cached = pcall(readfile, Farm.autoExecUICacheFile)
-    if present and type(cached) == "string" and #cached > 50 then
-        local valid, fn = pcall(loadstring, cached)
-        if valid and type(fn) == "function" then return end
-    end
-    Farm.gen2CacheBusy = true
-    task.spawn(function()
-        local ok, source = pcall(function() return game:HttpGet(Farm.gen2Url) end)
-        if ok and type(source) == "string" and #source > 50
-            and type(loadstring) == "function" then
-            local compiled, fn = pcall(loadstring, source)
-            if compiled and type(fn) == "function" then
-                local wrote = pcall(writefile, Farm.autoExecUICacheFile, source)
-                if wrote then
-                    local verified, saved = pcall(readfile, Farm.autoExecUICacheFile)
-                    if verified and saved == source then
-                        Farm.gen2CacheStatus = "Ready for next teleport"
-                    else
-                        Farm.gen2CacheStatus = "Read-back failed"
-                    end
-                end
-            end
-        end
-        Farm.gen2CacheBusy = false
-    end)
-end
-
+-- v107: GitHub-only Auto Execute. No AOT source cache, preload, or
+-- strict build/version marker. The only on-disk Auto Execute state is its
+-- enable/disable flag; Rayfield's separate UI cache is unaffected.
 local function syncAutoExecute()
-    -- The flag remains cancelable even after the executor has queued the loader.
     if not ensureAutoFolder() then
         if Farm.autoExecute then
-            warn("[HollowMoonHub] Auto Execute requires executor file APIs to keep the toggle cancelable")
+            warn("[HollowMoonHub] Auto Execute requires executor file APIs for an on/off flag")
         end
         return
     end
@@ -5016,10 +4940,6 @@ local function syncAutoExecute()
     end
     if not Farm.autoExecute then return end
 
-    -- Warm the cache without holding up the current script or the Settings UI.
-    Farm.refreshAutoExecCache()
-    Farm.refreshGen2Cache()
-
     local queue = queueFunction()
     if not queue then
         warn("[HollowMoonHub] Auto Execute requires queue_on_teleport support")
@@ -5027,17 +4947,15 @@ local function syncAutoExecute()
     end
     if Farm.queuedAutoExecute then return end
 
-    -- The queued bootstrap is tiny. Fast path: read cached source on the new
-    -- server. Fallback: fetch latest from GitHub if no valid cache exists.
-    -- It never runs if the original toggle was turned off.
+    -- Queue only a small network loader, not a script copy. Every successful
+    -- teleport makes a fresh request to the configured GitHub raw file.
     local queued = string.format([==[
 task.spawn(function()
-    -- Multiple teleport callbacks on mobile must not compile/run the entire
-    -- codebase twice: overlapping controllers can work against each other.
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local jobKey = tostring(game.JobId) .. ":" .. tostring(game.PlaceId)
     if env.HollowMoonAOTQueueJob == jobKey then return end
     env.HollowMoonAOTQueueJob = jobKey
+
     local function enabled()
         if type(readfile) ~= "function" then return false end
         local ok, flag = pcall(readfile, %q)
@@ -5052,53 +4970,40 @@ task.spawn(function()
         env.HollowMoonAOTQueueJob = nil
         return
     end
-    local function tryRun(src, origin)
-        if type(src) ~= "string" or #src < 10000
-            or not src:find("ENV.HollowMoonAOTOutskirts = Farm", 1, true) then
-            return false
+
+    local url = %q
+    for attempt = 1, 2 do
+        if not enabled() then return end
+        -- The unique query helps avoid stale CDN responses without using a
+        -- local source cache or imposing a strict version requirement.
+        local freshUrl = url .. "?hmFresh=" .. tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))
+        local okFetch, source = pcall(function() return game:HttpGet(freshUrl) end)
+        if okFetch and type(source) == "string" and source ~= "" then
+            local okCompile, fn = pcall(loadstring, source)
+            if okCompile and type(fn) == "function" then
+                if not enabled() then return end
+                local version = source:match('Farm%%.buildVersion%%s*=%%s*"([^"]+)"') or "unknown"
+                print("[HollowMoonHub] Auto Execute: running GitHub source (" .. version .. ")")
+                local okRun, errRun = pcall(fn)
+                if not okRun then
+                    warn("[HollowMoonHub] GitHub script error: " .. tostring(errRun))
+                end
+                return
+            end
+            warn("[HollowMoonHub] GitHub script compilation failed: " .. tostring(fn))
+            return
         end
-        local okCompile, fn = pcall(loadstring, src)
-        if not okCompile or type(fn) ~= "function" then
-            warn("[HollowMoonHub] " .. origin .. " source failed to compile")
-            return false
-        end
-        if not enabled() then return true end
-        print("[HollowMoonHub] Auto Execute starting from " .. origin)
-        local okRun, runErr = pcall(fn)
-        if not okRun then
-            warn("[HollowMoonHub] Auto Execute error (" .. origin .. "): " .. tostring(runErr))
-        end
-        -- Never start a second script after a partially completed execution.
-        return true
-    end
-    print("[HollowMoonHub v106] Teleport loader: checking local cache")
-    local okLocal, cached = pcall(readfile, %q)
-    if okLocal and tryRun(cached, "local cache") then return end
-    if not enabled() then return end
-    local okHttp, remote = pcall(function() return game:HttpGet(%q .. "?t=" .. tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))) end)
-    if not okHttp or type(remote) ~= "string" or remote == "" then
-        warn("[HollowMoonHub] Auto Execute GitHub fallback failed: " .. tostring(remote))
-        return
-    end
-    -- Store a working remote copy for the next teleport too.
-    if type(remote) == "string" and #remote > 10000
-        and remote:find("ENV.HollowMoonAOTOutskirts = Farm", 1, true) then
-        local okSyntax, fn = pcall(loadstring, remote)
-        if okSyntax and type(fn) == "function" and type(writefile) == "function" then
-            pcall(writefile, %q, remote)
-        end
-    end
-    if not tryRun(remote, "GitHub fallback") then
-        warn("[HollowMoonHub] Auto Execute GitHub content is not a valid AOT script")
+        warn("[HollowMoonHub] GitHub download failed (attempt " .. attempt .. "): " .. tostring(source))
+        if attempt == 1 then task.wait(0.75) end
     end
 end)
-]==], AUTOEXEC_FLAG_FILE, AUTOEXEC_CACHE_FILE, AUTOEXEC_URL, AUTOEXEC_CACHE_FILE)
+]==], AUTOEXEC_FLAG_FILE, AUTOEXEC_URL)
     local ok, errQueue = pcall(queue, queued)
     if ok then
         Farm.queuedAutoExecute = true
-        print("[HollowMoonHub] Fast Auto Execute queued for next teleport")
+        print("[HollowMoonHub] GitHub-only Auto Execute queued for next teleport")
     else
-        warn("[HollowMoonHub] Fast Auto Execute queue failed: " .. tostring(errQueue))
+        warn("[HollowMoonHub] GitHub-only Auto Execute queue failed: " .. tostring(errQueue))
     end
 end
 
