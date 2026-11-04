@@ -310,10 +310,10 @@ local Farm = {
     lobbyCurrentStatus = "Waiting for lobby",
 }
 ENV.HollowMoonAOTOutskirts = Farm
--- HollowMoonHubBuildV99: visible build stamp and Auto Execute cache signature.
-Farm.buildVersion = "v99"
+-- HollowMoonHubBuildV100: visible build stamp and Auto Execute cache signature.
+Farm.buildVersion = "v100"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
-print("[HollowMoonHub] Running v99 (Auto Leave wave counter comparison and transfer diagnostics)")
+print("[HollowMoonHub] Running v100 (GitHub cache-busting Auto Execute)")
 
 -- Blade switching is an asynchronous inventory action: it does not need
 -- character control. Movement pauses ONLY for station trips, Waves workflows,
@@ -4674,7 +4674,7 @@ local AUTOEXEC_FOLDER = "HollowMoonHub"
 local AUTOEXEC_URL = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
 -- Reuse the old toggle marker and Rayfield flag, so existing saves keep working.
 local AUTOEXEC_FLAG_FILE = AUTOEXEC_FOLDER .. "/AOT_Revolution_v44_enabled.txt"
-local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source.lua"
+local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source_v100.lua"
 Farm.autoExecUICacheFile = AUTOEXEC_FOLDER .. "/AOT_Gen2_cached.lua"
 Farm.gen2Url = "https://sirius.menu/gen2"
 local function fileOpsReady()
@@ -4704,14 +4704,14 @@ Farm.refreshAutoExecCache = function()
     if not ensureAutoFolder() then return end
     Farm.autoExecCacheBusy = true
     task.spawn(function()
-        local ok, src = pcall(function() return game:HttpGet(AUTOEXEC_URL) end)
+        local ok, src = pcall(function() return game:HttpGet(AUTOEXEC_URL .. "?hmBuild=v100&t=" .. tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))) end)
         if not Farm.autoExecute or Farm.unloaded then
             Farm.autoExecCacheBusy = false
             return
         end
         if not ok or type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonHubBuildV99", 1, true) then
-            Farm.autoExecCacheStatus = "GitHub is not serving v99; replace testing with the AOT v99 script"
+            or not src:find("HollowMoonHubBuildV100", 1, true) then
+            Farm.autoExecCacheStatus = "GitHub returned older content; expected v100. Check main/testing on GitHub"
             warn("[HollowMoonHub] Auto Execute cache: " .. Farm.autoExecCacheStatus)
             Farm.autoExecCacheBusy = false
             return
@@ -4824,7 +4824,7 @@ task.spawn(function()
     end
     local function tryRun(src, origin)
         if type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonHubBuildV99", 1, true) then
+            or not src:find("HollowMoonHubBuildV100", 1, true) then
             return false
         end
         local okCompile, fn = pcall(loadstring, src)
@@ -4841,18 +4841,18 @@ task.spawn(function()
         -- Never start a second script after a partially completed execution.
         return true
     end
-    print("[HollowMoonHub v99] Teleport loader: checking version-pinned local cache")
+    print("[HollowMoonHub v100] Teleport loader: checking version-pinned local cache")
     local okLocal, cached = pcall(readfile, %q)
     if okLocal and tryRun(cached, "local cache") then return end
     if not enabled() then return end
-    local okHttp, remote = pcall(function() return game:HttpGet(%q) end)
+    local okHttp, remote = pcall(function() return game:HttpGet(%q .. "?hmBuild=v100&t=" .. tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))) end)
     if not okHttp or type(remote) ~= "string" or remote == "" then
         warn("[HollowMoonHub] Auto Execute GitHub fallback failed: " .. tostring(remote))
         return
     end
     -- Store a working remote copy for the next teleport too.
     if type(remote) == "string" and #remote > 10000
-        and remote:find("HollowMoonHubBuildV99", 1, true) then
+        and remote:find("HollowMoonHubBuildV100", 1, true) then
         local okSyntax, fn = pcall(loadstring, remote)
         if okSyntax and type(fn) == "function" and type(writefile) == "function" then
             pcall(writefile, %q, remote)
@@ -7347,7 +7347,7 @@ end
     end)
     Farm:SyncFarmMode()
     if wavesActive() then startUtilityWatcher() end
-    print(prefix.."v99 Auto Leave diagnostics and Waves-only farm ready; Trost "..TROST)
+    print(prefix.."v100 Auto Leave diagnostics and Waves-only farm ready; Trost "..TROST)
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
@@ -7938,11 +7938,11 @@ Farm.initializeMatchWebhook = function()
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test (v99)"
+            title = testMode and "HollowMoonHub • Webhook Test (v100)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v99"},
+            footer = {text="HollowMoonHub • Match Tracker • v100"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
