@@ -305,10 +305,10 @@ local Farm = {
     lobbyCurrentStatus = "Waiting for lobby",
 }
 ENV.HollowMoonAOTOutskirts = Farm
--- HollowMoonHubBuildV94: visible build stamp and Auto Execute cache signature.
-Farm.buildVersion = "v94"
+-- HollowMoonHubBuildV95: visible build stamp and Auto Execute cache signature.
+Farm.buildVersion = "v95"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
-print("[HollowMoonHub] Running v94 (continuous farm travel during blade swap + rewards cache guard)")
+print("[HollowMoonHub] Running v95 (verified webhook + independent Waves leave watcher)")
 
 -- Blade switching is an asynchronous inventory action: it does not need
 -- character control. Movement pauses ONLY for station trips, Waves workflows,
@@ -4622,8 +4622,8 @@ Farm.refreshAutoExecCache = function()
             return
         end
         if not ok or type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonHubBuildV94", 1, true) then
-            Farm.autoExecCacheStatus = "GitHub is not serving v94; update GitHub testing file first"
+            or not src:find("HollowMoonHubBuildV95", 1, true) then
+            Farm.autoExecCacheStatus = "GitHub is not serving v95; replace testing with the AOT v95 script"
             warn("[HollowMoonHub] Auto Execute cache: " .. Farm.autoExecCacheStatus)
             Farm.autoExecCacheBusy = false
             return
@@ -4736,7 +4736,7 @@ task.spawn(function()
     end
     local function tryRun(src, origin)
         if type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonHubBuildV94", 1, true) then
+            or not src:find("HollowMoonHubBuildV95", 1, true) then
             return false
         end
         local okCompile, fn = pcall(loadstring, src)
@@ -4753,7 +4753,7 @@ task.spawn(function()
         -- Never start a second script after a partially completed execution.
         return true
     end
-    print("[HollowMoonHub v94] Teleport loader: checking version-pinned local cache")
+    print("[HollowMoonHub v95] Teleport loader: checking version-pinned local cache")
     local okLocal, cached = pcall(readfile, %q)
     if okLocal and tryRun(cached, "local cache") then return end
     if not enabled() then return end
@@ -4764,7 +4764,7 @@ task.spawn(function()
     end
     -- Store a working remote copy for the next teleport too.
     if type(remote) == "string" and #remote > 10000
-        and remote:find("HollowMoonHubBuildV94", 1, true) then
+        and remote:find("HollowMoonHubBuildV95", 1, true) then
         local okSyntax, fn = pcall(loadstring, remote)
         if okSyntax and type(fn) == "function" and type(writefile) == "function" then
             pcall(writefile, %q, remote)
@@ -6768,68 +6768,99 @@ end
         log(W.emergencyStatus)
         return true
     end
-    -- Auto Leave at Wave runs from an INDEPENDENT Heartbeat watcher. The old
-    -- worker returned before checking this when a crate, station refill or
-    -- upgrade owned utilityBusy; it also demanded a narrow Skip/results phase.
-    -- Reaching the selected wave now triggers the game's native Leave action
-    -- immediately, including while combat is ongoing. Retry if still in Trost.
-    local function waveLeaveTask()
-        if not W.flags.leave or not wavesActive() then return false end
+    -- v95: Leave watcher is independent of upgrade, crate, vote and result-panel
+    -- state. The game can remove the Objective tag during transitions; do NOT
+    -- let that disable a previously selected leave wave. All other Waves actions
+    -- remain guarded by wavesActive() and the specific Trost place.
+    W.readWaveCounter=function()
         local f=folder()
-        if not f then
-            W.leaveStatus="Waiting for Waves folder"
-            return false
-        end
+        if not f then return nil,"Waves folder missing" end
         local obj=waveObjective()
-        local current=tonumber(f:GetAttribute("Wave"))
-            or tonumber(Workspace:GetAttribute("Wave"))
-            or tonumber(obj and obj:GetAttribute("Wave"))
+        local candidates={
+            {f:GetAttribute("Wave"),"Waves.Wave attribute"},
+            {f:GetAttribute("CurrentWave"),"Waves.CurrentWave attribute"},
+            {Workspace:GetAttribute("Wave"),"Workspace.Wave attribute"},
+            {obj and obj:GetAttribute("Wave"),"Objective.Wave attribute"},
+        }
+        for _,entry in ipairs(candidates) do
+            local number=tonumber(entry[1])
+            if number and number>=0 and number<100000 then
+                return math.floor(number),entry[2]
+            end
+        end
+        for _,parent in ipairs({f,f:FindFirstChild("Objectives")}) do
+            if parent then
+                for _,name in ipairs({"Wave","CurrentWave"}) do
+                    local entry=parent:FindFirstChild(name)
+                    if entry and entry:IsA("ValueBase") then
+                        local number=tonumber(entry.Value)
+                        if number and number>=0 and number<100000 then
+                            return math.floor(number),entry:GetFullName()..".Value"
+                        end
+                    end
+                end
+            end
+        end
+        return nil,"No replicated Wave or CurrentWave number found"
+    end
+    W.tryLobbyTeleport=function()
+        if Farm.unloaded or game.PlaceId~=TROST or not W.flags.leave then return end
+        local now=os.clock()
+        if now-W.leaveFallbackAttempt<8 then return end
+        W.leaveFallbackAttempt=now
+        W.leaveStatus="Town Central transfer requested; awaiting game response"
+        log("Auto Leave: trying official Town Central teleport")
+        task.spawn(function()
+            local ok,err=pcall(function()
+                TeleportService:Teleport(lobby,LocalPlayer)
+            end)
+            if not ok and game.PlaceId==TROST then
+                W.leaveStatus="Town Central teleport rejected: "..tostring(err)
+                warn(prefix..W.leaveStatus)
+            end
+            -- A successful pcall only means the request was submitted, NOT
+            -- that the destination server accepted the teleport.
+        end)
+    end
+    local function waveLeaveTask()
+        if not W.flags.leave or Farm.unloaded or game.PlaceId~=TROST then return false end
+        local current,source=W.readWaveCounter()
         if not current then
-            W.leaveStatus="Wave number not replicated yet"
+            W.leaveStatus="Waiting for wave counter: "..tostring(source)
             return false
         end
+        W.leaveObserved=current
         if current<W.leaveAtWave then
-            W.leaveStatus="Wave "..current.." / "..W.leaveAtWave
+            W.leaveStatus="Wave "..current.." / "..W.leaveAtWave.." ("..source..")"
             return false
         end
         local now=os.clock()
-        W.leaveStatus="Target reached ("..current.." / "..W.leaveAtWave..")"
         if now-W.lastLeaveAttempt<6 then return true end
         W.lastLeaveAttempt=now
         W.leaveAttempts=W.leaveAttempts+1
+        W.leaveStatus="Wave "..current.." reached; leave attempt "..W.leaveAttempts
+        log("Auto Leave: "..W.leaveStatus)
         local post=getRemote("POST")
         if post and post:IsA("RemoteEvent") then
             local ok,err=pcall(function()
                 post:FireServer("Functions","Teleport")
             end)
-            if ok then
-                W.leaveStatus="Leave request #"..W.leaveAttempts.." sent at wave "..current
-                log("Auto Leave: "..W.leaveStatus.."; checking for Town Central transfer")
+            if not ok then
+                W.leaveStatus="Native leave request failed: "..tostring(err)
+                warn(prefix..W.leaveStatus)
             else
-                W.leaveStatus="Game leave remote failed: "..tostring(err)
-                log(W.leaveStatus)
+                W.leaveStatus="Native leave request submitted; waiting for transfer"
             end
         else
-            W.leaveStatus="Waiting for native Leave POST remote"
-            log(W.leaveStatus)
+            W.leaveStatus="Native leave remote not found; trying Town Central transfer"
+            warn(prefix..W.leaveStatus)
         end
-        -- POST:FireServer cannot confirm that the server accepted the request.
-        -- If still here after two attempts, try the known Town Central PlaceId.
-        -- This is a best-effort fallback, never reported as success before moving.
-        if W.leaveAttempts>=2 and now-W.leaveFallbackAttempt>=12 then
-            W.leaveFallbackAttempt=now
-            task.spawn(function()
-                if Farm.unloaded or game.PlaceId~=TROST or not W.flags.leave then return end
-                local ok,err=pcall(function()
-                    TeleportService:Teleport(lobby,LocalPlayer)
-                end)
-                if ok then
-                    log("Auto Leave fallback: Town Central teleport requested; waiting for transfer")
-                else
-                    log("Auto Leave fallback rejected: "..tostring(err))
-                end
-            end)
-        end
+        -- The server may ignore a FireServer call without returning an error.
+        -- After a short grace period, attempt the legitimate destination place.
+        task.delay(2.5,function()
+            if Farm.unloaded or not W.flags.leave or game.PlaceId~=TROST then return end
+            W.tryLobbyTeleport()
+        end)
         return true
     end
     local function waveTick()
@@ -6962,7 +6993,9 @@ end
         local status=wavesActive()
             and string.format("Wave %s | Gold %s | Vote %s | Leave at %s: %s | %s | %s",
                 tostring(wave or "?"),gold,vote,tostring(W.leaveAtWave),
-                W.flags.leave and "ON" or "OFF",W.downtimeStatus,W.lastAction)
+                W.flags.leave and ("ON ("..tostring(W.leaveStatus)..")") or "OFF",W.downtimeStatus,W.lastAction)
+            or (game.PlaceId==TROST and W.flags.leave
+                and ("Auto Leave: "..tostring(W.leaveStatus)))
             or "Waves controls paused outside Trost Waves"
         if W.text then pcall(function() W.text:Set(status) end) end
         local selection=W.blessingsSelection or {}
@@ -7044,6 +7077,15 @@ end
             return
         end
         if not wavesActive() then
+            -- v95: Keep the leave watcher running within Trost even when the
+            -- gameplay Objective temporarily despawns. No other Waves worker runs.
+            if game.PlaceId==TROST and W.flags.leave then
+                W.leaveElapsed=(W.leaveElapsed or 0)+dt
+                if W.leaveElapsed>=0.45 then
+                    W.leaveElapsed=W.leaveElapsed%0.45
+                    waveLeaveTask()
+                end
+            end
             -- Do not reset saved toggle values; only suspend Waves behavior.
             -- An in-flight worker owns inWorkflow until its cleanup runs.
             W.breakToken=nil
@@ -7103,7 +7145,7 @@ end
         end
     end)
     if wavesActive() then startUtilityWatcher() end
-    print(prefix.."v94 Waves-only guard ready; Trost "..TROST)
+    print(prefix.."v95 Waves-only guard ready; Trost "..TROST)
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
@@ -7516,11 +7558,11 @@ Farm.initializeMatchWebhook = function()
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test"
+            title = testMode and "HollowMoonHub • Webhook Test (v95)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v94"},
+            footer = {text="HollowMoonHub • Match Tracker • v95"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
@@ -7620,12 +7662,14 @@ Farm.initializeMatchWebhook = function()
             print(prefix .. string.format("Reward scan: %d rewards, %d drops, %d special, %d stats; %d visible results panels",
                 #bestOrdinary, #bestDrops, #bestSpecial, #bestStats, rootsFound))
             if #bestOrdinary == 0 then
-                warn(prefix .. "v94: No Gold/XP/Gems reward amounts found in readable result labels; no values will be invented")
+                warn(prefix .. "v95: No Gold/XP/Gems reward amounts found in readable result labels; no values will be invented")
             end
             if #bestDrops == 0 then
-                print(prefix .. "v94: No perk/drop entries detected; verify that the reward screen is still visible")
+                print(prefix .. "v95: No perk/drop entries detected; verify that the reward screen is still visible")
             end
             local embed = buildEmbed(false, bestOrdinary, bestDrops, bestSpecial, bestStats)
+            print(prefix .. "v95 match embed: " .. tostring(#(embed.fields or {})) .. " fields | "
+                .. tostring(embed.footer and embed.footer.text))
             hook.collecting = false
             sendWithRetry(embed, key)
         end)
@@ -7712,7 +7756,7 @@ Farm.initializeMatchWebhook = function()
             setStatus("Webhook URL cleared locally")
         end,
     })
-    print(prefix .. "v94 Match tracker ready (strict rewards/drops/special classification)")
+    print(prefix .. "v95 Match tracker ready (strict rewards/drops/special classification)")
 end
 Farm.initializeMatchWebhook()
 Farm.initializeMatchWebhook = nil
