@@ -1,6 +1,6 @@
 --[[
     HollowMoonHub | Attack on Titan: Revolution (Outskirts)
-    Combat v90: Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; retains v87 pre-cached fast GitHub Auto Execute; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    Combat v92: Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; retains v87 pre-cached fast GitHub Auto Execute; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -6956,132 +6956,240 @@ Farm.initializeMatchWebhook = function()
             out[#out+1] = label .. ": " .. formattedNumber(n)
         end
     end
-    -- v89: Missions and Trost Waves don't necessarily share the same Rewards
-    -- panel, and reward labels often appear after the completion event. Only
-    -- inspect visible game results/reward containers (never arbitrary UI/chat).
+    -- v92: Rewards, drops and combat stats have different meanings.
+    -- Parse only the visible match-results UI and never classify a bare
+    -- "+number" or an "Inner" frame name as a special reward.
     local function rewardRoots()
         local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
         local roots, seen = {}, {}
-        if not pg then return roots end
+        if not pg then return roots, pg end
         local names = {
             rewards=true, reward=true, results=true, result=true,
             matchresults=true, matchresult=true, waveresults=true,
             waverewards=true, victory=true, victoryrewards=true,
-            loot=true, lootresults=true, drops=true, endresults=true,
+            loot=true, lootresults=true, endresults=true, drops=true,
+            endscreen=true, completed=true,
         }
         for _, node in ipairs(pg:GetDescendants()) do
             if node:IsA("GuiObject") and names[node.Name:lower()]
                 and isGuiVisibleThroughParents(node, pg) and not seen[node] then
-                -- Nested reward roots are harmless; values are de-duplicated.
                 seen[node] = true
                 roots[#roots+1] = node
-                if #roots >= 20 then break end
+                if #roots >= 25 then break end
             end
         end
         return roots, pg
     end
 
     local function collectRewardLines()
-        local ordinary, special, seen = {}, {}, {}
+        local ordinary, drops, special, stats = {}, {}, {}, {}
         local roots, pg = rewardRoots()
-        local function ordinaryKind(value)
+        if not pg then return ordinary, drops, special, stats, 0 end
+        local seenNodes, seenPairs, seenStats = {}, {}, {}
+
+        local function visibleText(node)
+            if not (node:IsA("TextLabel") or node:IsA("TextButton"))
+                or not isGuiVisibleThroughParents(node, pg) then return "" end
+            return clean(tostring(node.Text or ""):gsub("<[^>]+>", ""), 180)
+        end
+        local function headingSection(value)
+            local low = value:lower():gsub(":$", "")
+            if low == "special rewards" or low == "special drops" then return "special" end
+            if low == "drops" or low == "loot" or low == "items" then return "drops" end
+            if low == "rewards" or low == "match rewards" or low == "earned" then return "rewards" end
+            if low == "stats" or low == "match stats" or low == "statistics" then return "stats" end
+            if low == "total stats" or low == "totals" or low == "player stats" then return "totals" end
+            return nil
+        end
+        local function namedSection(value)
+            local low = tostring(value or ""):lower():gsub("[%s_%-]", "")
+            if low:find("specialreward", 1, true) or low:find("specialdrop",1,true) then return "special" end
+            if low:find("rewarditems", 1, true) or low:find("earned",1,true) then return "rewards" end
+            if low:find("drops",1,true) or low:find("loot",1,true) then return "drops" end
+            if low:find("matchstats",1,true) or low:find("combatstats",1,true) then return "stats" end
+            if low:find("totals",1,true) or low:find("playerstats",1,true) then return "totals" end
+            return nil
+        end
+        local headings = {}
+        for _, root in ipairs(roots) do
+            for _, node in ipairs(root:GetDescendants()) do
+                local val = visibleText(node)
+                local section = val ~= "" and headingSection(val) or nil
+                if section then
+                    local p = node.AbsolutePosition
+                    headings[#headings+1] = {section=section,x=p.X,y=p.Y,w=node.AbsoluteSize.X,root=root}
+                end
+            end
+        end
+        local function sectionFor(node, root)
+            local parent = node.Parent
+            while parent and parent ~= root and parent ~= pg do
+                local match = namedSection(parent.Name)
+                if match then return match end
+                parent = parent.Parent
+            end
+            -- In many result interfaces the headings and item rows are sibling
+            -- frames. If names give no section, use the nearest visible heading
+            -- above and in the same column. Never use the outer "Rewards" root
+            -- as proof that every value is an award.
+            local p = node.AbsolutePosition
+            local best, bestScore = nil, math.huge
+            for _, h in ipairs(headings) do
+                if h.root == root and h.y <= p.Y + 5 then
+                    local dx = math.abs(p.X - h.x)
+                    local dy = p.Y - h.y
+                    if dx <= math.max(150, h.w + 50) and dy >= -5 and dy <= 470 then
+                        local score = dy + dx * 0.28
+                        if score < bestScore then best, bestScore = h.section, score end
+                    end
+                end
+            end
+            return best
+        end
+        local function isCurrency(low)
+            return low:find("gold",1,true) or low:find("coin",1,true)
+                or low:find("gem",1,true) or low:find("canes",1,true)
+                or low:find("cash",1,true) or low:find("money",1,true)
+                or low:find("experience",1,true) or low:match("%f[%a]xp%f[%A]")
+        end
+        local function isMetric(low)
+            return low:find("damage",1,true) or low:find("titan",1,true)
+                or low:find("critical",1,true) or low:find("kill",1,true)
+                or low:find("time taken",1,true) or low:find("wave",1,true)
+                or low:find("level",1,true) or low:find("prestige",1,true)
+                or low:find("streak",1,true) or low:find("match",1,true)
+                or low:find("health",1,true) or low:find("inner",1,true)
+                or low:find("outer",1,true) or low:find("seconds",1,true)
+        end
+        local function addStat(value, section)
             local low = value:lower()
-            return low:find("coin",1,true) or low:find("gold",1,true)
-                or low:find("gem",1,true) or low:find("xp",1,true)
-                or low:find("experience",1,true) or low:find("exp ",1,true)
-                or low:find("cash",1,true) or low:find("currency",1,true)
-                or low:find("money",1,true)
+            local label
+            if low:find("damage dealt",1,true) then label="Damage Dealt"
+            elseif low:find("titans killed",1,true) or low:find("titan kills",1,true) then label="Titan Kills"
+            elseif low:find("critical hits",1,true) then label="Critical Hits"
+            elseif low:find("time taken",1,true) then label="Time Taken"
+            elseif section == "stats" and value:match("^%d%d?:%d%d:?%d?%d?$") then label="Time Taken" end
+            if not label or seenStats[label] then return false end
+            local amount = value:match("([%d,]+)%s*$")
+            local clock = value:match("(%d%d?:%d%d:?%d?%d?)")
+            if label == "Time Taken" then amount = clock or amount end
+            if not amount then return false end
+            if label ~= "Time Taken" then
+                local digits = amount:gsub(",", "")
+                amount = formattedNumber(tonumber(digits)) or amount
+            end
+            seenStats[label]=true
+            stats[#stats+1]=label .. ": " .. amount
+            return true
+        end
+        local function isSpecial(low, section, context)
+            if low:find("divine fragment",1,true) or low:find("serum",1,true) then return true end
+            if not low:find("mythic",1,true) then return false end
+            -- A mythical perk can be displayed as just "Immortal (Mythical)".
+            -- Accept mythic-rarity drops but exclude other explicitly named
+            -- equipment/material categories so they are not mislabeled perks.
+            local other = low:find("artifact",1,true) or low:find("memory",1,true)
+                or low:find("weapon",1,true) or low:find("blade",1,true)
+                or low:find("skin",1,true) or low:find("mount",1,true)
+            if other then return false end
+            return low:find("perk",1,true) or context:find("perk",1,true)
+                or low:find("immortal",1,true) or section == "drops"
+                or section == "special" or section == "rewards"
+        end
+        local function isDropItem(low)
+            return low:find("perk",1,true) or low:find("bp xp",1,true)
+                or low:find("blueprint",1,true) or low:find("serum",1,true)
+                or low:find("divine fragment",1,true)
+                or low:find("artifact",1,true) or low:find("memory",1,true)
+                or low:find("(rare)",1,true) or low:find("(legendary)",1,true)
+                or low:find("(mythical)",1,true) or low:find("(mythic)",1,true)
         end
         local function hasQuantity(value)
-            return value:find("%+%s*[%d,]+")
-                or value:find("[%d,]+%s*[xX]")
-                or value:find("[xX]%s*[%d,]+")
-                or value:find("[%d,]+%s*$")
+            return value:find("[%d,]+") ~= nil
         end
-        local function addLine(value, origin, sourceRoot)
-            value = clean(value, 125)
+        local function hasExplicitGain(value)
+            return value:find("%+%s*[%d,]+") or value:find("[xX]%s*[%d,]+")
+                or value:find("[%d,]+%s*[xX]")
+        end
+        local function addLine(value, section, context, fromPair)
+            value = clean(value, 145)
             local low = value:lower()
-            if value == "" or seen[value] or #ordinary + #special >= 24 then return end
-            if low == "rewards" or low == "special rewards" or low == "results"
-                or low == "reward" or low == "victory" or low == "continue"
-                or low == "leave" or low == "retry" or low == "close"
-                or low == "claim" or low == "claim all" or low == "next" then return end
-            if not hasQuantity(value) then return end
-            -- Results screens also show wave/time/kill statistics: don't mistake
-            -- those counters for rewards unless there is an explicit reward
-            -- quantity or the label belongs to a dedicated rewards container.
-            local strongQuantity = value:find("%+%s*[%d,]+")
-                or value:find("[xX]%s*[%d,]+")
-                or value:find("[%d,]+%s*[xX]")
-            local source = tostring(sourceRoot or ""):lower()
-            local rewardContainer = source:find("reward", 1, true)
-                or source:find("loot", 1, true)
-                or source:find("drop", 1, true)
-            local rewardLabel = ordinaryKind(value) or low:find("essence",1,true)
-                or low:find("shard",1,true) or low:find("material",1,true)
-                or low:find("drop",1,true) or low:find("reward",1,true)
-            if not strongQuantity and not rewardLabel and not rewardContainer then return end
-            -- A pure amount is only meaningful when the item is known from a
-            -- sibling/parent; no invented item names from unknown counters.
-            if value:match("^[%+%-]?[%d,%.]+$") then return end
-            seen[value] = true
-            if ordinaryKind(value) or (origin and ordinaryKind(origin)) then
-                if #ordinary < 12 then ordinary[#ordinary+1]=value end
-            elseif #special < 12 then special[#special+1]=value end
-        end
-        local function visibleText(node, container)
-            if not (node:IsA("TextLabel") or node:IsA("TextButton"))
-                or not isGuiVisibleThroughParents(node, container) then return "" end
-            -- Some result labels use RichText formatting.
-            return clean(tostring(node.Text or ""):gsub("<[^>]+>", ""), 110)
+            if value == "" or headingSection(value) or low == "none" or low == "n/a"
+                or low == "leave" or low == "retry" or low == "continue"
+                or low == "claim" or low == "claim all" or low == "close"
+                or low == "next" or low == "victory" or low == "result" then return end
+            if section ~= "totals" and addStat(value, section) then return end
+            if isMetric(low) or value:match("^[%+%-]?[%d,%s%.]+$") then return end
+            local currency, specialItem = isCurrency(low), isSpecial(low, section, context)
+            local item = isDropItem(low)
+            local explicitGain = hasExplicitGain(value)
+            if specialItem then
+                if #special < 12 then special[#special+1] = value end
+            elseif section == "totals" or section == "stats" then
+                return
+            elseif currency and not item then
+                -- Don't take lifetime Gold/XP/Gems from the results stats panel.
+                -- A gain sign or known reward area is required.
+                if (explicitGain or section == "rewards") and hasQuantity(value) then
+                    if #ordinary < 12 then ordinary[#ordinary+1] = value end
+                end
+            elseif item and (section == "drops" or section == "rewards"
+                or section == "special" or explicitGain) then
+                if #drops < 12 then drops[#drops+1] = value end
+            elseif section == "drops" and not currency
+                and not low:find("total",1,true) and not low:find("bonus",1,true)
+                and not low:find("percentage",1,true) and #value > 2 then
+                if #drops < 12 then drops[#drops+1] = value end
+            end
         end
         for _, root in ipairs(roots) do
             local nodes = root:GetDescendants()
-            -- Include the root if it is itself a reward text label.
             nodes[#nodes+1] = root
             for _, node in ipairs(nodes) do
-                local value = visibleText(node, pg)
-                if value ~= "" then
-                    addLine(value, node.Name, root.Name)
-                    -- Game UIs often split item and amount into sibling labels.
-                    if value:match("^[%+%-]?[%d,%.]+$")
-                        or value:match("^[xX]%s*[%d,]+$") then
+                if not seenNodes[node] then
+                    seenNodes[node] = true
+                    local value = visibleText(node)
+                    if value ~= "" then
+                        local section = sectionFor(node, root)
+                        local context = (tostring(node.Name).." "..tostring(node.Parent and node.Parent.Name or "")):lower()
+                        -- Preserve individual lines in multiline results labels.
+                        -- Only split when the original label actually uses newlines.
+                        local raw = tostring(node.Text or ""):gsub("<[^>]+>", "")
+                        if raw:find("\n",1,true) then
+                            for line in raw:gmatch("[^\r\n]+") do
+                                addLine(line, section, context, false)
+                            end
+                        else
+                            addLine(value, section, context, false)
+                        end
+                        -- Some result UIs store a name and number in different
+                        -- sibling labels (e.g. "Gold" next to "+189,624").
                         local parent = node.Parent
-                        if parent then
-                            local label
-                            -- Avoid a scan of the whole GUI, only siblings.
-                            for _, other in ipairs(parent:GetChildren()) do
-                                if other ~= node then
-                                    local candidate=visibleText(other, pg)
-                                    if candidate ~= "" and not candidate:match("^[%+%-]?[%d,%.]+$")
-                                        and not candidate:match("^[xX]%s*[%d,]+$")
-                                        and candidate:lower() ~= "rewards" then
-                                        label=candidate
+                        if parent and (value:match("^[%+%-]?[%d,]+$")
+                            or value:match("^[xX]%s*[%d,]+$")) then
+                            for _, sibling in ipairs(parent:GetChildren()) do
+                                if sibling ~= node then
+                                    local name = visibleText(sibling)
+                                    local low = name:lower()
+                                    if name ~= "" and (isCurrency(low) or isDropItem(low)
+                                        or low:find("damage dealt",1,true)
+                                        or low:find("titan kills",1,true)
+                                        or low:find("critical hits",1,true)) then
+                                        local pairKey = tostring(parent)..":"..name..":"..value
+                                        if not seenPairs[pairKey] then
+                                            seenPairs[pairKey] = true
+                                            addLine(name .. ": " .. value, section, context, true)
+                                        end
                                         break
                                     end
                                 end
-                            end
-                            if not label then
-                                local parentName = tostring(parent.Name)
-                                local generic = {Frame=true, Container=true,
-                                    Item=true, Reward=true, Row=true, Entry=true,
-                                    Label=true, Value=true, Amount=true, TextLabel=true}
-                                if not generic[parentName] and #parentName >= 3
-                                    and not parentName:match("^%d+$") then
-                                    label = parentName
-                                end
-                            end
-                            if label then
-                                local quantity = value
-                                if quantity:match("^[%d,]+$") then quantity = "+" .. quantity end
-                                addLine(label .. ": " .. quantity, parent.Name, root.Name)
                             end
                         end
                     end
                 end
             end
         end
-        return ordinary, special, #roots
+        return ordinary, drops, special, stats, #roots
     end
     local function formatField(lines)
         if #lines == 0 then return "`Not available from game results`" end
@@ -7089,19 +7197,18 @@ Farm.initializeMatchWebhook = function()
         if #raw > 990 then raw = raw:sub(1, 985) .. "..." end
         return "```\n" .. raw .. "\n```"
     end
-    local function buildEmbed(testMode, rewardOrdinary, rewardSpecial)
-        local total = {"Matches: " .. tostring(Farm.session and Farm.session.matches or 0)}
+    local function buildEmbed(testMode, rewardOrdinary, rewardDrops, rewardSpecial, matchStats)
+        local total = {}
+        addNumberLine(total, "Prestige", {"Prestige","prestige"})
         addNumberLine(total, "Level", {"Level", "level"})
+        addNumberLine(total, "Streak", {"Streak", "streak"})
+        addNumberLine(total, "Gold", {"Gold", "gold"})
         addNumberLine(total, "Coins", {"Coins", "coins"})
         addNumberLine(total, "Gems", {"Gems", "gems"})
-        addNumberLine(total, "Rolls", {"Rolls", "rolls"})
-        addNumberLine(total, "Trait Rerolls", {"Trait_Rerolls", "TraitRerolls"})
+        addNumberLine(total, "Canes", {"Canes", "canes"})
         addNumberLine(total, "Wins", {"Wins", "wins"})
-        addNumberLine(total, "Kills", {"Kills", "kills", "Titans_Killed"})
-        addNumberLine(total, "Boss DMG", {"Boss_Damage", "BossDamage", "BossDMG"})
-        if Farm.Waves and type(Farm.Waves.gold) == "number" then
-            total[#total+1] = "Gold (current): " .. formattedNumber(Farm.Waves.gold)
-        end
+        -- Session matches are a script-local counter, not a lifetime game stat.
+        total[#total+1] = "Matches tracked: " .. tostring(Farm.session and Farm.session.matches or 0)
 
         local mode, map = "Missions", "Outskirts"
         if game.PlaceId == 14012874501 then
@@ -7114,9 +7221,7 @@ Farm.initializeMatchWebhook = function()
         end
         local info = {"Mode: " .. mode, "Map: " .. map}
         local difficulty = Workspace:GetAttribute("Difficulty")
-        if difficulty ~= nil then
-            info[#info+1] = "Difficulty: " .. clean(difficulty, 40)
-        end
+        if difficulty ~= nil then info[#info+1] = "Difficulty: " .. clean(difficulty, 40) end
         if game.PlaceId == 14012874501 then
             local f = Workspace:FindFirstChild("Waves")
             local wave = (f and f:GetAttribute("Wave")) or Workspace:GetAttribute("Wave")
@@ -7127,22 +7232,29 @@ Farm.initializeMatchWebhook = function()
             local approx = (source and source:lower():find("local",1,true)) and "~" or ""
             info[#info+1] = "Time: " .. approx .. formatTime(elapsed)
         end
-        local wins = getStat({"Win", "Victory"})
-        if wins ~= nil then info[#info+1] = "Victories: " .. formattedNumber(wins) end
-        local ordinary, special = rewardOrdinary, rewardSpecial
-        if not ordinary or not special then ordinary, special = collectRewardLines() end
+        local ordinary, drops, special, stats = rewardOrdinary, rewardDrops, rewardSpecial, matchStats
+        if not ordinary or not drops or not special or not stats then
+            ordinary, drops, special, stats = collectRewardLines()
+        end
         if testMode then
             info[#info+1] = "Type: Test message"
             ordinary = {"No rewards claimed (test only)"}
+            drops = {"No drops claimed (test only)"}
             special = {"No special rewards claimed (test only)"}
+            stats = {"No match stats (test only)"}
         end
-        local username = clean(LocalPlayer.Name, 64)
+        local function display(items, empty)
+            if #items == 0 then return "`" .. empty .. "`" end
+            return formatField(items)
+        end
         local fields = {
-            {name="Total Stats",value=formatField(total),inline=true},
+            {name="User",value=formatField({clean(LocalPlayer.Name,64)}),inline=true},
+            {name="Totals",value=formatField(total),inline=true},
             {name="Info",value=formatField(info),inline=true},
-            {name="User",value=formatField({username}),inline=true},
-            {name="Rewards",value=formatField(ordinary),inline=true},
-            {name="Special Rewards",value=formatField(special),inline=true},
+            {name="Stats",value=display(stats,"No match stats detected"),inline=true},
+            {name="Rewards",value=display(ordinary,"No reward amounts detected"),inline=true},
+            {name="Drops",value=display(drops,"No drops detected"),inline=true},
+            {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
             title = testMode and "HollowMoonHub • Webhook Test"
@@ -7218,39 +7330,40 @@ Farm.initializeMatchWebhook = function()
         hook.collecting = true
         hook.collectingSince = os.clock()
         hook.pendingKey = key
-        -- Delayed sampling: result UIs frequently populate reward entries 1-3
-        -- seconds AFTER the complete/finalised signal, especially on mobile.
+        -- v92: Keep sampling until real reward/drops settle. A damage-stat
+        -- counter appearing first must not end the reward scan prematurely.
         task.spawn(function()
-            local bestOrdinary, bestSpecial = {}, {}
-            local bestCount, lastChange, rootsFound = 0, os.clock(), 0
+            local bestOrdinary, bestDrops, bestSpecial, bestStats = {}, {}, {}, {}
+            local bestScore, lastChange, rootsFound = -1, os.clock(), 0
             local started = os.clock()
-            while os.clock() - started < 4.2 do
+            while os.clock() - started < 4.6 do
                 if Farm.unloaded or not hook.enabled then
                     hook.collecting, hook.pendingKey = false, nil
                     return
                 end
-                local ordinary, special, roots = collectRewardLines()
+                local ordinary, drops, special, stats, roots = collectRewardLines()
                 rootsFound = math.max(rootsFound, roots or 0)
-                local count = #ordinary + #special
-                if count > bestCount then
-                    bestCount = count
-                    bestOrdinary, bestSpecial = ordinary, special
+                local score = #ordinary * 5 + #drops * 3 + #special * 3 + #stats
+                if score > bestScore then
+                    bestScore = score
+                    bestOrdinary, bestDrops = ordinary, drops
+                    bestSpecial, bestStats = special, stats
                     lastChange = os.clock()
                 end
-                if bestCount > 0 and os.clock() - lastChange >= 1.0
-                    and os.clock() - started >= 1.2 then break end
-                task.wait(0.3)
+                if #bestOrdinary > 0 and os.clock() - lastChange >= 1.2
+                    and os.clock() - started >= 1.6 then break end
+                task.wait(0.25)
             end
             if Farm.unloaded or not hook.enabled then
                 hook.collecting, hook.pendingKey = false, nil
                 return
             end
-            print(prefix .. string.format("Reward scan: %d normal, %d special; %d visible result panels",
-                #bestOrdinary, #bestSpecial, rootsFound))
-            if bestCount == 0 then
-                warn(prefix .. "No visible reward amounts found; server-only rewards cannot be inferred from the UI")
+            print(prefix .. string.format("Reward scan: %d rewards, %d drops, %d special, %d stats; %d visible results panels",
+                #bestOrdinary, #bestDrops, #bestSpecial, #bestStats, rootsFound))
+            if #bestOrdinary == 0 then
+                warn(prefix .. "No reward amounts confirmed in visible results UI; need results-screen structure to capture more")
             end
-            local embed = buildEmbed(false, bestOrdinary, bestSpecial)
+            local embed = buildEmbed(false, bestOrdinary, bestDrops, bestSpecial, bestStats)
             hook.collecting = false
             sendWithRetry(embed, key)
         end)
