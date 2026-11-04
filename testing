@@ -1,6 +1,6 @@
 --[[
     HollowMoonHub | Attack on Titan: Revolution (Outskirts)
-    Combat v89: mobile fast resume + delayed, verified webhook reward extraction; retains v87 pre-cached fast GitHub Auto Execute; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    Combat v90: Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; retains v87 pre-cached fast GitHub Auto Execute; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -19,15 +19,18 @@
     out-of-range, excessive or otherwise invalid hit registrations.
 ]]
 
-if not game:IsLoaded() then
-    game.Loaded:Wait()
-end
-
+-- v90 Delta: never wait for the entire place to finish loading before
+-- restoring saved gameplay settings. Some mobile clients signal Loaded
+-- significantly later than LocalPlayer and the executor become usable.
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do
+    task.wait(0.05)
+    LocalPlayer = Players.LocalPlayer
+end
 
 local ENV = (type(getgenv) == "function" and getgenv()) or _G
 
@@ -2920,7 +2923,7 @@ Farm.fastResumeFromSaved = function()
         startOpWatcher()
     end
     Farm.fastResumeStatus = "Restored saved gameplay controls before Rayfield"
-    print("[HollowMoonHub] Mobile fast resume: gameplay restored before UI download")
+    print("[HollowMoonHub] Delta early resume: gameplay restored before full place/UI load")
 end
 do
     local fastBootOk, fastBootErr = pcall(Farm.fastResumeFromSaved)
@@ -4404,6 +4407,8 @@ local AUTOEXEC_URL = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/
 -- Reuse the old toggle marker and Rayfield flag, so existing saves keep working.
 local AUTOEXEC_FLAG_FILE = AUTOEXEC_FOLDER .. "/AOT_Revolution_v44_enabled.txt"
 local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source.lua"
+Farm.autoExecUICacheFile = AUTOEXEC_FOLDER .. "/AOT_Gen2_cached.lua"
+Farm.gen2Url = "https://sirius.menu/gen2"
 local function fileOpsReady()
     return type(writefile) == "function" and type(readfile) == "function"
         and type(makefolder) == "function" and type(isfolder) == "function"
@@ -4463,6 +4468,41 @@ Farm.refreshAutoExecCache = function()
     end)
 end
 
+-- Cache the same Rayfield Gen2 loader ahead of the *next* teleport.
+-- A cache hit avoids another synchronous HTTP request during startup. If the
+-- cache is stale or invalid, the normal live Gen2 download still works.
+Farm.refreshGen2Cache = function()
+    if Farm.unloaded or not Farm.autoExecute or Farm.gen2CacheBusy then return end
+    if not ensureAutoFolder() then return end
+    -- A previously loaded Gen2 copy is already saved by loadGen2UI().
+    -- Avoid a needless second HTTP request on bandwidth-limited phones.
+    local present, cached = pcall(readfile, Farm.autoExecUICacheFile)
+    if present and type(cached) == "string" and #cached > 50 then
+        local valid, fn = pcall(loadstring, cached)
+        if valid and type(fn) == "function" then return end
+    end
+    Farm.gen2CacheBusy = true
+    task.spawn(function()
+        local ok, source = pcall(function() return game:HttpGet(Farm.gen2Url) end)
+        if ok and type(source) == "string" and #source > 50
+            and type(loadstring) == "function" then
+            local compiled, fn = pcall(loadstring, source)
+            if compiled and type(fn) == "function" then
+                local wrote = pcall(writefile, Farm.autoExecUICacheFile, source)
+                if wrote then
+                    local verified, saved = pcall(readfile, Farm.autoExecUICacheFile)
+                    if verified and saved == source then
+                        Farm.gen2CacheStatus = "Ready for next teleport"
+                    else
+                        Farm.gen2CacheStatus = "Read-back failed"
+                    end
+                end
+            end
+        end
+        Farm.gen2CacheBusy = false
+    end)
+end
+
 local function syncAutoExecute()
     -- The flag remains cancelable even after the executor has queued the loader.
     if not ensureAutoFolder() then
@@ -4480,6 +4520,7 @@ local function syncAutoExecute()
 
     -- Warm the cache without holding up the current script or the Settings UI.
     Farm.refreshAutoExecCache()
+    Farm.refreshGen2Cache()
 
     local queue = queueFunction()
     if not queue then
@@ -4493,14 +4534,24 @@ local function syncAutoExecute()
     -- It never runs if the original toggle was turned off.
     local queued = string.format([==[
 task.spawn(function()
+    -- Multiple teleport callbacks on mobile must not compile/run the entire
+    -- codebase twice: overlapping controllers can work against each other.
+    local env = (type(getgenv) == "function" and getgenv()) or _G
+    local jobKey = tostring(game.JobId) .. ":" .. tostring(game.PlaceId)
+    if env.HollowMoonAOTQueueJob == jobKey then return end
+    env.HollowMoonAOTQueueJob = jobKey
     local function enabled()
         if type(readfile) ~= "function" then return false end
         local ok, flag = pcall(readfile, %q)
         return ok and flag == "1"
     end
-    if not enabled() then return end
+    if not enabled() then
+        env.HollowMoonAOTQueueJob = nil
+        return
+    end
     if type(loadstring) ~= "function" then
         warn("[HollowMoonHub] Auto Execute requires loadstring")
+        env.HollowMoonAOTQueueJob = nil
         return
     end
     local function tryRun(src, origin)
@@ -4522,6 +4573,7 @@ task.spawn(function()
         -- Never start a second script after a partially completed execution.
         return true
     end
+    print("[HollowMoonHub] Delta teleport loader started; checking local cache")
     local okLocal, cached = pcall(readfile, %q)
     if okLocal and tryRun(cached, "local cache") then return end
     if not enabled() then return end
@@ -4613,8 +4665,43 @@ local function setupSettingsListeners()
     end
 end
 
--- Rayfield Gen2 (NOT legacy Rayfield)
-local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+-- v90: Fast resume has already started before this point. The game can
+-- finish loading while those early checks run, without blocking them.
+if not game:IsLoaded() then
+    print("[HollowMoonHub] Early settings restored; waiting for UI readiness")
+    game.Loaded:Wait()
+end
+
+-- Rayfield Gen2 (NOT legacy Rayfield). Prefer the verified *previously cached*
+-- Gen2 code so mobile UI construction doesn't block on a second HTTP fetch.
+local Rayfield = (function()
+    if type(readfile) == "function" and type(loadstring) == "function" then
+        local ok, source = pcall(readfile, Farm.autoExecUICacheFile)
+        if ok and type(source) == "string" and #source > 50 then
+            local compiled, module = pcall(loadstring, source)
+            if compiled and type(module) == "function" then
+                local loaded, ui = pcall(module)
+                if loaded and type(ui) == "table"
+                    and type(ui.CreateWindow) == "function" then
+                    print("[HollowMoonHub] Gen2 loaded from local cache")
+                    return ui
+                end
+            end
+            warn("[HollowMoonHub] Cached Gen2 unavailable; using live Gen2")
+        end
+    end
+    local source = game:HttpGet(Farm.gen2Url)
+    local ui = loadstring(source)()
+    if type(ui) ~= "table" or type(ui.CreateWindow) ~= "function" then
+        error("Rayfield Gen2 returned an invalid module")
+    end
+    -- Even without a cached copy from previous place, save one for later.
+    if ensureAutoFolder() then
+        pcall(writefile, Farm.autoExecUICacheFile, source)
+    end
+    print("[HollowMoonHub] Gen2 loaded from network")
+    return ui
+end)()
 -- Rayfield Gen2 persistence:
 --   autoSave tracks changes and autoLoad restores saved flags at startup.
 --   Important: restored ON automation toggles intentionally resume their callbacks.
