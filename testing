@@ -112,6 +112,11 @@ end
 
 local Farm = {
     running = false,
+    -- Separate saved farm intents. Trost Waves never inherits the Combat tab's
+    -- Auto Farm setting; non-Waves maps never inherit the Waves farm setting.
+    generalFarmEnabled = false,
+    waveFarmEnabled = false,
+    farmOwner = nil,
     auraEnabled = false,
     opMethod = false, -- deprecated; only Auto Skills controls skill automation
     opRunId = 0,
@@ -305,10 +310,10 @@ local Farm = {
     lobbyCurrentStatus = "Waiting for lobby",
 }
 ENV.HollowMoonAOTOutskirts = Farm
--- HollowMoonHubBuildV96: visible build stamp and Auto Execute cache signature.
-Farm.buildVersion = "v96"
+-- HollowMoonHubBuildV99: visible build stamp and Auto Execute cache signature.
+Farm.buildVersion = "v99"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
-print("[HollowMoonHub] Running v96 (expanded rewards scan and diagnostics)")
+print("[HollowMoonHub] Running v99 (Auto Leave wave counter comparison and transfer diagnostics)")
 
 -- Blade switching is an asynchronous inventory action: it does not need
 -- character control. Movement pauses ONLY for station trips, Waves workflows,
@@ -2311,7 +2316,11 @@ local function heartbeatFarm(dt)
 end
 
 function Farm:Stop()
+    local stoppingFarm = self.running or self.farmOwner ~= nil
+        or self.momentumForce ~= nil or self.hoverForce ~= nil
+    local root = getPlayerRoot()
     self.running = false
+    self.farmOwner = nil
     releaseSkillNapeAssist()
     releaseSwingFreeze()
     releaseLastTitanWaitFreeze()
@@ -2333,6 +2342,25 @@ function Farm:Stop()
     disableMomentumNoclip()
     self.airStartRoot = nil
     self.airStartLiftedRoot = nil
+    -- Canceled VectorForces do not cancel velocity they already imparted.
+    -- When the player turns farming OFF, return control to ordinary Roblox
+    -- physics instead of leaving several hundred studs/sec of orbit momentum.
+    if root and root.Parent then
+        for _, partName in ipairs({
+            "HollowMoonMomentumForceV63", "HollowMoonMomentumAttachmentV63",
+            "HollowMoonHoverForceV20", "HollowMoonHoverAttachmentV20",
+            "HollowMoonHoverForceV21", "HollowMoonHoverAttachmentV21",
+        }) do
+            local leftover = root:FindFirstChild(partName)
+            if leftover then pcall(function() leftover:Destroy() end) end
+        end
+        if stoppingFarm and not root.Anchored then
+            pcall(function()
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+    end
     setAttackHeld(false)
 end
 
@@ -2351,6 +2379,57 @@ function Farm:Start()
     self.movementConnection = RunService.Heartbeat:Connect(heartbeatFarm)
 end
 
+-- Only the active game mode owns Auto Farm. Saved settings remain independent.
+-- Wave activity is checked against the live objective (not merely the lobby's
+-- selected mode), so leaving Waves releases all movement automatically.
+function Farm:SyncFarmMode()
+    if self.unloaded then return end
+    local wanted = nil
+    if game.PlaceId == 14012874501 then
+        local active = false
+        if self.Waves and type(self.Waves.isActive) == "function" then
+            local ok, value = pcall(self.Waves.isActive)
+            active = ok and value == true
+        else
+            -- Early mobile restore runs before the Waves UI is constructed.
+            local folder = Workspace:FindFirstChild("Waves")
+            local objectives = folder and folder:FindFirstChild("Objectives")
+            active = objectives ~= nil and objectives:FindFirstChild("Waves") ~= nil
+        end
+        if active and self.waveFarmEnabled then wanted = "waves" end
+    elseif game.PlaceId ~= 14916516914 then
+        -- Missions and Raids can run in several different place IDs.
+        -- The live Titans folder identifies a supported combat map, while
+        -- Town Central remains explicitly excluded.
+        if self.generalFarmEnabled and Workspace:FindFirstChild("Titans") then
+            wanted = "regular"
+        end
+    end
+
+    if wanted == self.farmOwner and (wanted == nil or self.running) then return end
+    if self.running or self.farmOwner ~= nil then self:Stop() end
+    if wanted then
+        self.farmOwner = wanted
+        self:Start()
+    end
+end
+
+-- Quiet mode watcher: match maps may spawn their Titans folder AFTER the
+-- script starts. Reconcile independently of the Rayfield UI and Waves tab.
+Farm.farmModeConnection = RunService.Heartbeat:Connect(function(dt)
+    if Farm.unloaded then
+        if Farm.farmModeConnection then
+            Farm.farmModeConnection:Disconnect()
+            Farm.farmModeConnection = nil
+        end
+        return
+    end
+    Farm.farmModeElapsed = (Farm.farmModeElapsed or 0) + dt
+    if Farm.farmModeElapsed >= 0.4 then
+        Farm.farmModeElapsed = 0
+        Farm:SyncFarmMode()
+    end
+end)
 
 -- Blade utilities use the Outskirts client source contracts:
 --   GET:InvokeServer("Blades", "Reload") replaces a broken blade pair.
@@ -2901,6 +2980,7 @@ Farm.fastResumeFromSaved = function()
     Farm.fastResumePendingUI = true
     Farm.fastResumeFlags = {
         AutoFarm = prefs.AutoFarm == true,
+        WavesAutoFarmV97 = prefs.WavesAutoFarmV97 == true,
         KillAura = prefs.KillAura == true,
         AutoReloadBlades = prefs.AutoReloadBlades == true,
         AutoRefillBlades = prefs.AutoRefillBlades == true,
@@ -2929,7 +3009,9 @@ Farm.fastResumeFromSaved = function()
         Farm.utilityElapsed = UTILITY_TICK
         startUtilityWatcher()
     end
-    if Farm.fastResumeFlags.AutoFarm then Farm:Start() end
+    Farm.generalFarmEnabled = Farm.fastResumeFlags.AutoFarm
+    Farm.waveFarmEnabled = Farm.fastResumeFlags.WavesAutoFarmV97
+    Farm:SyncFarmMode()
     if Farm.fastResumeFlags.KillAura then Farm:StartAura() end
     if Farm.fastResumeFlags.CombatAutoSkillsV46 then
         Farm.autoCombatSkills = true
@@ -4540,9 +4622,15 @@ function Farm:Unload()
         e.autoEquip=false;e.autoUpgrade=false;e.autoSkills=false;e.autoPerk=false;e.autoArtifact=false
         if e.watcher then e.watcher:Disconnect();e.watcher=nil end
     end
-    if self.Waves and self.Waves.connection then
-        self.Waves.connection:Disconnect()
-        self.Waves.connection=nil
+    if self.Waves then
+        if self.Waves.connection then
+            self.Waves.connection:Disconnect()
+            self.Waves.connection=nil
+        end
+        if self.Waves.teleportFailureConnection then
+            self.Waves.teleportFailureConnection:Disconnect()
+            self.Waves.teleportFailureConnection=nil
+        end
     end
     self:Stop()
     self:StopAura()
@@ -4622,8 +4710,8 @@ Farm.refreshAutoExecCache = function()
             return
         end
         if not ok or type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonHubBuildV96", 1, true) then
-            Farm.autoExecCacheStatus = "GitHub is not serving v96; replace testing with the AOT v96 script"
+            or not src:find("HollowMoonHubBuildV99", 1, true) then
+            Farm.autoExecCacheStatus = "GitHub is not serving v99; replace testing with the AOT v99 script"
             warn("[HollowMoonHub] Auto Execute cache: " .. Farm.autoExecCacheStatus)
             Farm.autoExecCacheBusy = false
             return
@@ -4736,7 +4824,7 @@ task.spawn(function()
     end
     local function tryRun(src, origin)
         if type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonHubBuildV96", 1, true) then
+            or not src:find("HollowMoonHubBuildV99", 1, true) then
             return false
         end
         local okCompile, fn = pcall(loadstring, src)
@@ -4753,7 +4841,7 @@ task.spawn(function()
         -- Never start a second script after a partially completed execution.
         return true
     end
-    print("[HollowMoonHub v96] Teleport loader: checking version-pinned local cache")
+    print("[HollowMoonHub v99] Teleport loader: checking version-pinned local cache")
     local okLocal, cached = pcall(readfile, %q)
     if okLocal and tryRun(cached, "local cache") then return end
     if not enabled() then return end
@@ -4764,7 +4852,7 @@ task.spawn(function()
     end
     -- Store a working remote copy for the next teleport too.
     if type(remote) == "string" and #remote > 10000
-        and remote:find("HollowMoonHubBuildV96", 1, true) then
+        and remote:find("HollowMoonHubBuildV99", 1, true) then
         local okSyntax, fn = pcall(loadstring, remote)
         if okSyntax and type(fn) == "function" and type(writefile) == "function" then
             pcall(writefile, %q, remote)
@@ -5286,11 +5374,8 @@ farmTab:CreateToggle({
     callback = function(enabled)
         -- Default false callbacks can fire before Gen2 finishes autoLoad.
         if Farm.fastResumePendingUI and Farm.fastResumeFlags.AutoFarm and not enabled then return end
-        if enabled then
-            Farm:Start()
-        else
-            Farm:Stop()
-        end
+        Farm.generalFarmEnabled = enabled == true
+        Farm:SyncFarmMode()
     end,
 })
 -- Noclip is built into Auto Farm: on for physics Tween farming, restored on Stop.
@@ -5565,7 +5650,7 @@ farmTab:CreateButton({
 Farm.initializeWavesAndMisc = function()
     local W = {
         running=true, busy=false, status="Waiting for data", lastAction="None",
-        flags={start=false,skip=false,crate=false,heal=false,base=false,equip=false,blessing=false,leave=false},
+        flags={farm=false,start=false,skip=false,crate=false,heal=false,base=false,equip=false,blessing=false,leave=false},
         leaveAtWave=30,lastLeaveAttempt=-100,leaveAttempts=0,
         leaveFallbackAttempt=-100,leaveStatus="Waiting for selected wave",
         basePriorityPosition=1,baseLastSecondary="Max",
@@ -6768,95 +6853,184 @@ end
         log(W.emergencyStatus)
         return true
     end
-    -- v95: Leave watcher is independent of upgrade, crate, vote and result-panel
-    -- state. The game can remove the Objective tag during transitions; do NOT
-    -- let that disable a previously selected leave wave. All other Waves actions
-    -- remain guarded by wavesActive() and the specific Trost place.
-    W.readWaveCounter=function()
-        local f=folder()
-        if not f then return nil,"Waves folder missing" end
-        local obj=waveObjective()
-        local candidates={
-            {f:GetAttribute("Wave"),"Waves.Wave attribute"},
-            {f:GetAttribute("CurrentWave"),"Waves.CurrentWave attribute"},
-            {Workspace:GetAttribute("Wave"),"Workspace.Wave attribute"},
-            {obj and obj:GetAttribute("Wave"),"Objective.Wave attribute"},
-        }
-        for _,entry in ipairs(candidates) do
-            local number=tonumber(entry[1])
-            if number and number>=0 and number<100000 then
-                return math.floor(number),entry[2]
-            end
+    -- v99: Leave diagnostics. Do not assume the server accepted a request
+    -- just because FireServer returned normally. Compare replicated wave state
+    -- against the visible HUD, but only read the HUD every 1.5 seconds on mobile.
+    W.leaveHudValue=nil
+    W.leaveHudSource=nil
+    W.leaveHudScannedAt=-100
+    W.leaveLastSource="Unknown"
+    W.leaveLastCandidates="None"
+    W.leaveLastTeleportFailure=nil
+    W.leaveFirstReachedAt=nil
+    W.leaveRequestedWave=nil
+    W.leaveLastNoticeAt=-100
+    local function visibleWaveHud()
+        local now=os.clock()
+        if now-(W.leaveHudScannedAt or -100)<1.5 then
+            return W.leaveHudValue,W.leaveHudSource
         end
-        for _,parent in ipairs({f,f:FindFirstChild("Objectives")}) do
-            if parent then
-                for _,name in ipairs({"Wave","CurrentWave"}) do
-                    local entry=parent:FindFirstChild(name)
-                    if entry and entry:IsA("ValueBase") then
-                        local number=tonumber(entry.Value)
-                        if number and number>=0 and number<100000 then
-                            return math.floor(number),entry:GetFullName()..".Value"
+        W.leaveHudScannedAt=now
+        W.leaveHudValue=nil
+        W.leaveHudSource=nil
+        local gui=LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not gui then return nil,nil end
+        local best=nil
+        for _,d in ipairs(gui:GetDescendants()) do
+            if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible then
+                local content=tostring(d.Text or "")
+                if #content<=60 then
+                    local number=content:match("^[Ww][Aa][Vv][Ee][Ss]?%s*[:#%-]?%s*(%d+)%f[%D]")
+                    if number then
+                        local visible=true
+                        local parent=d.Parent
+                        while parent and parent~=gui do
+                            if parent:IsA("GuiObject") and not parent.Visible then
+                                visible=false
+                                break
+                            end
+                            parent=parent.Parent
+                        end
+                        if visible then
+                            local n=tonumber(number)
+                            if n and n>=1 and n<=10000 and (not best or n>best) then
+                                best=n
+                                W.leaveHudSource="Visible HUD: "..d.Name
+                            end
                         end
                     end
                 end
             end
         end
-        return nil,"No replicated Wave or CurrentWave number found"
+        W.leaveHudValue=best
+        return W.leaveHudValue,W.leaveHudSource
     end
+    W.readWaveCounter=function()
+        if game.PlaceId~=TROST then return nil,"Not in Trost" end
+        local f=folder()
+        local obj=waveObjective()
+        local found={}
+        local function offer(value,source)
+            local number=tonumber(value)
+            if number and number>=0 and number<=10000
+                and number==math.floor(number) then
+                found[#found+1]={number=number,source=source}
+            end
+        end
+        if f then
+            offer(f:GetAttribute("Wave"),"Waves.Wave")
+            offer(f:GetAttribute("CurrentWave"),"Waves.CurrentWave")
+            local objectives=f:FindFirstChild("Objectives")
+            for _,parent in ipairs({f, objectives}) do
+                if parent then
+                    for _,name in ipairs({"Wave","CurrentWave"}) do
+                        local entry=parent:FindFirstChild(name)
+                        if entry and entry:IsA("ValueBase") then
+                            offer(entry.Value,entry:GetFullName())
+                        end
+                    end
+                end
+            end
+        end
+        offer(Workspace:GetAttribute("Wave"),"Workspace.Wave")
+        offer(Workspace:GetAttribute("CurrentWave"),"Workspace.CurrentWave")
+        if obj then
+            offer(obj:GetAttribute("Wave"),"Objective.Wave")
+            offer(obj:GetAttribute("CurrentWave"),"Objective.CurrentWave")
+        end
+        local hud,hudSource=visibleWaveHud()
+        if hud then offer(hud,hudSource) end
+        if #found==0 then
+            W.leaveLastCandidates="No counter found (Waves folder="..tostring(f~=nil)..")"
+            return nil,W.leaveLastCandidates
+        end
+        table.sort(found,function(a,b)
+            if a.number==b.number then return a.source<b.source end
+            return a.number>b.number
+        end)
+        local descriptions={}
+        for index,entry in ipairs(found) do
+            if index>7 then break end
+            descriptions[#descriptions+1]=entry.source.."="..tostring(entry.number)
+        end
+        W.leaveLastCandidates=table.concat(descriptions," | ")
+        W.leaveLastSource=found[1].source
+        return found[1].number,found[1].source
+    end
+    -- The event reports real teleport initiation failures. It cannot report
+    -- an ignored custom leave remote, so show that as unconfirmed separately.
+    W.teleportFailureConnection=TeleportService.TeleportInitFailed:Connect(function(player,result,message,placeId)
+        if player~=LocalPlayer or not W.flags.leave or game.PlaceId~=TROST then return end
+        W.leaveLastTeleportFailure=tostring(result)..": "..tostring(message)
+        W.leaveStatus="Teleport to "..tostring(placeId).." failed: "..W.leaveLastTeleportFailure
+        warn(prefix.."Auto Leave: "..W.leaveStatus)
+    end)
     W.tryLobbyTeleport=function()
         if Farm.unloaded or game.PlaceId~=TROST or not W.flags.leave then return end
         local now=os.clock()
-        if now-W.leaveFallbackAttempt<8 then return end
+        if now-W.leaveFallbackAttempt<12 then return end
         W.leaveFallbackAttempt=now
-        W.leaveStatus="Town Central transfer requested; awaiting game response"
-        log("Auto Leave: trying official Town Central teleport")
+        W.leaveStatus="Town Central teleport requested; awaiting Roblox transfer"
+        log("Auto Leave: using client teleport fallback to Town Central")
         task.spawn(function()
             local ok,err=pcall(function()
                 TeleportService:Teleport(lobby,LocalPlayer)
             end)
             if not ok and game.PlaceId==TROST then
-                W.leaveStatus="Town Central teleport rejected: "..tostring(err)
+                W.leaveStatus="Town Central teleport call failed: "..tostring(err)
                 warn(prefix..W.leaveStatus)
             end
-            -- A successful pcall only means the request was submitted, NOT
-            -- that the destination server accepted the teleport.
         end)
     end
     local function waveLeaveTask()
-        if not W.flags.leave or Farm.unloaded or game.PlaceId~=TROST then return false end
+        if Farm.unloaded or not W.flags.leave or game.PlaceId~=TROST then return false end
         local current,source=W.readWaveCounter()
-        if not current then
-            W.leaveStatus="Waiting for wave counter: "..tostring(source)
+        if current==nil then
+            W.leaveStatus="Wave counter unavailable: "..tostring(source)
             return false
         end
         W.leaveObserved=current
         if current<W.leaveAtWave then
-            W.leaveStatus="Wave "..current.." / "..W.leaveAtWave.." ("..source..")"
+            W.leaveFirstReachedAt=nil
+            W.leaveStatus=string.format("Wave %d / %d (source: %s)",current,W.leaveAtWave,source)
             return false
         end
+        if not W.leaveFirstReachedAt then
+            W.leaveFirstReachedAt=os.clock()
+            W.leaveRequestedWave=current
+            log(string.format("Auto Leave target reached: live wave %d >= chosen %d (source: %s). Counters: %s",
+                current,W.leaveAtWave,source,W.leaveLastCandidates))
+        end
         local now=os.clock()
-        if now-W.lastLeaveAttempt<6 then return true end
+        if now-W.lastLeaveAttempt<7 then
+            if now-(W.leaveFirstReachedAt or now)>=9 and now-W.leaveLastNoticeAt>=12 then
+                W.leaveLastNoticeAt=now
+                W.leaveStatus=string.format(
+                    "Wave %d >= %d; STILL in Trost after %d leave request(s). Server transfer not confirmed.",
+                    current,W.leaveAtWave,W.leaveAttempts)
+                warn(prefix..W.leaveStatus.." | Counters: "..W.leaveLastCandidates)
+            end
+            return true
+        end
         W.lastLeaveAttempt=now
         W.leaveAttempts=W.leaveAttempts+1
-        W.leaveStatus="Wave "..current.." reached; leave attempt "..W.leaveAttempts
+        local attempt=W.leaveAttempts
+        W.leaveStatus=string.format("Wave %d >= %d; native leave request %d (source: %s)",
+            current,W.leaveAtWave,attempt,source)
         log("Auto Leave: "..W.leaveStatus)
         local post=getRemote("POST")
         if post and post:IsA("RemoteEvent") then
-            local ok,err=pcall(function()
-                post:FireServer("Functions","Teleport")
-            end)
+            local ok,err=pcall(function() post:FireServer("Functions","Teleport") end)
             if not ok then
-                W.leaveStatus="Native leave request failed: "..tostring(err)
+                W.leaveStatus="Native leave request ERROR: "..tostring(err)
                 warn(prefix..W.leaveStatus)
             else
-                W.leaveStatus="Native leave request submitted; waiting for transfer"
+                W.leaveStatus="Native leave submitted (NOT confirmed by server)"
             end
         else
-            W.leaveStatus="Native leave remote not found; trying Town Central transfer"
+            W.leaveStatus="Native POST remote missing; trying Town Central fallback"
             warn(prefix..W.leaveStatus)
         end
-        -- The server may ignore a FireServer call without returning an error.
-        -- After a short grace period, attempt the legitimate destination place.
         task.delay(2.5,function()
             if Farm.unloaded or not W.flags.leave or game.PlaceId~=TROST then return end
             W.tryLobbyTeleport()
@@ -6993,10 +7167,16 @@ end
         local status=wavesActive()
             and string.format("Wave %s | Gold %s | Vote %s | Leave at %s: %s | %s | %s",
                 tostring(wave or "?"),gold,vote,tostring(W.leaveAtWave),
-                W.flags.leave and ("ON ("..tostring(W.leaveStatus)..")") or "OFF",W.downtimeStatus,W.lastAction)
+                W.flags.leave and ("ON ("..tostring(W.leaveStatus)..") ["..tostring(W.leaveAttempts).." tries]") or "OFF",W.downtimeStatus,W.lastAction)
             or (game.PlaceId==TROST and W.flags.leave
                 and ("Auto Leave: "..tostring(W.leaveStatus)))
+            or (W.flags.leave and game.PlaceId~=TROST
+                and ("Auto Leave inactive: current PlaceId "..tostring(game.PlaceId)
+                     .." does not match Trost "..tostring(TROST)))
             or "Waves controls paused outside Trost Waves"
+        if W.flags.leave and game.PlaceId==TROST then
+            status=status.." | Counters: "..tostring(W.leaveLastCandidates or "Waiting")
+        end
         if W.text then pcall(function() W.text:Set(status) end) end
         local selection=W.blessingsSelection or {}
         local desc={}
@@ -7018,6 +7198,18 @@ end
     misc:CreateToggle({name="Auto Skip Cinematics",value=false,flag="MiscAutoCinematicsV73",callback=function(v) W.miscFlags.cinematic=v==true end})
 
     local waves=window:CreateTab({name="Waves",icon=85925158736685})
+    waves:CreateSection({name="Wave Farming"})
+    waves:CreateToggle({
+        name="Auto Farm Waves", value=false, flag="WavesAutoFarmV97",
+        callback=function(enabled)
+            -- Ignore Rayfield's initial false callback until saved state is read.
+            if Farm.fastResumePendingUI and Farm.fastResumeFlags
+                and Farm.fastResumeFlags.WavesAutoFarmV97 and not enabled then return end
+            W.flags.farm = enabled == true
+            Farm.waveFarmEnabled = W.flags.farm
+            Farm:SyncFarmMode()
+        end,
+    })
     waves:CreateSection({name="Wave Control"})
     W.voteUiGroup=waves:CreateGroup()
     W.voteUiGroup:CreateGroup({direction="column"}):CreateToggle({name="Auto Vote Start",value=false,flag="WavesAutoVoteStartV73",callback=function(v) W.flags.start=v==true end})
@@ -7030,6 +7222,8 @@ end
                 W.lastLeaveAttempt=-100
                 W.leaveAttempts=0
                 W.leaveFallbackAttempt=-100
+                W.leaveFirstReachedAt=nil
+                W.leaveLastTeleportFailure=nil
             end
         end})
     waves:CreateInput({name="Leave At Wave Number",value="30",placeholder="Enter wave, e.g. 30",
@@ -7043,6 +7237,8 @@ end
             W.leaveAttempts=0
             W.lastLeaveAttempt=-100
             W.leaveFallbackAttempt=-100
+            W.leaveFirstReachedAt=nil
+            W.leaveLastTeleportFailure=nil
             log("Auto Leave target updated to wave "..n.." (as soon as wave is reached)")
         end})
     waves:CreateSection({name="Market"})
@@ -7075,6 +7271,11 @@ end
         if Farm.unloaded then
             if W.connection then W.connection:Disconnect();W.connection=nil end
             return
+        end
+        W.farmSyncElapsed = (W.farmSyncElapsed or 0) + dt
+        if W.farmSyncElapsed >= 0.3 then
+            W.farmSyncElapsed = 0
+            Farm:SyncFarmMode()
         end
         if not wavesActive() then
             -- v95: Keep the leave watcher running within Trost even when the
@@ -7144,8 +7345,9 @@ end
             end)
         end
     end)
+    Farm:SyncFarmMode()
     if wavesActive() then startUtilityWatcher() end
-    print(prefix.."v95 Waves-only guard ready; Trost "..TROST)
+    print(prefix.."v99 Auto Leave diagnostics and Waves-only farm ready; Trost "..TROST)
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
@@ -7736,11 +7938,11 @@ Farm.initializeMatchWebhook = function()
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test (v96)"
+            title = testMode and "HollowMoonHub • Webhook Test (v99)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v96"},
+            footer = {text="HollowMoonHub • Match Tracker • v99"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
@@ -7985,7 +8187,7 @@ local ALL_SETTING_FLAGS = {
     "EquipCraftCategoryV42", "EquipCraftRecipeV42", "EquipCraftMaterialChoiceV42",
     "EquipCraftTargetV42", "EquipCraftMaterialV42",
     "WavesUpgradeChoiceV78", "WavesEquipChoiceV76",
-    "WavesLeaveWaveInputV78", "WavesAutoLeaveV78",
+    "WavesLeaveWaveInputV78", "WavesAutoLeaveV78", "WavesAutoFarmV97",
     "WavesChoicePerksV76", "WavesChoiceArtifactsV76",
     "WavesChoiceMemoriesV76", "WavesChoiceShiftingV76",
     "MiscAutoQuestV73", "MiscAutoAchievementsV73", "MiscAutoDailyV73",
@@ -8014,7 +8216,7 @@ local RESTORE_FIRST = {
     "WavesAutoVoteStartV73", "WavesAutoVoteSkipV73", "WavesAutoCrateV73",
     "WavesAutoInjuriesV73", "WavesAutoBaseV73", "WavesAutoEquipV73", "WavesAutoBlessV73",
     "WavesUpgradeChoiceV78", "WavesEquipChoiceV76",
-    "WavesLeaveWaveInputV78", "WavesAutoLeaveV78",
+    "WavesLeaveWaveInputV78", "WavesAutoLeaveV78", "WavesAutoFarmV97",
     "WavesChoicePerksV76", "WavesAutoBuyPerksV73",
     "WavesChoiceArtifactsV76", "WavesAutoBuyArtifactsV73",
     "WavesChoiceMemoriesV76", "WavesAutoBuyMemoriesV73",
@@ -8185,9 +8387,13 @@ end -- initializePreferences; its locals no longer occupy main-chunk registers
 Farm.initializePreferences()
 Farm.initializePreferences = nil
 
--- v88: End the early-restore guard only after all Gen2 elements and
--- saved flags are ready. The visible UI now decides whether a toggle is on.
-if Farm.fastResumePendingUI then
+-- v98: Run the post-UI fast-resume reconciliation inside a separate function.
+-- The main Luau chunk already contains nearly 200 live local registers.
+-- Adding the v97 Waves farm setting there previously caused a COMPILE failure
+-- at `local wantSkills`; separate function scope avoids consuming any more
+-- main-chunk local registers while preserving the original execution order.
+Farm.reconcileFastResumeAfterUI = function()
+    if Farm.fastResumePendingUI then
     Farm.fastResumePendingUI = false
     local function isEnabled(flag, fallback)
         local ok, value = pcall(function() return window:Get(flag) end)
@@ -8195,9 +8401,12 @@ if Farm.fastResumePendingUI then
         return fallback == true
     end
     local wantFarm = isEnabled("AutoFarm", Farm.fastResumeFlags.AutoFarm)
+    local wantWaveFarm = isEnabled("WavesAutoFarmV97", Farm.fastResumeFlags.WavesAutoFarmV97)
     local wantAura = isEnabled("KillAura", Farm.fastResumeFlags.KillAura)
-    if wantFarm and not Farm.running then Farm:Start() end
-    if not wantFarm and Farm.running then Farm:Stop() end
+    Farm.generalFarmEnabled = wantFarm
+    Farm.waveFarmEnabled = wantWaveFarm
+    if Farm.Waves then Farm.Waves.flags.farm = wantWaveFarm end
+    Farm:SyncFarmMode()
     if wantAura and not Farm.auraEnabled then Farm:StartAura() end
     if not wantAura and Farm.auraEnabled then Farm:StopAura() end
     local wantReload = isEnabled("AutoReloadBlades", Farm.fastResumeFlags.AutoReloadBlades)
@@ -8215,7 +8424,10 @@ if Farm.fastResumePendingUI then
         Farm.skillReservation=false
     end
     print("[HollowMoonHub] Mobile fast resume reconciled with loaded UI settings")
+    end
 end
+Farm.reconcileFastResumeAfterUI()
+Farm.reconcileFastResumeAfterUI = nil
 
 setupSettingsListeners()
 -- On re-execution after a teleport, refresh queue setup from the restored flag.
