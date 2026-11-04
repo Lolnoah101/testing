@@ -305,6 +305,19 @@ local Farm = {
     lobbyCurrentStatus = "Waiting for lobby",
 }
 ENV.HollowMoonAOTOutskirts = Farm
+-- HollowMoonHubBuildV94: visible build stamp and Auto Execute cache signature.
+Farm.buildVersion = "v94"
+Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
+print("[HollowMoonHub] Running v94 (continuous farm travel during blade swap + rewards cache guard)")
+
+-- Blade switching is an asynchronous inventory action: it does not need
+-- character control. Movement pauses ONLY for station trips, Waves workflows,
+-- or other tasks that physically move the player. Combat still pauses while
+-- broken blades are being replaced.
+local function movementUtilityBusy()
+    return Farm.utilityBusy and (Farm.utilityBusyOwner ~= "blade-reload"
+        or Farm.keepMovingWhileReloading == false)
+end
 
 -- Tuned for continuously following the Titan's moving nape.
 local TWEEN_SPEED = 160 -- original base speed (unchanged without Aura)
@@ -621,7 +634,7 @@ local function releaseLastTitanWaitFreeze()
 end
 
 local function updateLastTitanWaitFreeze()
-    if Farm.unloaded or not Farm.running or Farm.utilityBusy
+    if Farm.unloaded or not Farm.running or movementUtilityBusy()
         or not Farm.lastTitanEnabled then
         releaseLastTitanWaitFreeze()
         return false
@@ -1873,7 +1886,7 @@ local function applyMomentumNoclipPart(part)
 end
 
 local function updateMomentumNoclip()
-    if Farm.unloaded or not Farm.running or Farm.utilityBusy
+    if Farm.unloaded or not Farm.running or movementUtilityBusy()
         or Farm.method ~= "Momentum (Physics)" or not Farm.momentumNoclip
         or Farm.waitingFreezeActive then
         if Farm.noclipCharacter then disableMomentumNoclip() end
@@ -2105,7 +2118,7 @@ end
 -- interpolation between decisions. This avoids continuously overwriting the
 -- player's CFrame/velocity while the existing attack system is active.
 local function farmStep()
-    if Farm.unloaded or not Farm.running or Farm.utilityBusy then return end
+    if Farm.unloaded or not Farm.running or movementUtilityBusy() then return end
 
     local root = getPlayerRoot()
     if not root then
@@ -2251,7 +2264,7 @@ local function recordSwingMotion()
 end
 
 local function heartbeatFarm(dt)
-    if not Farm.running or Farm.unloaded or Farm.utilityBusy then
+    if not Farm.running or Farm.unloaded or movementUtilityBusy() then
         releaseSkillNapeAssist()
         releaseLastTitanWaitFreeze()
         -- Stop physical acceleration during resupply, script shutdown,
@@ -4609,8 +4622,8 @@ Farm.refreshAutoExecCache = function()
             return
         end
         if not ok or type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonAOTOutskirts", 1, true) then
-            Farm.autoExecCacheStatus = "GitHub source unavailable or not HollowMoonHub AOT"
+            or not src:find("HollowMoonHubBuildV94", 1, true) then
+            Farm.autoExecCacheStatus = "GitHub is not serving v94; update GitHub testing file first"
             warn("[HollowMoonHub] Auto Execute cache: " .. Farm.autoExecCacheStatus)
             Farm.autoExecCacheBusy = false
             return
@@ -4723,7 +4736,7 @@ task.spawn(function()
     end
     local function tryRun(src, origin)
         if type(src) ~= "string" or #src < 10000
-            or not src:find("HollowMoonAOTOutskirts", 1, true) then
+            or not src:find("HollowMoonHubBuildV94", 1, true) then
             return false
         end
         local okCompile, fn = pcall(loadstring, src)
@@ -4740,7 +4753,7 @@ task.spawn(function()
         -- Never start a second script after a partially completed execution.
         return true
     end
-    print("[HollowMoonHub] Delta teleport loader started; checking local cache")
+    print("[HollowMoonHub v94] Teleport loader: checking version-pinned local cache")
     local okLocal, cached = pcall(readfile, %q)
     if okLocal and tryRun(cached, "local cache") then return end
     if not enabled() then return end
@@ -4751,7 +4764,7 @@ task.spawn(function()
     end
     -- Store a working remote copy for the next teleport too.
     if type(remote) == "string" and #remote > 10000
-        and remote:find("HollowMoonAOTOutskirts", 1, true) then
+        and remote:find("HollowMoonHubBuildV94", 1, true) then
         local okSyntax, fn = pcall(loadstring, remote)
         if okSyntax and type(fn) == "function" and type(writefile) == "function" then
             pcall(writefile, %q, remote)
@@ -5465,6 +5478,16 @@ Farm.bladeUiGroup:CreateGroup({direction="column"}):CreateToggle({
         else
             stopUtilityWatcherIfIdle()
         end
+    end,
+})
+
+-- One compact opt-out for the v94 movement experiment; default ON.
+farmTab:CreateToggle({
+    name = "Keep Moving During Blade Reload",
+    value = true,
+    flag = "KeepMovingBladeReloadV94",
+    callback = function(enabled)
+        Farm.keepMovingWhileReloading = enabled == true
     end,
 })
 
@@ -7080,7 +7103,7 @@ end
         end
     end)
     if wavesActive() then startUtilityWatcher() end
-    print(prefix.."v93 Waves-only guard ready; Trost "..TROST)
+    print(prefix.."v94 Waves-only guard ready; Trost "..TROST)
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
@@ -7497,7 +7520,7 @@ Farm.initializeMatchWebhook = function()
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker"},
+            footer = {text="HollowMoonHub • Match Tracker • v94"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
@@ -7597,7 +7620,10 @@ Farm.initializeMatchWebhook = function()
             print(prefix .. string.format("Reward scan: %d rewards, %d drops, %d special, %d stats; %d visible results panels",
                 #bestOrdinary, #bestDrops, #bestSpecial, #bestStats, rootsFound))
             if #bestOrdinary == 0 then
-                warn(prefix .. "No reward amounts confirmed in visible results UI; need results-screen structure to capture more")
+                warn(prefix .. "v94: No Gold/XP/Gems reward amounts found in readable result labels; no values will be invented")
+            end
+            if #bestDrops == 0 then
+                print(prefix .. "v94: No perk/drop entries detected; verify that the reward screen is still visible")
             end
             local embed = buildEmbed(false, bestOrdinary, bestDrops, bestSpecial, bestStats)
             hook.collecting = false
@@ -7686,7 +7712,7 @@ Farm.initializeMatchWebhook = function()
             setStatus("Webhook URL cleared locally")
         end,
     })
-    print(prefix .. "Match tracker initialized; URL kept out of GitHub source and settings backup")
+    print(prefix .. "v94 Match tracker ready (strict rewards/drops/special classification)")
 end
 Farm.initializeMatchWebhook()
 Farm.initializeMatchWebhook = nil
