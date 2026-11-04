@@ -311,9 +311,9 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v102"
+Farm.buildVersion = "v103"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
-print("[HollowMoonHub] Running v102 (combat startup + blade recovery fix)")
+print("[HollowMoonHub] Running v103 (game-load combat readiness recovery)")
 
 -- Blade switching is an asynchronous inventory action: it does not need
 -- character control. Movement pauses ONLY for station trips, Waves workflows,
@@ -1399,8 +1399,93 @@ end
 
 -- Only request hit registration after the Actor-local client has started and
 -- released an actual slash. Server rules still determine whether damage counts.
+-- v103: Gameplay flags and Rayfield may restore early on Delta, but combat
+-- must be initialized only AFTER the Roblox character, actual game combat
+-- Actor Host, and POST RemoteEvent are available. This is nonblocking: UI,
+-- saved flags, and other noncombat systems still initialize immediately.
+Farm.combatStartup = {
+    ready = false, reason = "Waiting for Roblox character and remotes",
+    character = nil, actor = nil, post = nil,
+    nextCheck = 0, lastCheck = 0,
+}
+function Farm:CombatStartupReady()
+    local state = self.combatStartup
+    if self.unloaded then return false end
+    local character = LocalPlayer.Character
+    local actor = character and character:FindFirstChildOfClass("Actor")
+    local root = getPlayerRoot()
+    local assets = ReplicatedStorage:FindFirstChild("Assets")
+    local remotes = assets and assets:FindFirstChild("Remotes")
+    local livePost = remotes and remotes:FindFirstChild("POST")
+    if livePost and not livePost:IsA("RemoteEvent") then livePost = nil end
+    local changed = state.character ~= character or state.actor ~= actor or state.post ~= livePost
+    if changed then
+        state.ready = false
+        state.character = character
+        state.actor = actor
+        state.post = livePost
+        state.nextCheck = 0
+        -- Resolve the live Host again after respawn/Actor replacement.
+        if actor ~= self.slashActor then
+            self.slashBridge = nil
+            self.slashActor = nil
+            self.attackHeld = false
+        end
+    end
+    if state.ready and root and livePost then return true end
+    state.ready = false
+    local now = os.clock()
+    if now < state.nextCheck then return false end
+    state.nextCheck = now + 0.7 -- avoid expensive Actor scans every frame
+    if not game:IsLoaded() then
+        state.reason = "Roblox place still loading"
+        return false
+    end
+    if not root then
+        state.reason = "Character/HumanoidRootPart not ready"
+        return false
+    end
+    if not livePost then
+        state.reason = "Assets.Remotes.POST not replicated"
+        return false
+    end
+    POST = livePost
+    if not actor then
+        state.reason = "Character combat Actor not ready"
+        return false
+    end
+    local bridge, why = resolveSlashBridge()
+    if not bridge then
+        state.reason = "Actor bridge: " .. tostring(why)
+        return false
+    end
+    -- A bridge existing is not sufficient: the game's native Host can still
+    -- be absent or busy while loading, making early slashes ineffective.
+    local callOK, hostReady, info = pcall(function()
+        return bridge:Invoke("status")
+    end)
+    if not callOK or not hostReady then
+        state.reason = "Native combat Host: " .. tostring(callOK and info or hostReady)
+        return false
+    end
+    local idleOK, idle, idleReason = pcall(function()
+        return bridge:Invoke("reload_window")
+    end)
+    if not idleOK or not idle then
+        state.reason = "Waiting for native combat idle: " .. tostring(idleOK and idleReason or idle)
+        return false
+    end
+    state.ready = true
+    state.reason = "Ready"
+    state.lastCheck = now
+    self.attackWarned = false
+    print("[HollowMoonHub v103] Combat ready: place loaded, POST and native Actor Host available")
+    return true
+end
+
 local function registerAuraHits(root)
     if not Farm.auraEnabled or Farm.utilityBusy then return end
+    if not Farm:CombatStartupReady() then return end
     -- On Delta, early auto-execution can run before Assets.Remotes replicates.
     -- Re-resolve POST when a server finishes loading instead of permanently
     -- using a nil/stale remote captured at the top of the script.
@@ -1478,6 +1563,7 @@ end
 local function tryAttack(runId, withAura)
     local now = os.clock()
     if Farm.utilityBusy or Farm.attacking or Farm.bladeRecoveryActive then return end
+    if not Farm:CombatStartupReady() then return end
     -- Let ready skills start without fighting the repeating Kill Aura slash.
     if (Farm.skillPriorityUntil or 0) > now then return end
     -- Do not start a slash when our only valid target is protected.
@@ -1608,6 +1694,9 @@ end
 local function requestCombatSkill()
     -- One user-facing toggle: Auto Skills. Specials are detected from the hotbar.
     if not Farm.autoCombatSkills then return end
+    -- Auto Skills also waits for the live combat Host; a cold startup cast can
+    -- collide with a slash or initialize the wrong Actor state after teleport.
+    if not Farm:CombatStartupReady() then return end
     if Farm.skillReservation or Farm.unloaded or Farm.attacking
         or Farm.utilityBusy or Farm.bladeRecoveryActive
         or Farm.waitingFreezeActive then return end
@@ -1795,13 +1884,18 @@ function Farm:StartAura()
             or (Farm.auraMode == "Aggressive" and 0.06 or 0.12)
         if Farm.auraHeartbeatElapsed < tickInterval then return end
         Farm.auraHeartbeatElapsed = 0
+        -- Keep the saved toggle ON while the game loads, but do not schedule
+        -- a slash before POST and the game's native combat controller are ready.
+        local combatReady = Farm:CombatStartupReady()
         -- A lightweight diagnostic runs only every 8 seconds, never in the UI.
         -- It helps distinguish missing Titan napes from combat/reload locks.
         local diagnosticNow = os.clock()
         if diagnosticNow - (Farm.auraLastDiagnosticAt or 0) > 8 then
             Farm.auraLastDiagnosticAt = diagnosticNow
             local blocked = nil
-            if not getPlayerRoot() then
+            if not combatReady then
+                blocked = "Startup waiting: " .. tostring(Farm.combatStartup.reason)
+            elseif not getPlayerRoot() then
                 blocked = "Character not ready"
             elseif Farm.utilityBusy then
                 blocked = "Utility busy: " .. tostring(Farm.utilityBusyOwner or "Waves/other")
@@ -1826,6 +1920,7 @@ function Farm:StartAura()
                 Farm.auraLastBlockReason = blocked
             end
         end
+        if not combatReady then return end
         if Farm.attacking or Farm.utilityBusy or Farm.skillReservation
             or Farm.bladeRecoveryActive then return end
         local now = os.clock()
@@ -4719,7 +4814,7 @@ local AUTOEXEC_FOLDER = "HollowMoonHub"
 local AUTOEXEC_URL = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
 -- Reuse the old toggle marker and Rayfield flag, so existing saves keep working.
 local AUTOEXEC_FLAG_FILE = AUTOEXEC_FOLDER .. "/AOT_Revolution_v44_enabled.txt"
-local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source_unpinned_v102.lua"
+local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source_unpinned_v103.lua"
 Farm.autoExecUICacheFile = AUTOEXEC_FOLDER .. "/AOT_Gen2_cached.lua"
 Farm.gen2Url = "https://sirius.menu/gen2"
 local function fileOpsReady()
@@ -4886,7 +4981,7 @@ task.spawn(function()
         -- Never start a second script after a partially completed execution.
         return true
     end
-    print("[HollowMoonHub v102] Teleport loader: checking local cache")
+    print("[HollowMoonHub v103] Teleport loader: checking local cache")
     local okLocal, cached = pcall(readfile, %q)
     if okLocal and tryRun(cached, "local cache") then return end
     if not enabled() then return end
@@ -7392,7 +7487,7 @@ end
     end)
     Farm:SyncFarmMode()
     if wavesActive() then startUtilityWatcher() end
-    print(prefix.."v102 Auto Leave diagnostics and Waves-only farm ready; Trost "..TROST)
+    print(prefix.."v103 Auto Leave diagnostics and Waves-only farm ready; Trost "..TROST)
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
@@ -7983,11 +8078,11 @@ Farm.initializeMatchWebhook = function()
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test (v102)"
+            title = testMode and "HollowMoonHub • Webhook Test (v103)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v102"},
+            footer = {text="HollowMoonHub • Match Tracker • v103"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
