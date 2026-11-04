@@ -3373,17 +3373,17 @@ end
 -- All character data reads happen inside the lobby Actor Host cache.
 -- No purchase/reset/craft is assumed successful from a sent request.
 -- ================================================================
-local EQUIPMENT_BRIDGE_NAME = "HollowMoonEquipV42"
+local EQUIPMENT_BRIDGE_NAME = "HollowMoonEquipV93"
 local EQUIPMENT_ACTOR_SOURCE = [==[
 local Players = game:GetService("Players")
 local player = Players.LocalPlayer
 local actor = player:FindFirstChild("PlayerScripts")
 actor = actor and actor:FindFirstChildOfClass("Actor")
 if not actor then warn("[HollowMoonHub Equipment] Lobby Actor not found"); return end
-local old = actor:FindFirstChild("HollowMoonEquipV42")
+local old = actor:FindFirstChild("HollowMoonEquipV93")
 if old and not old:IsA("BindableFunction") then old:Destroy(); old=nil end
 local bridge = old or Instance.new("BindableFunction")
-bridge.Name = "HollowMoonEquipV42"
+bridge.Name = "HollowMoonEquipV93"
 bridge.Parent = actor
 local hostCache, scanAt
 scanAt = -math.huge
@@ -3499,16 +3499,132 @@ local function snapshot(h)
     local weapon=slot.Weapon or data.Weapon or "Blades"
     local gradeBlades=grade(slot.Upgrades and slot.Upgrades.Blades)
     local gradeSpears=grade(slot.Upgrades and slot.Upgrades.Spears)
-    local perks={}
+    -- v93: inspect the actual character's unlocked perk slots and the owned
+    -- perks' types. Never list guessed/locked slots as usable.
+    local perks,unlockedSlots={},{}
     local perkData=slot.Perks
-    if perkData and type(perkData.Storage)=="table" then
-        for id,item in pairs(perkData.Storage) do
-            if type(item)=="table" and type(item.Name)=="string" then
-                perks[#perks+1]={ID=tostring(id),Name=item.Name,Level=item.Level or 0}
+    local allowedTypes={Body=true,Core=true,Offense=true,Defense=true,Support=true,Family=true,Extra=true}
+    local function normalizedCategory(value)
+        if type(value)~="string" then return nil end
+        for key in pairs(allowedTypes) do
+            if value:lower()==key:lower() then return key end
+        end
+        return nil
+    end
+    local function recognizedSlot(value)
+        if type(value)~="string" then return nil end
+        return normalizedCategory(value) or normalizedCategory(value:gsub("[_%d]+$",""))
+    end
+    local function liveDefinition(name,id)
+        local modules=h.Modules or {}
+        for _,candidate in ipairs({modules.Perk,modules.Perks,modules.Perk_Info,modules.PerkInfo}) do
+            if type(candidate)=="table" then
+                for _,dictionary in ipairs({candidate,candidate.Info or {},candidate.Definitions or {},candidate.Data or {}}) do
+                    if type(dictionary)=="table" then
+                        local def=dictionary[name] or dictionary[tostring(id)]
+                        if type(def)=="table" then return def end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+    local function describe(item,def)
+        for _,source in ipairs({item,def or {}}) do
+            for _,field in ipairs({"Description","Details","Effect","Tooltip","Desc"}) do
+                local s=source[field]
+                if type(s)=="string" and #s>0 then
+                    return s:sub(1,380)
+                end
+            end
+        end
+        local parts={}
+        local function collect(value)
+            if type(value)~="table" then return end
+            for key,amount in pairs(value) do
+                if type(key)=="string" and (type(amount)=="number" or type(amount)=="string") then
+                    parts[#parts+1]=key:gsub("_"," ")..": "..tostring(amount)
+                elseif type(key)=="string" and type(amount)=="table" then
+                    local amountValue=amount.Value or amount.Amount or amount.Bonus
+                    if type(amountValue)=="number" or type(amountValue)=="string" then
+                        parts[#parts+1]=key:gsub("_"," ")..": "..tostring(amountValue)
+                    end
+                end
+            end
+        end
+        collect(item.Stats); collect(item.Bonuses); collect(item.Buffs)
+        if def then collect(def.Stats); collect(def.Bonuses); collect(def.Buffs) end
+        table.sort(parts)
+        return #parts>0 and table.concat(parts," | "):sub(1,380) or "Effect data not exposed by the game"
+    end
+    if type(perkData)=="table" then
+        local equipped=type(perkData.Equipped)=="table" and perkData.Equipped or {}
+        local unlockMap=type(perkData.Unlocked)=="table" and perkData.Unlocked or
+            (type(perkData.Slots)=="table" and perkData.Slots or nil)
+        local candidates={}
+        for key,state in pairs(equipped) do
+            if type(key)=="string" and
+                recognizedSlot(key)
+                and state~=false and state~="Locked" then
+                local disabled=type(state)=="table" and
+                    (state.Locked==true or state.Unlocked==false)
+                if not disabled then candidates[key]=true end
+            end
+        end
+        -- Some versions expose an explicit slot-unlock table. Respect it when
+        -- present, including the possibility of a newly unlocked empty slot.
+        if unlockMap then
+            for key,state in pairs(unlockMap) do
+                if type(key)=="string" and recognizedSlot(key) then
+                    if state==true or state==1 or
+                        (type(state)=="table" and state.Unlocked==true) then
+                        candidates[key]=true
+                    elseif state==false or state==0 or state=="Locked" or
+                        (type(state)=="table" and state.Locked==true) then
+                        candidates[key]=nil
+                    end
+                elseif type(state)=="string" and recognizedSlot(state) then
+                    candidates[state]=true
+                end
+            end
+        end
+        -- The core/universal Body slot is available without a skill-tree unlock.
+        if type(perkData.Storage)=="table" then candidates.Body=true end
+        for key in pairs(candidates) do unlockedSlots[#unlockedSlots+1]=key end
+        local order={Body=1,Offense=2,Defense=3,Support=4,Family=5,Extra=6}
+        table.sort(unlockedSlots,function(a,b)
+            return (order[a] or 99)==(order[b] or 99) and a<b
+                or (order[a] or 99)<(order[b] or 99)
+        end)
+        if type(perkData.Storage)=="table" then
+            for id,item in pairs(perkData.Storage) do
+                if type(item)=="table" and type(item.Name)=="string" then
+                    local def=liveDefinition(item.Name,id)
+                    local kind=normalizedCategory(item.Category or item.Type or item.Slot)
+                        or normalizedCategory(def and (def.Category or def.Type or def.Slot))
+                    local specific={}
+                    local function captureSlots(obj)
+                        if type(obj)~="table" then return end
+                        for key,value in pairs(obj) do
+                            if type(key)=="string" and value==true then specific[#specific+1]=key end
+                            if type(value)=="string" then specific[#specific+1]=value end
+                        end
+                    end
+                    captureSlots(item.AllowedSlots)
+                    if def then captureSlots(def.AllowedSlots);captureSlots(def.Slots) end
+                    perks[#perks+1]={
+                        ID=tostring(id),Name=item.Name,Level=tonumber(item.Level) or 0,
+                        Category=kind or "Unknown", Effect=describe(item,def),
+                        Slots=specific,
+                    }
+                end
             end
         end
     end
-    table.sort(perks,function(a,b) return a.Name<b.Name end)
+    table.sort(perks,function(a,b)
+        if a.Name~=b.Name then return a.Name<b.Name end
+        return a.Level>b.Level
+    end)
     local artifacts={}
     local artData=slot.Artifacts
     if artData and type(artData.Storage)=="table" then
@@ -3557,7 +3673,8 @@ local function snapshot(h)
         Prestige=prog.Prestige or 0, Level=prog.Level or 0,
         Gold=(slot.Currency and slot.Currency.Gold) or (data.Currency and data.Currency.Gold) or 0,
         SkillPoints=sp, Unlocked=skills and #skills.Unlocked or 0,
-        Perks=perks, Artifacts=artifacts, CraftMaterials=craftMaterials, CraftTargets=craftTargets,
+        Perks=perks, UnlockedPerkSlots=unlockedSlots,
+        Artifacts=artifacts, CraftMaterials=craftMaterials, CraftTargets=craftTargets,
     }
 end
 local function sameId(a,b)
@@ -3720,7 +3837,8 @@ end
 local Equip = {
     weapon="Blades", autoEquip=false, autoUpgrade=false,
     skillDirection="Left",skillBranch="Left",autoSkills=false,
-    perkCategory="Offense",perkName=nil,autoPerk=false,
+    perkCategory="Body",perkName=nil,autoPerk=false,
+    perkSlots={},perkSlotDropdown=nil,perkSlotMap={},perkChoiceMap={},
     artifactProfile="Blade Damage",autoArtifact=false,
     craftCategory="Perks",craftTarget="",craftMaterialIDs="",
     craftSelectedMaterial="", craftMaterialMap={},
@@ -3730,6 +3848,65 @@ local Equip = {
     lastTimes={}, perkOptions={}, texts={}
 }
 Farm.Equipment = Equip
+Equip.refreshPerkSelectors=function()
+    local data=Equip.snapshot
+    if not data then return end
+    local slots=type(data.UnlockedPerkSlots)=="table" and data.UnlockedPerkSlots or {}
+    local slotOptions=#slots>0 and slots or {"Waiting for unlocked slots"}
+    local slotKey=table.concat(slotOptions,"|")
+    if Equip.perkSlotDropdown and Equip.lastSlotListKey~=slotKey then
+        Equip.lastSlotListKey=slotKey
+        pcall(function() Equip.perkSlotDropdown:Refresh(slotOptions) end)
+    end
+    if #slots>0 and not table.find(slots,Equip.perkCategory) then
+        Equip.perkCategory=slots[1]
+        Equip.perkName=nil
+        Equip.lastPerkKey=nil
+        if Equip.perkSlotDropdown then
+            pcall(function() Equip.perkSlotDropdown:Set(slots[1]) end)
+        end
+    end
+    local category=Equip.perkCategory
+    local baseCategory=category:gsub("[_%d]+$","")
+    local matches,best={},{}
+    for _,p in ipairs(data.Perks or {}) do
+        local eligible=baseCategory=="Body" -- The always-unlocked Body/Core slot is universal.
+            or p.Category==baseCategory
+            or (type(p.Slots)=="table" and table.find(p.Slots,category)~=nil)
+        -- Never claim that an unknown-category perk fits a restricted slot.
+        if eligible and table.find(slots,category) then
+            if not best[p.Name] or p.Level>best[p.Name].Level then
+                best[p.Name]=p
+            end
+        end
+    end
+    for name in pairs(best) do matches[#matches+1]=name end
+    table.sort(matches)
+    local placeholder="No compatible owned perks"
+    local key=category..":"..table.concat(matches,"|")
+    Equip.perkChoiceMap=best
+    if Equip.perkDropdown and Equip.lastPerkKey~=key then
+        Equip.lastPerkKey=key
+        pcall(function() Equip.perkDropdown:Refresh(#matches>0 and matches or {placeholder}) end)
+    end
+    if not best[Equip.perkName] then
+        Equip.perkName=matches[1]
+        if Equip.perkDropdown then
+            pcall(function() Equip.perkDropdown:Set(Equip.perkName or placeholder) end)
+        end
+    end
+    local p=Equip.perkName and best[Equip.perkName] or nil
+    local status
+    if #slots==0 then
+        status="Waiting for unlocked perk slots from Town Central"
+    elseif not p then
+        status="Slot: "..category.." | No compatible owned perks found"
+    else
+        status=string.format("%s | %s (Level %s) | %s",category,p.Name,
+            tostring(p.Level),tostring(p.Effect or "Bonuses unavailable"))
+    end
+    if Equip.texts.perk then pcall(function() Equip.texts.perk:Set(status) end) end
+end
 local function getEquipmentBridge()
     if game.PlaceId~=LOBBY_PLACE_ID then return nil,"Equipment automation runs in Town Central" end
     local actor=getLobbyActor()
@@ -3792,7 +3969,10 @@ local function equipmentTick()
     if tryAuto(Equip.autoEquip and info.Weapon~=Equip.weapon,"weapon",3,"EquipWeapon",Equip.weapon) then return end
     if tryAuto(Equip.autoUpgrade,"upgrade",2,"Upgrade") then return end
     if tryAuto(Equip.autoSkills,"skills",3,"UnlockSkill",{direction=Equip.skillDirection,branch=Equip.skillBranch}) then return end
-    if tryAuto(Equip.autoPerk and type(Equip.perkName)=="string" and #Equip.perkName>0,"perk",5,"EquipPerk",{name=Equip.perkName,category=Equip.perkCategory}) then return end
+    if tryAuto(Equip.autoPerk and type(Equip.perkName)=="string"
+        and #Equip.perkName>0 and Equip.perkChoiceMap[Equip.perkName]
+        and table.find(info.UnlockedPerkSlots or {},Equip.perkCategory)~=nil,
+        "perk",5,"EquipPerk",{name=Equip.perkName,category=Equip.perkCategory}) then return end
     if tryAuto(Equip.autoArtifact,"artifact",5,"EquipArtifact",Equip.artifactProfile) then return end
 end
 local function equipmentHeartbeat(dt)
@@ -3810,11 +3990,9 @@ local function equipmentHeartbeat(dt)
         local skillLine=string.format("Level %d | Prestige %d | Skills unlocked %d | SP %s",
             d.Level,d.Prestige,d.Unlocked,tostring(d.SkillPoints or "?"))
         if Equip.texts.skills then pcall(function() Equip.texts.skills:Set(skillLine) end) end
-        local perkNames={}
-        for _,p in ipairs(d.Perks or {}) do
-            if not table.find(perkNames,p.Name) then perkNames[#perkNames+1]=p.Name end
-        end
-        table.sort(perkNames)
+        -- All UI controls are refreshed from the live character snapshot.
+        -- If a user changes slot, this runs immediately on the next heartbeat.
+        if Equip.refreshPerkSelectors then Equip.refreshPerkSelectors() end
         if Equip.craftMaterialDropdown then
             local materials=d.CraftMaterials and d.CraftMaterials[Equip.craftCategory] or {}
             local options,map={},{}
@@ -3848,17 +4026,6 @@ local function equipmentHeartbeat(dt)
                 if not table.find(targets,Equip.craftTarget) then
                     if targets[1]~="Open the game's Craft screen to load recipes" then Equip.craftTarget=targets[1] end
                     pcall(function() Equip.craftTargetDropdown:Set(targets[1]) end)
-                end
-            end
-        end
-        if Equip.perkDropdown and #perkNames>0 then
-            local key=table.concat(perkNames,"|")
-            if Equip.lastPerkKey~=key then
-                Equip.lastPerkKey=key
-                pcall(function() Equip.perkDropdown:Refresh(perkNames) end)
-                if not Equip.perkName or not table.find(perkNames,Equip.perkName) then
-                    Equip.perkName=perkNames[1]
-                    pcall(function() Equip.perkDropdown:Set(perkNames[1]) end)
                 end
             end
         end
@@ -4720,11 +4887,22 @@ local window = Rayfield:CreateWindow({
     },
 })
 Farm.window = window
-window:CreateSection({name="GAMEPLAY"})
+window:CreateSection({name="LOBBY"})
 
 -- Lobby is the first tab. Requests verified against uploaded Town Central UI.
 -- Party creation and Start only run in Town Central, never in Outskirts.
 local lobbyTab = window:CreateTab({ name = "Lobby", icon = 93364949241311 })
+lobbyTab:CreateSection({ name = "Lobby Pages" })
+lobbyTab:CreateDropdown({
+    name="Open Lobby Page",options={"Lobby","Equipment","Misc"},value="Lobby",
+    forgetState=true,flag="LobbyPageNavigatorV93",
+    callback=function(v)
+        local choice=type(v)=="table" and v[1] or v
+        if choice=="Equipment" or choice=="Misc" then
+            pcall(function() window:Navigate(choice) end)
+        end
+    end,
+})
 lobbyTab:CreateSection({ name = "Game Mode" })
 local mapDropdown
 local objectiveDropdown
@@ -4935,17 +5113,37 @@ equipmentTab:CreateToggle({
 Equip.texts.skills=equipmentTab:CreateText({name="Skill / Prestige Watcher",text="Requires lobby character data"})
 
 equipmentTab:CreateSection({name="Perks"})
-equipmentTab:CreateDropdown({
-    name="Perk Slot",options={"Body","Offense","Defense","Support","Family","Extra"},
-    value="Offense",flag="EquipPerkSlotV42",
-    callback=function(v) Equip.perkCategory=type(v)=="table" and v[1] or v end,
-})
-Equip.perkDropdown=equipmentTab:CreateDropdown({
-    name="Owned Perk",options={"Refresh to load owned perks"},value="Refresh to load owned perks",flag="EquipPerkChoiceV42",
+Equip.perkSlotDropdown=equipmentTab:CreateDropdown({
+    name="Unlocked Perk Slot",options={"Waiting for unlocked slots"},
+    value="Waiting for unlocked slots",flag="EquipPerkSlotV42",
     callback=function(v)
         local choice=type(v)=="table" and v[1] or v
-        if choice~="Refresh to load owned perks" then Equip.perkName=choice end
+        if type(choice)=="string" and choice~="Waiting for unlocked slots" and
+            (not Equip.snapshot or table.find(Equip.snapshot.UnlockedPerkSlots or {},choice)) then
+            if Equip.perkCategory~=choice then
+                Equip.perkCategory=choice
+                Equip.perkName=nil
+                Equip.lastPerkKey=nil
+                Equip.refreshPerkSelectors()
+            end
+        end
     end,
+})
+Equip.perkDropdown=equipmentTab:CreateDropdown({
+    name="Compatible Owned Perks",options={"Waiting for owned perks"},
+    value="Waiting for owned perks",flag="EquipPerkChoiceV42",
+    callback=function(v)
+        local choice=type(v)=="table" and v[1] or v
+        if type(choice)=="string" and
+            (Equip.perkChoiceMap[choice] or
+                (not Equip.snapshot and choice~="Waiting for owned perks")) then
+            Equip.perkName=choice
+            if Equip.snapshot then Equip.refreshPerkSelectors() end
+        end
+    end,
+})
+Equip.texts.perk=equipmentTab:CreateText({
+    name="Selected Perk Bonuses",text="Select a perk to see its in-game effects",
 })
 equipmentTab:CreateToggle({
     name="Auto Equip Selected Perk",value=false,flag="EquipAutoPerkV42",
@@ -5036,6 +5234,9 @@ equipmentTab:CreateButton({
 equipmentTab:CreateSection({name="Live Status"})
 Equip.texts.status=equipmentTab:CreateText({name="Equipment Status",text="Waiting for equipment watcher"})
 
+-- Keep Lobby, Equipment and Misc together under the LOBBY sidebar heading.
+Farm.miscTab=window:CreateTab({name="Misc",icon=100604009889706})
+window:CreateSection({name="GAMEPLAY"})
 local farmTab = window:CreateTab({ name = "Combat", icon = 84750991656135 })
 farmTab:CreateSection({ name = "Auto Farm" })
 -- The only exposed farm method is called Tween, but intentionally runs the
@@ -5387,12 +5588,27 @@ Farm.initializeWavesAndMisc = function()
     local function folder()
         return game.PlaceId==TROST and Workspace:FindFirstChild("Waves") or nil
     end
+    -- Waves toggles remain saved, but NO Waves action runs in Missions, Raids,
+    -- or Town Central. Check both the place and live Waves objective.
+    local function wavesActive()
+        if Farm.unloaded or game.PlaceId~=TROST then return false end
+        local f=folder()
+        if not f then return false end
+        local objectives=f:FindFirstChild("Objectives")
+        if objectives and objectives:FindFirstChild("Waves") then return true end
+        for _,obj in ipairs(game:GetService("CollectionService"):GetTagged("Objective")) do
+            if obj.Name=="Waves" and obj:IsDescendantOf(Workspace) then return true end
+        end
+        return false
+    end
+    W.isActive=wavesActive
     local function getRemote(kind)
         local assets=ReplicatedStorage:FindFirstChild("Assets")
         local remotes=assets and assets:FindFirstChild("Remotes")
         return remotes and remotes:FindFirstChild(kind)
     end
     local function invoke(...)
+        if not wavesActive() then return false,"Waves are not active" end
         if W.busy or Farm.unloaded then return false,"Another wave request is running" end
         local remote=getRemote("GET")
         if not remote or not remote:IsA("RemoteFunction") then return false,"Waves GET is unavailable" end
@@ -5834,7 +6050,7 @@ end
     end
     W.actionBridge=actorBridge
     local function snapshot()
-        if game.PlaceId~=TROST then return end
+        if not wavesActive() then return end
         W.lastSnapshot=os.clock()
         local bridge=actorBridge("waves")
         if not bridge then return end
@@ -5854,6 +6070,7 @@ end
     end
     -- Preserve multi-selections when market prices/stock refresh their labels.
     local function updateItems()
+        if not wavesActive() then return end
         local f=folder()
         local items=f and f:FindFirstChild("Items")
         if not items then return end
@@ -5907,6 +6124,7 @@ end
         end
     end
     local function waveVote()
+        if not wavesActive() then return false end
         local obj=waveObjective()
         if not obj then W.previousOpen=false;W.votedPhase=nil;return false end
         local open=obj:GetAttribute("Show")==true
@@ -6402,7 +6620,7 @@ end
     -- considered a confirmed between-wave break. This avoids wandering down
     -- to the base when a Titan is temporarily out of range or spawning.
     local function breakWindow()
-        if game.PlaceId~=TROST or Farm.unloaded then return false,"Not in Trost" end
+        if not wavesActive() then return false,"Not in active Trost Waves" end
         local f=folder()
         local objective=waveObjective()
         if not f or not objective or f:GetAttribute("Finalised")~=nil then
@@ -6426,7 +6644,7 @@ end
     -- blade rig has no spare pairs left. Intermission spending stays equipment-
     -- first; the ordinary station-refill watcher resumes after purchasing.
     local function emergencyRefillItem()
-        if game.PlaceId~=TROST or Farm.unloaded or not Farm.utilityAutoRefill
+        if not wavesActive() or not Farm.utilityAutoRefill
             or not W.flags.base or not table.find(selections(W.pick.Base),"Refills") then
             return nil
         end
@@ -6533,7 +6751,7 @@ end
     -- Reaching the selected wave now triggers the game's native Leave action
     -- immediately, including while combat is ongoing. Retry if still in Trost.
     local function waveLeaveTask()
-        if not W.flags.leave or game.PlaceId~=TROST or Farm.unloaded then return false end
+        if not W.flags.leave or not wavesActive() then return false end
         local f=folder()
         if not f then
             W.leaveStatus="Waiting for Waves folder"
@@ -6592,7 +6810,7 @@ end
         return true
     end
     local function waveTick()
-        if Farm.unloaded or game.PlaceId~=TROST or W.busy or W.inWorkflow
+        if not wavesActive() or W.busy or W.inWorkflow
             or Farm.utilityBusy then return end
         local active,reason,token=breakWindow()
         W.downtimeStatus=reason
@@ -6718,11 +6936,11 @@ end
         local wave=f and f:GetAttribute("Wave") or Workspace:GetAttribute("Wave")
         local vote=objective and tostring(objective:GetAttribute("Phase")) or "Not voting"
         local gold=W.gold and tostring(math.floor(W.gold)) or "loading"
-        local status=game.PlaceId==TROST
+        local status=wavesActive()
             and string.format("Wave %s | Gold %s | Vote %s | Leave at %s: %s | %s | %s",
                 tostring(wave or "?"),gold,vote,tostring(W.leaveAtWave),
                 W.flags.leave and "ON" or "OFF",W.downtimeStatus,W.lastAction)
-            or "Waves automation runs in Trost Waves (place 14012874501)"
+            or "Waves controls paused outside Trost Waves"
         if W.text then pcall(function() W.text:Set(status) end) end
         local selection=W.blessingsSelection or {}
         local desc={}
@@ -6736,7 +6954,7 @@ end
             tostring(cost or "unknown"),#desc>0 and table.concat(desc,", ") or "loading")) end) end
     end
     -- UI: Misc applies to Town Central claims; Waves has independent workflows.
-    local misc=window:CreateTab({name="Misc",icon=100604009889706})
+    local misc=Farm.miscTab
     misc:CreateSection({name="Rewards"})
     misc:CreateToggle({name="Auto Claim Quests",value=false,flag="MiscAutoQuestV73",callback=function(v) W.miscFlags.quests=v==true end})
     misc:CreateToggle({name="Auto Claim Achievements",value=false,flag="MiscAutoAchievementsV73",callback=function(v) W.miscFlags.achievements=v==true end})
@@ -6802,6 +7020,24 @@ end
             if W.connection then W.connection:Disconnect();W.connection=nil end
             return
         end
+        if not wavesActive() then
+            -- Do not reset saved toggle values; only suspend Waves behavior.
+            -- An in-flight worker owns inWorkflow until its cleanup runs.
+            W.breakToken=nil
+            W.previousOpen=false
+            W.votedPhase=nil
+            W.downtimeStatus="Paused outside Waves"
+            W.statusElapsed=(W.statusElapsed or 0)+dt
+            if W.statusElapsed>=2 then
+                W.statusElapsed=0
+                updateStatus()
+            end
+            W.lastMisc=(W.lastMisc or -100)
+            if os.clock()-W.lastMisc>=5 then
+                W.lastMisc=os.clock();task.spawn(miscTask)
+            end
+            return
+        end
         W.voteElapsed=(W.voteElapsed or 0)+dt
         W.leaveElapsed=(W.leaveElapsed or 0)+dt
         W.jobElapsed=(W.jobElapsed or 0)+dt
@@ -6843,8 +7079,8 @@ end
             end)
         end
     end)
-    if game.PlaceId==TROST then startUtilityWatcher() end
-    print(prefix.."v86 Waves webhook / auto-leave ready; Trost "..TROST)
+    if wavesActive() then startUtilityWatcher() end
+    print(prefix.."v93 Waves-only guard ready; Trost "..TROST)
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
