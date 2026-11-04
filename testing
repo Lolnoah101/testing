@@ -311,9 +311,9 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v101"
+Farm.buildVersion = "v102"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
-print("[HollowMoonHub] Running v101 (version-free GitHub Auto Execute)")
+print("[HollowMoonHub] Running v102 (combat startup + blade recovery fix)")
 
 -- Blade switching is an asynchronous inventory action: it does not need
 -- character control. Movement pauses ONLY for station trips, Waves workflows,
@@ -1401,13 +1401,22 @@ end
 -- released an actual slash. Server rules still determine whether damage counts.
 local function registerAuraHits(root)
     if not Farm.auraEnabled or Farm.utilityBusy then return end
+    -- On Delta, early auto-execution can run before Assets.Remotes replicates.
+    -- Re-resolve POST when a server finishes loading instead of permanently
+    -- using a nil/stale remote captured at the top of the script.
+    if not POST or not POST.Parent or not POST:IsA("RemoteEvent") then
+        local assets = ReplicatedStorage:FindFirstChild("Assets")
+        local remotes = assets and assets:FindFirstChild("Remotes")
+        POST = remotes and remotes:FindFirstChild("POST")
+    end
     if not POST or not POST:IsA("RemoteEvent") then
         if not Farm.remoteWarned then
             Farm.remoteWarned = true
-            warn("[HollowMoonHub] POST remote missing: nape registrations unavailable.")
+            warn("[HollowMoonHub] Combat POST not yet replicated; retrying automatically")
         end
         return
     end
+    Farm.remoteWarned = false
 
     local targets, availableCount = getPrioritizedAuraTargets(root.Position)
     Farm.auraLastTargetCount = availableCount
@@ -1770,6 +1779,10 @@ end
 function Farm:StartAura()
     if self.unloaded or self.auraEnabled then return end
     self.auraEnabled = true
+    self.auraStartedAt = os.clock()
+    self.auraAcceptedAtStart = self.slashAccepted
+    self.auraLastDiagnosticAt = 0
+    self.auraLastBlockReason = nil
     -- Heartbeat only schedules attacks. Slash and registrations run in their
     -- existing guarded coroutine; no frame can start overlapping slashes.
     self.auraRunId = self.auraRunId + 1
@@ -1782,6 +1795,37 @@ function Farm:StartAura()
             or (Farm.auraMode == "Aggressive" and 0.06 or 0.12)
         if Farm.auraHeartbeatElapsed < tickInterval then return end
         Farm.auraHeartbeatElapsed = 0
+        -- A lightweight diagnostic runs only every 8 seconds, never in the UI.
+        -- It helps distinguish missing Titan napes from combat/reload locks.
+        local diagnosticNow = os.clock()
+        if diagnosticNow - (Farm.auraLastDiagnosticAt or 0) > 8 then
+            Farm.auraLastDiagnosticAt = diagnosticNow
+            local blocked = nil
+            if not getPlayerRoot() then
+                blocked = "Character not ready"
+            elseif Farm.utilityBusy then
+                blocked = "Utility busy: " .. tostring(Farm.utilityBusyOwner or "Waves/other")
+            elseif Farm.bladeRecoveryActive then
+                blocked = "Equipped blades broken; awaiting recovery"
+            elseif Farm.skillReservation then
+                blocked = "Auto Skills has reserved the current attack window"
+            elseif not hasAuraTarget() then
+                local folder = Workspace:FindFirstChild("Titans")
+                blocked = folder and "No living Titans with Hitboxes.Hit.Nape detected"
+                    or "Workspace.Titans not replicated yet"
+            elseif not POST or not POST.Parent then
+                blocked = "Combat POST remote not yet replicated"
+            elseif Farm.attackHeld then
+                blocked = "Previous slash release is pending: " .. tostring(Farm.slashStatus)
+            elseif diagnosticNow - (Farm.auraStartedAt or 0) > 6
+                and Farm.slashAccepted <= (Farm.auraAcceptedAtStart or 0) then
+                blocked = "No successful slash start yet: " .. tostring(Farm.slashStatus)
+            end
+            if blocked ~= Farm.auraLastBlockReason then
+                if blocked then warn("[HollowMoonHub/Kill Aura] " .. blocked) end
+                Farm.auraLastBlockReason = blocked
+            end
+        end
         if Farm.attacking or Farm.utilityBusy or Farm.skillReservation
             or Farm.bladeRecoveryActive then return end
         local now = os.clock()
@@ -2893,10 +2937,11 @@ local function bladeUtilityTick()
     Farm.bladeLastObserved=blades
     -- Hidden priority bit. It is set BEFORE checking utilityBusy so it
     -- remains active even when a prior reload attempt has failed/yielded.
-    Farm.bladeRecoveryActive = blades ~= nil and (
-        (not blades.working and Farm.utilityAutoReload)
-        or (blades.sparePairs == 0 and Farm.utilityAutoRefill)
-    ) or false
+    -- Only a BROKEN equipped blade pair must block Kill Aura/Auto Skills.
+    -- Empty spares with still-working blades triggers a supply trip, but is
+    -- not itself a reason to suppress all combat indefinitely.
+    Farm.bladeRecoveryActive = blades ~= nil and (not blades.working)
+        and (Farm.utilityAutoReload or Farm.utilityAutoRefill) or false
     if state~=Farm.bladeWatcherLastPrint then
         Farm.bladeWatcherLastPrint=state
         Farm.bladeWatcherLastChange=os.clock()
@@ -4674,7 +4719,7 @@ local AUTOEXEC_FOLDER = "HollowMoonHub"
 local AUTOEXEC_URL = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
 -- Reuse the old toggle marker and Rayfield flag, so existing saves keep working.
 local AUTOEXEC_FLAG_FILE = AUTOEXEC_FOLDER .. "/AOT_Revolution_v44_enabled.txt"
-local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source_unpinned.lua"
+local AUTOEXEC_CACHE_FILE = AUTOEXEC_FOLDER .. "/AOT_cached_source_unpinned_v102.lua"
 Farm.autoExecUICacheFile = AUTOEXEC_FOLDER .. "/AOT_Gen2_cached.lua"
 Farm.gen2Url = "https://sirius.menu/gen2"
 local function fileOpsReady()
@@ -4841,7 +4886,7 @@ task.spawn(function()
         -- Never start a second script after a partially completed execution.
         return true
     end
-    print("[HollowMoonHub v101] Teleport loader: checking local cache")
+    print("[HollowMoonHub v102] Teleport loader: checking local cache")
     local okLocal, cached = pcall(readfile, %q)
     if okLocal and tryRun(cached, "local cache") then return end
     if not enabled() then return end
@@ -7347,7 +7392,7 @@ end
     end)
     Farm:SyncFarmMode()
     if wavesActive() then startUtilityWatcher() end
-    print(prefix.."v101 Auto Leave diagnostics and Waves-only farm ready; Trost "..TROST)
+    print(prefix.."v102 Auto Leave diagnostics and Waves-only farm ready; Trost "..TROST)
 end
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
@@ -7938,11 +7983,11 @@ Farm.initializeMatchWebhook = function()
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test (v101)"
+            title = testMode and "HollowMoonHub • Webhook Test (v102)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v101"},
+            footer = {text="HollowMoonHub • Match Tracker • v102"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
