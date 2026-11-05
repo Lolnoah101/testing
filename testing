@@ -1,5 +1,5 @@
 --[[
-    HollowMoonHub | Attack on Titan: Revolution (Outskirts)
+    HollowMoonHub v121 | Attack on Titan: Revolution (Outskirts)
     Lobby v119: Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
@@ -83,6 +83,9 @@ do
             ignoredResets = old.matchClockIgnoredResets,
             sawResults = old.timerSawResults,
             resultsClosedAt = old.timerResultsClosedAt,
+            activeSince = old.matchClockLogicVersion == 2 and old.matchActiveSince or nil,
+            gameClockActive = old.matchClockLogicVersion == 2 and old.matchServerActive or false,
+            gameClockLastAdvanceAt = old.matchClockLogicVersion == 2 and old.matchServerLastAdvanceAt or nil,
         }
     end
 end
@@ -266,13 +269,17 @@ local Farm = {
     matchPlaceId = game.PlaceId,
     matchStartedLocal = previousClock and previousClock.startedAt or os.clock(),
     matchClockManual = previousClock and previousClock.manual or false,
-    matchLastElapsed = previousClock and previousClock.lastElapsed or 0,
-    matchServerSecondsLast = previousClock and previousClock.serverLast or nil,
-    matchServerAnchorValue = previousClock and previousClock.serverAnchor or nil,
-    matchServerAnchorAt = previousClock and previousClock.serverAnchorAt or nil,
-    matchClockIgnoredResets = previousClock and previousClock.ignoredResets or 0,
-    matchServerActive = false,
-    matchSource = "Stable match clock",
+    matchClockLogicVersion = 2,
+    matchActiveSince = previousClock and previousClock.activeSince or nil,
+    matchClockLastProbeAt = 0,
+    matchLastElapsed = previousClock and previousClock.activeSince and previousClock.lastElapsed or 0,
+    matchServerSecondsLast = previousClock and previousClock.activeSince and previousClock.serverLast or nil,
+    matchServerAnchorValue = previousClock and previousClock.activeSince and previousClock.serverAnchor or nil,
+    matchServerAnchorAt = previousClock and previousClock.activeSince and previousClock.serverAnchorAt or nil,
+    matchServerLastAdvanceAt = previousClock and previousClock.gameClockLastAdvanceAt or nil,
+    matchClockIgnoredResets = 0,
+    matchServerActive = previousClock and previousClock.gameClockActive or false,
+    matchSource = "Waiting for active match",
     timerSawResults = previousClock and previousClock.sawResults or false,
     timerResultsClosedAt = previousClock and previousClock.resultsClosedAt or nil,
     timerStatusText = nil,
@@ -312,7 +319,7 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v119"
+Farm.buildVersion = "v121"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
 do end
 
@@ -362,11 +369,13 @@ local Remotes = Assets and Assets:FindFirstChild("Remotes")
 local POST = Remotes and Remotes:FindFirstChild("POST")
 local GET = Remotes and Remotes:FindFirstChild("GET")
 
--- Outskirts Rewards reads workspace:GetAttribute("Seconds") for total match time.
--- Client snapshot does not establish whether this attribute updates DURING play;
--- only trust it after observing that it advances. Otherwise use local elapsed.
--- If script starts mid-match without a live Seconds clock, press Reset Match Timer
--- at the desired start point. Never claim the local timer is exact match time.
+-- v121 match clock: the results screen takes its Time Taken from Workspace.Seconds.
+-- Never use the script's initial execute time as the match start. A local Delta
+-- loader may run long before the server starts counting actual play time.
+-- Prefer Workspace.Seconds ONLY after observing it advance during a match.
+-- Otherwise begin an APPROXIMATE clock when the first attackable Titan appears.
+-- This conservative fallback may be late if streaming delays the Titan; it is
+-- not guaranteed to match the final results timer exactly.
 local function formatTime(seconds)
     seconds = math.max(0, math.floor((tonumber(seconds) or 0) + 0.001))
     return string.format("%d:%02d", math.floor(seconds / 60), seconds % 60)
@@ -381,57 +390,94 @@ local function parseTime(raw)
     return minutes * 60 + seconds
 end
 
--- Monotonic match clock: never reset because the replicated Seconds attribute
--- drops/stalls, and never jump backward when switching clock sources.
--- A new round is recognized separately from the results-screen transition.
 local function getMatchElapsed()
     local now = os.clock()
     local reported = Workspace:GetAttribute("Seconds")
     if type(reported) == "number" and reported >= 0 and reported < 36000 then
         local previous = Farm.matchServerSecondsLast
-        if previous ~= nil and reported < previous then
-            -- The old version set matchStartedLocal=now here; that caused the bug.
-            Farm.matchClockIgnoredResets = Farm.matchClockIgnoredResets + 1
-        elseif previous ~= nil and reported > previous then
-            -- Treat only an ADVANCING clock as a valid match-time source.
-            -- Don't re-anchor at a low value after a transient reset.
-            if Farm.matchServerAnchorValue == nil
-                or reported >= Farm.matchServerAnchorValue then
-                Farm.matchServerAnchorValue = reported
-                Farm.matchServerAnchorAt = now
-                Farm.matchServerActive = true
-            end
+        if previous ~= nil and reported + 1 < previous and reported <= 3 then
+            -- A genuine round reset is more important than preserving a stale
+            -- old match's time. Do not carry 60+ seconds into a new match.
+            Farm.matchServerActive = false
+            Farm.matchServerAnchorValue = nil
+            Farm.matchServerAnchorAt = nil
+            Farm.matchServerLastAdvanceAt = nil
+            Farm.matchActiveSince = nil
+            Farm.matchLastElapsed = 0
+            Farm.matchClockIgnoredResets = (Farm.matchClockIgnoredResets or 0) + 1
+        elseif previous ~= nil and reported > previous + 0.02 then
+            Farm.matchServerActive = true
+            Farm.matchServerAnchorValue = reported
+            Farm.matchServerAnchorAt = now
+            Farm.matchServerLastAdvanceAt = now
         end
         Farm.matchServerSecondsLast = reported
     end
-    local localElapsed = math.max(0, now - Farm.matchStartedLocal)
-    local elapsed = localElapsed
-    local source = Farm.matchClockManual and "Manual/local (stable)" or "Local (stable)"
-    if not Farm.matchClockManual and Farm.matchServerAnchorAt
-        and Farm.matchServerAnchorValue ~= nil then
-        -- Extrapolate from the last trustworthy server reading even if
-        -- subsequent attribute values temporarily reset or stop updating.
-        local projected = Farm.matchServerAnchorValue + math.max(0, now - Farm.matchServerAnchorAt)
-        if projected >= elapsed then
-            elapsed = projected
-            source = "Workspace.Seconds (stabilized)"
+
+    -- At the finished results screen, Seconds is the game's displayed final
+    -- duration even if it was not published continuously during gameplay.
+    if Farm.timerSawResults and type(reported) == "number" and reported >= 0 then
+        Farm.matchLastElapsed = reported
+        Farm.matchSource = "Game Seconds (final)"
+        return reported, Farm.matchSource
+    end
+
+    -- This branch deliberately DOES NOT compare against the local timer or
+    -- choose whichever reading is larger. That caused early last-Titan kills.
+    if Farm.matchServerActive and Farm.matchServerAnchorValue ~= nil then
+        -- Allow at most a small interpolation between updates; a stale / frozen
+        -- replicated clock must never silently count onward for many seconds.
+        local interpolated = math.min(math.max(0, now - (Farm.matchServerAnchorAt or now)), 0.5)
+        local elapsed = Farm.matchServerAnchorValue + interpolated
+        Farm.matchLastElapsed = elapsed
+        Farm.matchSource = "Game Seconds"
+        return elapsed, Farm.matchSource
+    end
+
+    -- The manual reset remains available when the game exposes no running
+    -- clock. It is only exact if the user resets it at the real match start.
+    if Farm.matchClockManual then
+        local elapsed = math.max(0, now - Farm.matchStartedLocal)
+        Farm.matchLastElapsed = elapsed
+        Farm.matchSource = "Manual reset (estimate)"
+        return elapsed, Farm.matchSource
+    end
+
+    -- An early loader cannot establish that combat has begun. The actual
+    -- active-target check is installed below after GetFarmTargetModels exists.
+    if Farm.matchActiveSince == nil and type(Farm.clockHasActiveTarget) == "function"
+        and now - (Farm.matchClockLastProbeAt or 0) >= 0.35 then
+        Farm.matchClockLastProbeAt = now
+        local ok, hasTarget = pcall(Farm.clockHasActiveTarget)
+        if ok and hasTarget then
+            Farm.matchActiveSince = now
+            Farm.matchStartedLocal = now
         end
     end
-    Farm.matchLastElapsed = math.max(Farm.matchLastElapsed or 0, elapsed)
-    Farm.matchSource = source
-    return Farm.matchLastElapsed, source
+
+    if Farm.matchActiveSince ~= nil then
+        local elapsed = math.max(0, now - Farm.matchActiveSince)
+        Farm.matchLastElapsed = elapsed
+        Farm.matchSource = "First Titan (estimate)"
+        return elapsed, Farm.matchSource
+    end
+
+    Farm.matchLastElapsed = 0
+    Farm.matchSource = "Waiting for first Titan"
+    return 0, Farm.matchSource
 end
 
 local function resetMatchTimer()
     Farm.matchStartedLocal = os.clock()
     Farm.matchClockManual = true
+    Farm.matchActiveSince = Farm.matchStartedLocal
     Farm.matchLastElapsed = 0
     Farm.matchServerSecondsLast = nil
     Farm.matchServerAnchorValue = nil
     Farm.matchServerAnchorAt = nil
+    Farm.matchServerLastAdvanceAt = nil
     Farm.matchServerActive = false
     Farm.lastTitanReserved = nil
-    do end
 end
 
 local function cancelTween()
@@ -659,6 +705,13 @@ function Farm:GetClosestNavigationTarget(fromPosition)
         end
     end
     return nearest, anchor
+end
+
+-- The match start fallback is based on the first replicated, living Titan,
+-- not when Delta loads the script or Rayfield creates the interface. Cached
+-- GetFarmTargetModels means this does not re-scan the whole map every frame.
+Farm.clockHasActiveTarget = function()
+    return #Farm:GetFarmTargetModels() > 0
 end
 
 -- Keep ONE living Titan completely protected BEFORE it becomes the last one.
@@ -5253,10 +5306,13 @@ local function handleResultScreen()
             Farm.timerResultsClosedAt = nil
             Farm.matchStartedLocal = os.clock()
             Farm.matchClockManual = false
+            Farm.matchActiveSince = nil
+            Farm.matchClockLastProbeAt = 0
             Farm.matchLastElapsed = 0
             Farm.matchServerSecondsLast = nil
             Farm.matchServerAnchorValue = nil
             Farm.matchServerAnchorAt = nil
+            Farm.matchServerLastAdvanceAt = nil
             Farm.matchServerActive = false
             Farm.lastTitanReserved = nil
             releaseLastTitanWaitFreeze()
@@ -6392,7 +6448,7 @@ farmTab:CreateButton({
 
 Farm.timerStatusText = farmTab:CreateText({
     name = "Match Timer",
-    text = "0:00 elapsed | Unlock 1:30 | Local timer since script start",
+    text = "Waiting for match | Unlock 1:30 | No live game clock yet",
 })
 
 -- A lightweight display watcher; it never manipulates movement or combat.
@@ -6407,6 +6463,8 @@ Farm.timerStatusConnection = RunService.Heartbeat:Connect(function(dt)
     local state
     if not Farm.lastTitanEnabled then
         state = "Off"
+    elseif source == "Waiting for first Titan" then
+        state = "Waiting for match start"
     elseif elapsed >= Farm.lastTitanAtSeconds then
         state = "Ready to finish"
     elseif Farm.waitingFreezeActive then
@@ -6416,8 +6474,10 @@ Farm.timerStatusConnection = RunService.Heartbeat:Connect(function(dt)
     else
         state = "Waiting for Titans"
     end
-    local line = string.format("Elapsed %s | Kill at %s | %s | Titans %d | %s",
-        formatTime(elapsed), Farm.lastTitanAtText, state, aliveCount, source)
+    local shownTime = source == "Waiting for first Titan" and "waiting"
+        or ((not tostring(source):find("Game Seconds", 1, true) and "~" or "") .. formatTime(elapsed))
+    local line = string.format("Match %s | Kill at %s | %s | Titans %d | %s",
+        shownTime, Farm.lastTitanAtText, state, aliveCount, source)
     if Farm.timerStatusText then
         pcall(function() Farm.timerStatusText:Set(line) end)
     end
@@ -9221,7 +9281,7 @@ Farm.initializeMatchWebhook = function()
         end
         local elapsed, source = getMatchElapsed()
         if type(elapsed) == "number" and elapsed >= 1 then
-            local approx = (source and source:lower():find("local",1,true)) and "~" or ""
+            local approx = (not tostring(source):find("Game Seconds", 1, true)) and "~" or ""
             info[#info+1] = "Time: " .. approx .. formatTime(elapsed)
         end
         local ordinary, drops, special, stats = rewardOrdinary, rewardDrops, rewardSpecial, matchStats
