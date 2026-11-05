@@ -1,6 +1,6 @@
 --[[
     HollowMoonHub | Attack on Titan: Revolution (Outskirts)
-    Combat v109: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    Lobby v119: Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -312,7 +312,7 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v109"
+Farm.buildVersion = "v119"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
 do end
 
@@ -971,7 +971,7 @@ end
 -- This optional test attempts to run within the character's own Actor VM.
 -- It requires an executor exposing run_on_actor and getgc in that Actor.
 -- NO mouse events, keyboard events, or fallback simulated inputs are used.
-local BRIDGE_NAME = "HollowMoonClientSlashV74"
+local BRIDGE_NAME = "HollowMoonClientSlashV119"
 local ACTOR_SOURCE = [==[
 local Players = game:GetService("Players")
 local character = Players.LocalPlayer.Character
@@ -980,14 +980,14 @@ if not actor then
     do end
     return
 end
-local bridge = actor:FindFirstChild("HollowMoonClientSlashV74")
+local bridge = actor:FindFirstChild("HollowMoonClientSlashV119")
 if bridge and not bridge:IsA("BindableFunction") then
     bridge:Destroy()
     bridge = nil
 end
 if not bridge then
     bridge = Instance.new("BindableFunction")
-    bridge.Name = "HollowMoonClientSlashV74"
+    bridge.Name = "HollowMoonClientSlashV119"
     bridge.Parent = actor
 end
 
@@ -1045,6 +1045,79 @@ bridge.OnInvoke = function(command, payload)
         return false, state
     end
     if not host then return false, state end
+    -- Raid chest operations must run in the SAME Actor VM as the game's
+    -- live Host. This calls its Chests controller, not the reward remote.
+    -- The controller itself checks eligibility and plays its animations.
+    if command == "raid_chest" then
+        local request = type(payload) == "table" and payload or {}
+        if workspace:GetAttribute("Type") ~= "Raids" then
+            return false, "Not an active Raid"
+        end
+        local modules = host.Modules
+        local chest = modules and modules.Chests
+        local rewards = modules and modules.Rewards
+        local ui = host.Cache and host.Cache.Interface and host.Cache.Interface.Chests
+        if type(chest) ~= "table" or type(rewards) ~= "table" or not ui then
+            return false, "Native Chests controller is not initialized"
+        end
+        local player = Players.LocalPlayer
+        local data = host.Cache.Data
+        local slot = data and data.Slots and data.Slots[data.Current_Slot]
+        local items = slot and slot.Inventory and slot.Inventory.Items
+        -- A present inventory with no key entry means zero keys; a missing
+        -- inventory means loading is incomplete, not proof of zero keys.
+        local keys = items and (tonumber(items["Emperor's Key"]) or 0) or nil
+        local credit = tonumber(player:GetAttribute("Stat"))
+        local result = {
+            visible = ui.Visible == true,
+            state = chest.State,
+            ready = chest.State == "In" and ui.Visible == true and chest.End ~= nil,
+            freeClaimed = rewards.Free_Claimed == true,
+            premiumClaimed = rewards.Premium_Claimed == true,
+            credit = credit,
+            keys = keys,
+            animating = chest.Other ~= nil,
+            finished = chest.State ~= "In" or ui.Visible ~= true,
+        }
+        if request.action == "status" then return true, result end
+        if request.action == "open" then
+            local choice = request.choice == "Premium" and "Premium" or "Free"
+            if not result.ready then return false, "Chest controller/screen not ready" end
+            if (choice == "Free" and result.freeClaimed)
+                or (choice == "Premium" and result.premiumClaimed) then
+                return false, choice .. " chest already claimed"
+            end
+            if credit == nil then return false, "Waiting for raid credit" end
+            if credit < 5 then return false, "Raid credit below 5%" end
+            if choice == "Premium" and keys == nil then
+                return false, "Waiting for inventory/key count"
+            end
+            if choice == "Premium" and keys < 1 then
+                return false, "Premium requires an Emperor's Key"
+            end
+            if type(chest.Open) ~= "function" or not ui:FindFirstChild(choice) then
+                return false, "Native Open handler unavailable"
+            end
+            local ok, err = pcall(chest.Open, host, ui, ui[choice])
+            if not ok then return false, "Native Open failed: " .. tostring(err) end
+            return true, "Native " .. choice .. " Open controller invoked"
+        end
+        if request.action == "finish" then
+            -- Finishing without Premium is valid when no Emperor's Key is owned.
+            -- No selected-chest claim is required by the native Finish routine.
+            -- But never close the interface in the middle of an opening.
+            if not result.ready or result.animating then
+                return false, "CHESTS is not ready to finish"
+            end
+            if type(chest.Finish) ~= "function" then
+                return false, "Native Finish handler unavailable"
+            end
+            local ok, err = pcall(chest.Finish, host)
+            if not ok then return false, "Native Finish failed: " .. tostring(err) end
+            return true, "Native Finish controller invoked"
+        end
+        return false, "Unknown chest operation"
+    end
     local char = Players.LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -2699,6 +2772,7 @@ end
 
 -- Quiet mode watcher: the game can spawn Titans AFTER the script starts.
 -- Reconcile independently of UI and report only meaningful status changes.
+if game.PlaceId ~= 14916516914 then
 Farm.farmModeConnection = RunService.Heartbeat:Connect(function(dt)
     if Farm.unloaded then
         if Farm.farmModeConnection then
@@ -2718,6 +2792,7 @@ Farm.farmModeConnection = RunService.Heartbeat:Connect(function(dt)
         end
     end
 end)
+end -- no gameplay farm watchdog in Town Central
 
 -- Blade utilities use the Outskirts client source contracts:
 --   GET:InvokeServer("Blades", "Reload") replaces a broken blade pair.
@@ -3760,17 +3835,17 @@ end
 -- All character data reads happen inside the lobby Actor Host cache.
 -- No purchase/reset/craft is assumed successful from a sent request.
 -- ================================================================
-local EQUIPMENT_BRIDGE_NAME = "HollowMoonEquipV93"
+local EQUIPMENT_BRIDGE_NAME = "HollowMoonEquipV114"
 local EQUIPMENT_ACTOR_SOURCE = [==[
 local Players = game:GetService("Players")
 local player = Players.LocalPlayer
 local actor = player:FindFirstChild("PlayerScripts")
 actor = actor and actor:FindFirstChildOfClass("Actor")
 if not actor then do end; return end
-local old = actor:FindFirstChild("HollowMoonEquipV93")
+local old = actor:FindFirstChild("HollowMoonEquipV114")
 if old and not old:IsA("BindableFunction") then old:Destroy(); old=nil end
 local bridge = old or Instance.new("BindableFunction")
-bridge.Name = "HollowMoonEquipV93"
+bridge.Name = "HollowMoonEquipV114"
 bridge.Parent = actor
 local hostCache, scanAt
 scanAt = -math.huge
@@ -3902,19 +3977,24 @@ local function snapshot(h)
         if type(value)~="string" then return nil end
         return normalizedCategory(value) or normalizedCategory(value:gsub("[_%d]+$",""))
     end
+    -- The real lobby Perks definitions are grouped under Common/Rare/Epic/...
+    -- They do not require opening the Equipment menu.
     local function liveDefinition(name,id)
         local modules=h.Modules or {}
-        for _,candidate in ipairs({modules.Perk,modules.Perks,modules.Perk_Info,modules.PerkInfo}) do
-            if type(candidate)=="table" then
-                for _,dictionary in ipairs({candidate,candidate.Info or {},candidate.Definitions or {},candidate.Data or {}}) do
-                    if type(dictionary)=="table" then
-                        local def=dictionary[name] or dictionary[tostring(id)]
-                        if type(def)=="table" then return def end
-                    end
+        if type(modules.Perks)=="table" then
+            for rarity,group in pairs(modules.Perks) do
+                if type(group)=="table" and type(group[name])=="table" then
+                    return group[name],tostring(rarity)
                 end
             end
         end
-        return nil
+        for _,group in ipairs({modules.Perk_Info,modules.PerkInfo}) do
+            if type(group)=="table" then
+                local def=group[name] or group[tostring(id)]
+                if type(def)=="table" then return def,nil end
+            end
+        end
+        return nil,nil
     end
     local function describe(item,def)
         for _,source in ipairs({item,def or {}}) do
@@ -3926,6 +4006,7 @@ local function snapshot(h)
             end
         end
         local parts={}
+        local level=math.max(0,tonumber(item.Level) or 0)
         local function collect(value)
             if type(value)~="table" then return end
             for key,amount in pairs(value) do
@@ -3933,6 +4014,9 @@ local function snapshot(h)
                     parts[#parts+1]=key:gsub("_"," ")..": "..tostring(amount)
                 elseif type(key)=="string" and type(amount)=="table" then
                     local amountValue=amount.Value or amount.Amount or amount.Bonus
+                    if type(amount.Base)=="number" then
+                        amountValue=amount.Base+level*(tonumber(amount.Increment) or 0)
+                    end
                     if type(amountValue)=="number" or type(amountValue)=="string" then
                         parts[#parts+1]=key:gsub("_"," ")..": "..tostring(amountValue)
                     end
@@ -3986,9 +4070,9 @@ local function snapshot(h)
         if type(perkData.Storage)=="table" then
             for id,item in pairs(perkData.Storage) do
                 if type(item)=="table" and type(item.Name)=="string" then
-                    local def=liveDefinition(item.Name,id)
-                    local kind=normalizedCategory(item.Category or item.Type or item.Slot)
-                        or normalizedCategory(def and (def.Category or def.Type or def.Slot))
+                    local def,defRarity=liveDefinition(item.Name,id)
+                    local kind=normalizedCategory(def and (def.Type or def.Category or def.Slot))
+                        or normalizedCategory(item.Category or item.Type or item.Slot)
                     local specific={}
                     local function captureSlots(obj)
                         if type(obj)~="table" then return end
@@ -3999,10 +4083,19 @@ local function snapshot(h)
                     end
                     captureSlots(item.AllowedSlots)
                     if def then captureSlots(def.AllowedSlots);captureSlots(def.Slots) end
+                    local compatible={}
+                    local values=h.Modules and h.Modules.Values
+                    if values and type(values.Can_Equip_Perk)=="function" and defRarity and kind then
+                        for _,slotName in ipairs(unlockedSlots) do
+                            local ok,accept=pcall(values.Can_Equip_Perk,slot,slotName,defRarity,kind)
+                            if ok and accept==true then compatible[#compatible+1]=slotName end
+                        end
+                    end
                     perks[#perks+1]={
                         ID=tostring(id),Name=item.Name,Level=tonumber(item.Level) or 0,
                         Category=kind or "Unknown", Effect=describe(item,def),
-                        Slots=specific,
+                        Rarity=tostring(defRarity or item.Rarity or (def and def.Rarity) or "Unknown"),
+                        Slots=specific,CompatibleSlots=compatible,
                     }
                 end
             end
@@ -4014,14 +4107,49 @@ local function snapshot(h)
     end)
     local artifacts={}
     local artData=slot.Artifacts
+    local artDefs=h.Modules and h.Modules.Artifacts or {}
+    local equippedArtifacts=artData and artData.Equipped or {}
+    local function artifactRolls(item)
+        local result={}
+        local source=type(item.Stats)=="table" and item.Stats
+            or (type(item.Rolls)=="table" and item.Rolls or {})
+        for key,entry in pairs(source) do
+            local name,amount
+            if type(entry)=="table" then
+                name=entry.Name or entry.Stat or entry.Type or entry.Tag or entry[1] or key
+                amount=entry.Percent or entry.Percentage or entry.Value or entry.Amount or entry[2]
+            elseif type(key)=="string" then
+                name=key;amount=entry
+            end
+            if name~=nil and (type(amount)=="number" or type(amount)=="string") then
+                result[#result+1]={Name=tostring(name),Value=tonumber(amount),Display=tostring(amount)}
+            end
+        end
+        table.sort(result,function(a,b) return a.Name<b.Name end)
+        return result
+    end
     if artData and type(artData.Storage)=="table" then
         for id,item in pairs(artData.Storage) do
             if type(item)=="table" and type(item.Name)=="string" then
-                artifacts[#artifacts+1]={ID=tostring(id),Name=item.Name}
+                local def=type(artDefs)=="table" and artDefs[item.Name] or nil
+                local slotName=item.Slot or (type(def)=="table" and def.Slot) or "Unknown"
+                local equipped=type(equippedArtifacts)=="table" and equippedArtifacts[slotName]
+                artifacts[#artifacts+1]={
+                    ID=tostring(id),Name=item.Name,Slot=tostring(slotName),
+                    Rarity=tostring(item.Rarity or (type(def)=="table" and def.Rarity) or "Unknown"),
+                    Rolls=artifactRolls(item),
+                    Passives=type(def)=="table" and type(def.Passives)=="table"
+                        and table.concat(def.Passives," | ") or "",
+                    Equipped=type(equipped)=="table" and tostring(equipped.ID)==tostring(id)
+                        or tostring(equipped)==tostring(id),
+                }
             end
         end
     end
-    table.sort(artifacts,function(a,b) return a.Name<b.Name end)
+    table.sort(artifacts,function(a,b)
+        if a.Name~=b.Name then return a.Name<b.Name end
+        return a.ID<b.ID
+    end)
     local craftMaterials={}
     for _,category in ipairs({"Perks","Vessels","Fragments"}) do
         local parent=slot[category=="Fragments" and "Perks" or category]
@@ -4029,24 +4157,110 @@ local function snapshot(h)
         if parent and type(parent.Storage)=="table" then
             for id,item in pairs(parent.Storage) do
                 if type(item)=="table" and type(item.Name)=="string" then
-                    options[#options+1]={ID=tostring(id),Name=item.Name}
+                    options[#options+1]={ID=tostring(id),Name=item.Name,
+                        Rarity=tostring(item.Rarity or "Unknown"),Level=tonumber(item.Level) or 0}
                 end
             end
         end
         table.sort(options,function(a,b) return a.Name<b.Name end)
         craftMaterials[category]=options
     end
+    -- Recipes are game definitions, not UI buttons. The original v111 only
+    -- inspected Equipment.Craftable created when the user opened that menu.
     local craftTargets={}
-    local interface=h.Cache.Interface
-    local equipGui=interface and interface.Equipment
-    local craftGui=equipGui and equipGui:FindFirstChild("Craftable")
-    if craftGui then
-        for _,obj in ipairs(craftGui:GetDescendants()) do
-            local tag=obj:GetAttribute("Tag")
-            local category=obj:GetAttribute("Category")
-            if type(tag)=="string" and type(category)=="string" then
-                craftTargets[#craftTargets+1]={Category=category,Tag=tag}
+    local itemDefinitions=h.Modules and h.Modules.Items or {}
+    if type(itemDefinitions)=="table" then
+        for tag,definition in pairs(itemDefinitions) do
+            if type(definition)=="table" and
+                (definition.Craft=="Perks" or definition.Craft=="Vessels"
+                    or (tostring(tag)=="Divine_Perk" and definition.Craft=="Fragments")) then
+                craftTargets[#craftTargets+1]={
+                    Category=definition.Craft=="Fragments" and "Perks" or definition.Craft,
+                    NativeCategory=definition.Craft,Tag=tostring(tag),
+                    Rarity=tostring(definition.Rarity or "Unknown"),
+                    Source="Game Items definitions"
+                }
             end
+        end
+    end
+    local rank={Common=1,Rare=2,Epic=3,Legendary=4,Mythic=5,Divine=6}
+    table.sort(craftTargets,function(a,b)
+        if a.Category~=b.Category then return a.Category<b.Category end
+        if (rank[a.Rarity] or 99)~=(rank[b.Rarity] or 99) then
+            return (rank[a.Rarity] or 99)<(rank[b.Rarity] or 99)
+        end
+        return a.Tag<b.Tag
+    end)
+    -- Display these inventories without assuming any unknown server-action names.
+    local function simpleInventory(container)
+        local items={}
+        if type(container)~="table" then return items end
+        local store=type(container.Storage)=="table" and container.Storage or container
+        for key,value in pairs(store) do
+            if type(value)=="table" then
+                local name=value.Name or value.Tag or value.Type or
+                    (type(key)=="string" and key or nil)
+                if type(name)=="string" then
+                    items[#items+1]={ID=tostring(key),Name=name,
+                        Count=tonumber(value.Amount or value.Count or value.Quantity) or 1,
+                        Rarity=tostring(value.Rarity or "Unknown")}
+                end
+            elseif type(key)=="string" and type(value)=="number" then
+                items[#items+1]={ID=key,Name=key,Count=value,Rarity="Unknown"}
+            end
+        end
+        table.sort(items,function(a,b) return a.Name<b.Name end)
+        return items
+    end
+    local inventory=type(slot.Inventory)=="table" and slot.Inventory or {}
+    local ownedCrates=simpleInventory(slot.Crates or slot.Chests or inventory.Crates or inventory.Chests)
+    local boosts=simpleInventory(slot.Boosts or slot.Boosters or inventory.Boosts)
+    local itemCounts=type(inventory.Items)=="table" and inventory.Items or {}
+    -- AOT stores consumable crate/boost counts by exact item name in Inventory.Items.
+    -- This is available from the player data without opening the Inventory screen.
+    if type(itemDefinitions)=="table" then
+        local fromItemsCrates,fromItemsBoosts={},{}
+        for itemName,count in pairs(itemCounts) do
+            local definition=itemDefinitions[itemName]
+            if type(itemName)=="string" and type(count)=="number" and count>0
+                and type(definition)=="table" then
+                local target=(definition.Inventory_Type=="Crates" and fromItemsCrates)
+                    or (definition.Inventory_Type=="Boosts" and fromItemsBoosts)
+                if target then
+                    target[#target+1]={ID=itemName,Name=itemName,Count=count,
+                        Rarity=tostring(definition.Rarity or "Unknown")}
+                end
+            end
+        end
+        table.sort(fromItemsCrates,function(a,b) return a.Name<b.Name end)
+        table.sort(fromItemsBoosts,function(a,b) return a.Name<b.Name end)
+        if #fromItemsCrates>0 then ownedCrates=fromItemsCrates end
+        if #fromItemsBoosts>0 then boosts=fromItemsBoosts end
+    end
+    local memories=simpleInventory(slot.Memories or (slot.Progression and slot.Progression.Memories))
+    local memoryOptions={}
+    local memoryDefs=h.Modules and h.Modules.Memories
+    if type(memoryDefs)=="table" then
+        local function scanMemoryGroup(group)
+            if type(group)~="table" then return end
+            for _,definition in pairs(group) do
+                if type(definition)=="table" and type(definition.Tag)=="string"
+                    and not table.find(memoryOptions,definition.Tag) then
+                    memoryOptions[#memoryOptions+1]=definition.Tag
+                end
+            end
+        end
+        scanMemoryGroup(memoryDefs.Boosts)
+        if type(memoryDefs.Talents)=="table" then
+            for _,category in pairs(memoryDefs.Talents) do scanMemoryGroup(category) end
+        end
+    end
+    table.sort(memoryOptions)
+    local perkEquippedIDs={}
+    if type(perkData)=="table" and type(perkData.Equipped)=="table" then
+        for _,v in pairs(perkData.Equipped) do
+            if type(v)=="table" then v=v.ID or v.Id end
+            if v~=nil then perkEquippedIDs[tostring(v)]=true end
         end
     end
     local prog=slot.Progression or {}
@@ -4060,8 +4274,10 @@ local function snapshot(h)
         Prestige=prog.Prestige or 0, Level=prog.Level or 0,
         Gold=(slot.Currency and slot.Currency.Gold) or (data.Currency and data.Currency.Gold) or 0,
         SkillPoints=sp, Unlocked=skills and #skills.Unlocked or 0,
-        Perks=perks, UnlockedPerkSlots=unlockedSlots,
+        Perks=perks, UnlockedPerkSlots=unlockedSlots, EquippedPerkIDs=perkEquippedIDs,
         Artifacts=artifacts, CraftMaterials=craftMaterials, CraftTargets=craftTargets,
+        StaticDataReady=type(itemDefinitions)=="table" and next(itemDefinitions)~=nil,
+        Crates=ownedCrates, Boosts=boosts, Memories=memories, MemoryOptions=memoryOptions,
     }
 end
 local function sameId(a,b)
@@ -4188,6 +4404,118 @@ bridge.OnInvoke=function(command,settings)
         return equipPerk(h,settings.name,settings.category)
     elseif command=="EquipArtifact" then
         return equipBestArtifact(h,tostring(settings or ""))
+    elseif command=="EquipArtifactByID" then
+        if type(settings)~="table" then return false,"Artifact selection missing" end
+        local group=s.Artifacts
+        local storage=group and group.Storage
+        if type(storage)~="table" then return false,"Artifact inventory unavailable" end
+        local targetId, target
+        for id,item in pairs(storage) do
+            if tostring(id)==tostring(settings.id) then targetId=id;target=item;break end
+        end
+        if not target then return false,"Selected artifact is not owned" end
+        local defs=h.Modules and h.Modules.Artifacts
+        local definition=type(defs)=="table" and defs[target.Name]
+        local slotName=target.Slot or (type(definition)=="table" and definition.Slot)
+        if type(slotName)~="string" or not table.find({"Hat","Face","Neck","Back"},slotName) then
+            return false,"Artifact slot not verified"
+        end
+        local update,reason=invoke(h,"S_Equipment","Artifact_State",targetId,slotName)
+        if type(update)~="table" then return false,"Equip rejected: "..tostring(reason) end
+        h.Cache.Data=update
+        return true,"Equipped "..target.Name.." in "..slotName
+    elseif command=="SellInventory" then
+        if type(settings)~="table" or type(settings.ids)~="table" then
+            return false,"No inventory items selected"
+        end
+        local kind=settings.kind
+        if kind~="Perk" and kind~="Artifact" then return false,"Invalid inventory type" end
+        local current=snapshot(h)
+        if type(current)~="table" then return false,"Inventory data unavailable" end
+        local collection=kind=="Perk" and current.Perks or current.Artifacts
+        local equipped=current.EquippedPerkIDs or {}
+        local allowed={}
+        for _,rarity in ipairs(settings.rarities or {}) do
+            if type(rarity)=="string" then allowed[rarity]=true end
+        end
+        if not next(allowed) then return false,"No rarity filters selected" end
+        -- Recheck the native equipped inventory immediately before deletion.
+        -- A stale UI snapshot must never allow selling an equipped item.
+        local liveGroup=kind=="Perk" and s.Perks or s.Artifacts
+        local liveEquipped={}
+        if type(liveGroup)=="table" and type(liveGroup.Equipped)=="table" then
+            for _,value in pairs(liveGroup.Equipped) do
+                if type(value)=="table" then value=value.ID or value.Id end
+                if value~=nil then liveEquipped[tostring(value)]=true end
+            end
+        end
+        local ids={}
+        local seen={}
+        for _,id in ipairs(settings.ids) do
+            if type(id)=="string" and not seen[id] then
+                seen[id]=true
+                for _,entry in ipairs(collection or {}) do
+                    if entry.ID==id and allowed[entry.Rarity]
+                        and not liveEquipped[id]
+                        and not (kind=="Perk" and equipped[id])
+                        and not (kind=="Artifact" and entry.Equipped)
+                        and id~=settings.protectId
+                        and (kind~="Perk" or entry.Name~=settings.protectName) then
+                        ids[#ids+1]=id
+                        break
+                    end
+                end
+            end
+            if #ids>=6 then break end
+        end
+        if #ids==0 then return false,"No unprotected inventory items match the selected rarities" end
+        local result,reason=invoke(h,"S_Equipment","Delete",kind,ids)
+        if type(result)~="table" then
+            return false,"Delete not confirmed: "..tostring(reason or result)
+        end
+        h.Cache.Data=result
+        return true,"Deleted "..#ids.." verified "..kind.." items"
+    elseif command=="RollArtifactByID" then
+        if type(settings)~="table" or type(settings.id)~="string" then
+            return false,"No artifact selected"
+        end
+        local group=s.Artifacts
+        local storage=group and group.Storage
+        if type(storage)~="table" then return false,"Artifact inventory unavailable" end
+        local liveId
+        for id,item in pairs(storage) do
+            if tostring(id)==settings.id and type(item)=="table" then
+                liveId=id;break
+            end
+        end
+        if not liveId then return false,"Selected artifact no longer owned" end
+        -- The last argument is nil in the observed native Artifact_Roll request.
+        local result,reason=invoke(h,"S_Equipment","Artifact_Roll",liveId,nil)
+        if type(result)~="table" then
+            return false,"Artifact reroll was not confirmed: "..tostring(reason or result)
+        end
+        h.Cache.Data=result
+        return true,"Artifact reroll requested and data updated"
+    elseif command=="OpenCrate" then
+        if type(settings)~="table" or type(settings.name)~="string" then
+            return false,"No crate selected"
+        end
+        local current=snapshot(h)
+        local valid=false
+        if type(current)=="table" then
+            for _,entry in ipairs(current.Crates or {}) do
+                if entry.Name==settings.name and (tonumber(entry.Count) or 0)>0 then
+                    valid=true;break
+                end
+            end
+        end
+        if not valid then return false,"Selected crate is not in inventory" end
+        local result,reason=invoke(h,"S_Inventory","Crate",settings.name)
+        if type(result)~="table" then
+            return false,"Crate opening not confirmed: "..tostring(reason or result)
+        end
+        h.Cache.Data=result
+        return true,"Crate opening confirmed: "..settings.name
     elseif command=="PrestigeStatus" then
         local p=s.Progression or {}
         local required=100+(p.Prestige or 0)*25
@@ -4204,6 +4532,9 @@ bridge.OnInvoke=function(command,settings)
         local category=settings.category
         if category~="Perks" and category~="Vessels" and category~="Fragments" then return false,"Invalid craft category" end
         if type(settings.target)~="string" or #settings.target<2 then return false,"Select actual crafting target tag" end
+        if settings.requireGuaranteed==true and tonumber(settings.chance)~=100 then
+            return false,"Craft not attempted: a verified 100% chance is required"
+        end
         local ids=settings.ids
         if type(ids)~="table" or not next(ids) then return false,"Select material item IDs" end
         local storage=s[category=="Fragments" and "Perks" or category]
@@ -4232,7 +4563,19 @@ local Equip = {
     status="Enter Town Central to load equipment", snapshot=nil,
     bridge=nil, bridgeRequestAt=-math.huge,
     watcher=nil, elapsed=0, pending=false, refreshAt=0,
-    lastTimes={}, perkOptions={}, texts={}
+    lastTimes={}, perkOptions={}, texts={},
+    perkSellRarities={},autoSellPerks=false,artifactSlot="Slot 1",
+    artifactID="",artifactItems={},artifactMap={},artifactRarities={},
+    autoSellArtifacts=false,autoEquipSelectedArtifact=false,autoRollArtifact=false,
+    artifactStat1="",artifactStat2="",artifactMin1=0,artifactMin2=0,
+    autoPrestige=false,prestigeGoldThreshold=0,autoPrestigeGold=false,autoConvert=false,
+    memorySlot="1",memoryTarget="",autoRollMemories=false,
+    autoCraftPerks=false,craftRecipeData=nil,
+    autoOpenCrates=false,selectedCrate="",autoUseBoosts=false,
+    selectedBoosts={},boostTargetHours=1,
+    artifactStatOptions={},lastArtifactKey=nil,lastMemoryKey=nil,
+    lastCrateKey=nil,securityNote="",
+    spendBlocked={},
 }
 Farm.Equipment = Equip
 Equip.refreshPerkSelectors=function()
@@ -4257,9 +4600,14 @@ Equip.refreshPerkSelectors=function()
     local baseCategory=category:gsub("[_%d]+$","")
     local matches,best={},{}
     for _,p in ipairs(data.Perks or {}) do
-        local eligible=baseCategory=="Body" -- The always-unlocked Body/Core slot is universal.
-            or p.Category==baseCategory
-            or (type(p.Slots)=="table" and table.find(p.Slots,category)~=nil)
+        local eligible=type(p.CompatibleSlots)=="table" and #p.CompatibleSlots>0
+            and table.find(p.CompatibleSlots,category)~=nil
+        if not eligible and (not p.CompatibleSlots or #p.CompatibleSlots==0) then
+            -- If the game did not expose rarity or category, fall back only to
+            -- explicit non-universal compatibility, not a made-up slot match.
+            eligible=p.Category==baseCategory
+                or (type(p.Slots)=="table" and table.find(p.Slots,category)~=nil)
+        end
         -- Never claim that an unknown-category perk fits a restricted slot.
         if eligible and table.find(slots,category) then
             if not best[p.Name] or p.Level>best[p.Name].Level then
@@ -4326,10 +4674,320 @@ local function equipmentAction(command,params)
     task.spawn(function()
         local ok,msg=equipmentCall(command,params)
         Equip.status=(ok and "OK: " or "Blocked: ")..tostring(msg)
+        if not ok and (command=="SellInventory" or command=="RollArtifactByID"
+            or command=="OpenCrate") then
+            Equip.spendBlocked[command]=true
+            Equip.securityNote="Paused "..command.." after an unconfirmed request; toggle off/on to retry"
+        end
         if ok then Equip.refreshAt=0 end
         Equip.pending=false
     end)
 end
+-- Lobby inventory actions use observed native requests, check live ownership,
+-- and stop on unconfirmed inventory changes to avoid repeated consumption.
+Equip.refreshLobbyDetails=function()
+    local data=Equip.snapshot
+    if not data then return end
+    local function refresh(handle,key,options,selected)
+        local signature=table.concat(options,"|")
+        if handle and Equip[key]~=signature then
+            Equip[key]=signature
+            pcall(function() handle:Refresh(options) end)
+            if selected and table.find(options,selected) then
+                pcall(function() handle:Set(selected) end)
+            end
+        end
+    end
+    local slots=Equip.artifactSlot=="Slot 2" and {Neck=true,Back=true}
+        or {Hat=true,Face=true}
+    local artOptions, artMap={},{}
+    for _,item in ipairs(data.Artifacts or {}) do
+        if slots[item.Slot] then
+            local label=item.Name.." ["..item.ID.."] • "..item.Slot
+            artOptions[#artOptions+1]=label;artMap[label]=item
+        end
+    end
+    table.sort(artOptions)
+    if #artOptions==0 then artOptions={"No owned artifacts for this slot"} end
+    Equip.artifactMap=artMap
+    if not artMap[Equip.artifactChoice] then Equip.artifactChoice=artOptions[1] end
+    refresh(Equip.artifactDropdown,"lastArtifactKey",artOptions,Equip.artifactChoice)
+    local artifact=artMap[Equip.artifactChoice]
+    Equip.artifactID=artifact and artifact.ID or ""
+    if Equip.texts.artifact then
+        local description="No compatible owned artifacts found"
+        if artifact then
+            local rows={}
+            for _,stat in ipairs(artifact.Rolls or {}) do
+                local amount=tostring(stat.Display)
+                rows[#rows+1]=stat.Name..": "..amount..(amount:find("%%") and "" or "%")
+            end
+            description=artifact.Name.." | "..artifact.Slot.." | "..artifact.Rarity
+                .." | "..(#rows>0 and table.concat(rows," | ") or "No rolled stat values in inventory")
+            if type(artifact.Passives)=="string" and #artifact.Passives>0 then
+                description=description.." | "..artifact.Passives
+            end
+            local function meets(name,target)
+                if name=="" or name=="Waiting for rolled stat names" then return false end
+                for _,stat in ipairs(artifact.Rolls or {}) do
+                    if stat.Name==name and type(stat.Value)=="number" and stat.Value>=target then
+                        return true
+                    end
+                end
+                return false
+            end
+            if Equip.autoRollArtifact then
+                description=description.." | Goal "..(meets(Equip.artifactStat1,Equip.artifactMin1)
+                    and meets(Equip.artifactStat2,Equip.artifactMin2) and "MET" or "not met")
+            end
+        end
+        pcall(function() Equip.texts.artifact:Set(description) end)
+    end
+    -- Usable artifact roll targets from the game's supported equipment stat family.
+    -- Combine these with observed roll names so an item can target a stat it
+    -- does not currently have, while still retaining new stats after updates.
+    local statNames={"ODM_Damage","ODM_Crit_Damage","ODM_Crit_Chance",
+        "Blade_Durability","ODM_Speed","ODM_Control","ODM_Range","ODM_Gas",
+        "Damage","Titan_Damage","Shifter_Damage","Health",
+        "TS_Damage","TS_Crit_Damage","TS_Crit_Chance"}
+    if artifact then
+        for _,stat in ipairs(artifact.Rolls or {}) do
+            if not table.find(statNames,stat.Name) then statNames[#statNames+1]=stat.Name end
+        end
+    end
+    table.sort(statNames)
+    if not table.find(statNames,Equip.artifactStat1) then Equip.artifactStat1=statNames[1] end
+    if not table.find(statNames,Equip.artifactStat2) then Equip.artifactStat2=statNames[1] end
+    refresh(Equip.artifactStatOneDropdown,"lastStatOneKey",statNames,Equip.artifactStat1)
+    refresh(Equip.artifactStatTwoDropdown,"lastStatTwoKey",statNames,Equip.artifactStat2)
+    local memoryOptions={}
+    for _,name in ipairs(data.MemoryOptions or {}) do
+        if not table.find(memoryOptions,name) then memoryOptions[#memoryOptions+1]=name end
+    end
+    if #memoryOptions==0 then
+        for _,item in ipairs(data.Memories or {}) do
+            if not table.find(memoryOptions,item.Name) then memoryOptions[#memoryOptions+1]=item.Name end
+        end
+    end
+    table.sort(memoryOptions)
+    if #memoryOptions==0 then memoryOptions={"No owned memories detected"} end
+    if not table.find(memoryOptions,Equip.memoryTarget) then Equip.memoryTarget=memoryOptions[1] end
+    refresh(Equip.memoryDropdown,"lastMemoryKey",memoryOptions,Equip.memoryTarget)
+    local crateOptions={}
+    for _,item in ipairs(data.Crates or {}) do
+        if item.Count>0 then crateOptions[#crateOptions+1]=item.Name.." ("..item.Count..")" end
+    end
+    table.sort(crateOptions)
+    if #crateOptions==0 then crateOptions={"No owned crates detected"} end
+    if not table.find(crateOptions,Equip.selectedCrate) then Equip.selectedCrate=crateOptions[1] end
+    refresh(Equip.crateDropdown,"lastCrateKey",crateOptions,Equip.selectedCrate)
+    if Equip.texts.crates then
+        pcall(function() Equip.texts.crates:Set(
+            "Owned: "..(#(data.Crates or {})).." crate types | Selected: "..Equip.selectedCrate
+            .." | From inventory data") end)
+    end
+    if Equip.texts.boosts then
+        local rows={}
+        for _,item in ipairs(data.Boosts or {}) do
+            rows[#rows+1]=item.Name.." x"..item.Count
+        end
+        pcall(function() Equip.texts.boosts:Set(#rows>0 and table.concat(rows," | ")
+            or "No live boost inventory/time data exposed") end)
+    end
+    if Equip.texts.prestige then
+        pcall(function() Equip.texts.prestige:Set(
+            string.format("Prestige %s | Level %s | Gold %s | Memories detected: %s",
+                tostring(data.Prestige),tostring(data.Level),tostring(data.Gold),
+                tostring(#(data.Memories or {})))) end)
+    end
+    local recipes={}
+    for _,recipe in ipairs(data.CraftTargets or {}) do
+        if recipe.Category==Equip.craftCategory and type(recipe.Tag)=="string" then
+            recipes[#recipes+1]=recipe.Tag
+        end
+    end
+    local recipeRank={Common=1,Rare=2,Epic=3,Legendary=4,Mythic=5,Divine=6}
+    table.sort(recipes,function(a,b)
+        local ar=recipeRank[a:match("^(%w+)_")] or 99
+        local br=recipeRank[b:match("^(%w+)_")] or 99
+        if ar~=br then return ar<br end
+        return a<b
+    end)
+    if #recipes==0 then recipes={"Waiting for game recipe definitions"} end
+    if not table.find(recipes,Equip.craftTarget) then Equip.craftTarget=recipes[1] end
+    refresh(Equip.craftTargetDropdown,"lastCraftKey",recipes,Equip.craftTarget)
+    Equip.craftRecipeData=nil
+    for _,recipe in ipairs(data.CraftTargets or {}) do
+        if recipe.Category==Equip.craftCategory and recipe.Tag==Equip.craftTarget then
+            Equip.craftRecipeData=recipe;break
+        end
+    end
+    local craft=Equip.craftRecipeData
+    if Equip.texts.craft then
+        local text=craft and ("Recipe "..craft.Tag.." | "..tostring(craft.Rarity or "Unknown")
+            .." | Recipe loaded from game data; auto-craft requires verified materials/chance")
+            or "Waiting for game crafting definitions"
+        if craft and craft.NativeCategory=="Fragments" then
+            text=text.." | This perk uses Divine Fragments"
+        elseif Equip.craftCategory=="Vessels" then
+            text=text.." | Vessels use the native Vessel material rules"
+        end
+        pcall(function() Equip.texts.craft:Set(text) end)
+    end
+end
+
+Equip.runGuardedLobbyAutomation=function()
+    -- Only invoke the already verified S_Equipment/Forge request; do not sell,
+    -- reroll, spend boosts, or prestige using guessed remote names.
+    local info=Equip.snapshot
+    if not info then return end
+    if Equip.autoEquipSelectedArtifact and Equip.artifactID~="" then
+        for _,a in ipairs(info.Artifacts or {}) do
+            if a.ID==Equip.artifactID and not a.Equipped
+                and os.clock()-(Equip.lastTimes.artifactSelected or -100)>5 then
+                Equip.lastTimes.artifactSelected=os.clock()
+                equipmentAction("EquipArtifactByID",{id=a.ID})
+                return
+            end
+        end
+    end
+    -- Match only exact live inventory rarities; never sell equipped or currently
+    -- selected perks/artifacts. One bounded batch per tick prevents mass deletion.
+    local function rarityList(selection)
+        local values={}
+        if type(selection)=="table" then
+            for key,v in pairs(selection) do
+                if type(key)=="number" and type(v)=="string" then
+                    values[#values+1]=v
+                elseif type(key)=="string" and v==true then
+                    values[#values+1]=key
+                end
+            end
+        end
+        return values
+    end
+    local now=os.clock()
+    local perkRarities=rarityList(Equip.perkSellRarities)
+    if Equip.autoSellPerks and #perkRarities>0 and not Equip.spendBlocked.SellInventory
+        and now-(Equip.lastTimes.sellPerks or -100)>=8 then
+        local allowed={}
+        for _,rarity in ipairs(perkRarities) do allowed[rarity]=true end
+        local ids={}
+        for _,p in ipairs(info.Perks or {}) do
+            if allowed[p.Rarity] and not (info.EquippedPerkIDs or {})[p.ID]
+                and p.Name~=Equip.perkName then
+                ids[#ids+1]=p.ID
+            end
+            if #ids>=6 then break end
+        end
+        if #ids>0 then
+            Equip.lastTimes.sellPerks=now
+            equipmentAction("SellInventory",{kind="Perk",ids=ids,
+                rarities=perkRarities,protectName=Equip.perkName})
+            return
+        end
+    end
+    local artifactRarities=rarityList(Equip.artifactRarities)
+    if Equip.autoSellArtifacts and #artifactRarities>0 and not Equip.spendBlocked.SellInventory
+        and now-(Equip.lastTimes.sellArtifacts or -100)>=8 then
+        local allowed={}
+        for _,rarity in ipairs(artifactRarities) do allowed[rarity]=true end
+        local ids={}
+        for _,a in ipairs(info.Artifacts or {}) do
+            if allowed[a.Rarity] and not a.Equipped and a.ID~=Equip.artifactID then
+                ids[#ids+1]=a.ID
+            end
+            if #ids>=6 then break end
+        end
+        if #ids>0 then
+            Equip.lastTimes.sellArtifacts=now
+            equipmentAction("SellInventory",{kind="Artifact",ids=ids,
+                rarities=artifactRarities,protectId=Equip.artifactID})
+            return
+        end
+    end
+    if Equip.autoRollArtifact and not Equip.spendBlocked.RollArtifactByID
+        and Equip.artifactID~="" and now-(Equip.lastTimes.rollArtifact or -100)>=5 then
+        local chosen
+        for _,a in ipairs(info.Artifacts or {}) do
+            if a.ID==Equip.artifactID then chosen=a;break end
+        end
+        local min1,min2=tonumber(Equip.artifactMin1) or 0,tonumber(Equip.artifactMin2) or 0
+        local function reached(statName,minimum)
+            if minimum<=0 then return true end
+            if not chosen or type(statName)~="string" or statName=="" then return false end
+            for _,r in ipairs(chosen.Rolls or {}) do
+                if r.Name==statName and type(r.Value)=="number" and r.Value>=minimum then
+                    return true
+                end
+            end
+            return false
+        end
+        if chosen and (min1>0 or min2>0)
+            and not (reached(Equip.artifactStat1,min1) and reached(Equip.artifactStat2,min2)) then
+            Equip.lastTimes.rollArtifact=now
+            equipmentAction("RollArtifactByID",{id=chosen.ID})
+            return
+        end
+    end
+    -- Open only the exact owned crate chosen in the dropdown.
+    if Equip.autoOpenCrates and not Equip.spendBlocked.OpenCrate
+        and now-(Equip.lastTimes.openCrate or -100)>=5 then
+        local selected=tostring(Equip.selectedCrate or "")
+        for _,c in ipairs(info.Crates or {}) do
+            if c.Count>0 and selected==c.Name.." ("..c.Count..")" then
+                Equip.lastTimes.openCrate=now
+                equipmentAction("OpenCrate",{name=c.Name})
+                return
+            end
+        end
+    end
+    if Equip.autoCraftPerks and Equip.craftCategory=="Perks" then
+        local recipe=Equip.craftRecipeData
+        local count=recipe and recipe.Required
+        if not recipe or recipe.Chance~=100 or not count or count<1
+            or type(recipe.SelectedMaterialIDs)~="string" then
+            Equip.securityNote="Auto Craft waiting: confirmed 100% chance and exact game-selected materials required"
+            return
+        end
+        if os.clock()-(Equip.lastTimes.craftAuto or -100)<10 then return end
+        local candidates={}
+        local rarityOrder={Common=1,Rare=2,Epic=3,Legendary=4,Mythic=5,Divine=6}
+        for _,p in ipairs(info.Perks or {}) do
+            if not (info.EquippedPerkIDs or {})[p.ID] then
+                candidates[#candidates+1]=p
+            end
+        end
+        table.sort(candidates,function(a,b)
+            local ar,br=rarityOrder[a.Rarity] or 99,rarityOrder[b.Rarity] or 99
+            if ar~=br then return ar<br end
+            if a.Level~=b.Level then return a.Level<b.Level end
+            return a.ID<b.ID
+        end)
+        if #candidates<count then
+            Equip.securityNote="Auto Craft waiting: insufficient unequipped materials"
+            return
+        end
+        local ids,selectedCount={},0
+        for id in recipe.SelectedMaterialIDs:gmatch("[^,%s]+") do
+            if not (info.EquippedPerkIDs or {})[id] then
+                for _,candidate in ipairs(candidates) do
+                    if candidate.ID==id and not ids[id] then
+                        ids[id]=1;selectedCount=selectedCount+1;break
+                    end
+                end
+            end
+        end
+        if selectedCount~=count then
+            Equip.securityNote="Auto Craft waiting: displayed materials do not match owned unequipped perks"
+            return
+        end
+        Equip.lastTimes.craftAuto=os.clock()
+        equipmentAction("Forge",{category="Perks",target=recipe.Tag,ids=ids,
+            chance=recipe.Chance,requireGuaranteed=true})
+    end
+end
+
 local function equipmentTick()
     if game.PlaceId~=LOBBY_PLACE_ID or Farm.unloaded then return end
     if Equip.pending then return end
@@ -4338,10 +4996,10 @@ local function equipmentTick()
         local ok,data=equipmentCall("Snapshot")
         if ok and type(data)=="table" then
             Equip.snapshot=data
-            Equip.refreshAt=now+3
+            Equip.refreshAt=now+1.5
         else
             Equip.status=tostring(data)
-            Equip.refreshAt=now+3
+            Equip.refreshAt=now+1.5
         end
     end
     local info=Equip.snapshot
@@ -4360,11 +5018,11 @@ local function equipmentTick()
         and #Equip.perkName>0 and Equip.perkChoiceMap[Equip.perkName]
         and table.find(info.UnlockedPerkSlots or {},Equip.perkCategory)~=nil,
         "perk",5,"EquipPerk",{name=Equip.perkName,category=Equip.perkCategory}) then return end
-    if tryAuto(Equip.autoArtifact,"artifact",5,"EquipArtifact",Equip.artifactProfile) then return end
+    if Equip.runGuardedLobbyAutomation then Equip.runGuardedLobbyAutomation() end
 end
 local function equipmentHeartbeat(dt)
     Equip.elapsed=Equip.elapsed+dt
-    if Equip.elapsed<0.75 then return end
+    if Equip.elapsed<0.9 then return end
     Equip.elapsed=0
     if Farm.unloaded then return end
     if game.PlaceId==LOBBY_PLACE_ID and not Equip.pending then task.spawn(equipmentTick) end
@@ -4380,44 +5038,11 @@ local function equipmentHeartbeat(dt)
         -- All UI controls are refreshed from the live character snapshot.
         -- If a user changes slot, this runs immediately on the next heartbeat.
         if Equip.refreshPerkSelectors then Equip.refreshPerkSelectors() end
-        if Equip.craftMaterialDropdown then
-            local materials=d.CraftMaterials and d.CraftMaterials[Equip.craftCategory] or {}
-            local options,map={},{}
-            for _,item in ipairs(materials or {}) do
-                local label=item.Name.." ["..item.ID.."]"
-                options[#options+1]=label;map[label]=item.ID
-            end
-            if #options==0 then options={"No owned materials found"} end
-            local key=Equip.craftCategory..":"..table.concat(options,"|")
-            if Equip.lastCraftMaterialKey~=key then
-                Equip.lastCraftMaterialKey=key;Equip.craftMaterialMap=map
-                local previousSelection = Equip.craftMaterialDropdown.value
-                local previousLabel = type(previousSelection)=="table" and previousSelection[1] or nil
-                local chosenLabel = table.find(options, previousLabel) and previousLabel or options[1]
-                pcall(function() Equip.craftMaterialDropdown:Refresh(options) end)
-                Equip.craftSelectedMaterial=map[chosenLabel] or ""
-                pcall(function() Equip.craftMaterialDropdown:Set(chosenLabel) end)
-            end
-            local targets={}
-            for _,item in ipairs(d.CraftTargets or {}) do
-                if item.Category==Equip.craftCategory and not table.find(targets,item.Tag) then
-                    targets[#targets+1]=item.Tag
-                end
-            end
-            table.sort(targets)
-            if #targets==0 then targets={"Open the game's Craft screen to load recipes"} end
-            local targetsKey=Equip.craftCategory..":"..table.concat(targets,"|")
-            if Equip.lastCraftKey~=targetsKey then
-                Equip.lastCraftKey=targetsKey
-                pcall(function() Equip.craftTargetDropdown:Refresh(targets) end)
-                if not table.find(targets,Equip.craftTarget) then
-                    if targets[1]~="Open the game's Craft screen to load recipes" then Equip.craftTarget=targets[1] end
-                    pcall(function() Equip.craftTargetDropdown:Set(targets[1]) end)
-                end
-            end
-        end
+        if Equip.refreshLobbyDetails then Equip.refreshLobbyDetails() end
     end
-    if Equip.texts.status then pcall(function() Equip.texts.status:Set(Equip.status) end) end
+    if Equip.texts.status then pcall(function()
+        Equip.texts.status:Set(Equip.securityNote~="" and Equip.securityNote or Equip.status)
+    end) end
 end
 
 local SESSION_DEFAULT = {
@@ -4639,6 +5264,8 @@ local function handleResultScreen()
         end
     end
     if not visible then
+        -- Raid CHESTS is a separate screen. Its open timer is reset only when
+        -- the chest popup itself disappears, not when Rewards is hidden.
         if Farm.session.rewardLatched and Farm.session.lastRewardJob == job then
             Farm.session.rewardLatched = false
             Farm.session.retryLatched = false
@@ -4671,6 +5298,14 @@ local function handleResultScreen()
         (Farm.Webhook.collecting and os.clock() - (Farm.Webhook.collectingSince or 0) < 8)
         or (Farm.Webhook.sending and os.clock() - (Farm.Webhook.sendingSince or 0) < 9)) then
         return
+    end
+    -- Raid chest requests are independent of the Lobby's inventory crates.
+    -- The game may display raid rewards only after this result panel populates.
+    -- Keep requests asynchronous; never block the half-second session watcher.
+    if type(Farm.tryRaidChest) == "function" then
+        if Farm.tryRaidChest(true) then
+            return -- Briefly defer Auto Retry while the raid chest is pending.
+        end
     end
     -- Leave takes precedence over a retry on a result screen.
     if checkAutoLeave() then return end
@@ -4858,6 +5493,11 @@ local function sessionHeartbeat(dt)
     if Farm.unloaded then return end
     if not Farm.returningToLobby then
         handleResultScreen()
+        -- Raid chest popups may be separate from the normal Rewards panel.
+        -- Use the same throttled session Heartbeat; do not poll every frame.
+        if type(Farm.tryRaidChest) == "function" and not Farm.rewardVisibleLast then
+            Farm.tryRaidChest(false)
+        end
         checkAutoLeave()
     end
     if Farm.lobbyAutoJoin then
@@ -4875,6 +5515,9 @@ local function sessionHeartbeat(dt)
         end
     else
         Farm.lobbyCurrentStatus = "Auto Join Off"
+    end
+    if Farm.RaidChest and Farm.RaidChest.statusText then
+        pcall(function() Farm.RaidChest.statusText:Set(Farm.RaidChest.lastStatus) end)
     end
     if Farm.sessionText then
         local goal = Farm.autoLeaveMode == "After X Matches"
@@ -4905,10 +5548,17 @@ function Farm:Unload()
     if self.idleConnection then self.idleConnection:Disconnect(); self.idleConnection=nil end
     if self.reconnectConnection then self.reconnectConnection:Disconnect(); self.reconnectConnection=nil end
     if self.reconnectPromptConnection then self.reconnectPromptConnection:Disconnect(); self.reconnectPromptConnection=nil end
+    if self.cinematicConnection then
+        self.cinematicConnection:Disconnect()
+        self.cinematicConnection=nil
+    end
     if self.Equipment then
         local e=self.Equipment
         e.autoEquip=false;e.autoUpgrade=false;e.autoSkills=false;e.autoPerk=false;e.autoArtifact=false
         if e.watcher then e.watcher:Disconnect();e.watcher=nil end
+    end
+    if self.RaidChest then
+        self.RaidChest.autoOpen = false
     end
     if self.Waves then
         if self.Waves.connection then
@@ -5177,26 +5827,25 @@ local window = Rayfield:CreateWindow({
         autoLoad = true,
         -- Keep this name stable so v40-v51 saved settings remain compatible.
         -- Rayfield Gen2 stores flags in Rayfield/Configurations/.
-        fileName = "HollowMoon_AOT_Lobby_v40",
+        fileName = (game.PlaceId == 14916516914)
+            and "HollowMoon_AOT_Lobby_v40"
+            or "HollowMoon_AOT_Gameplay_v110",
     },
 })
 Farm.window = window
+-- v110: the place chooses which UI/controller layer is created. Town Central
+-- is a separate Roblox place; missions and raids use the gameplay interface.
+Farm.isLobbyPlace = game.PlaceId == 14916516914
+Farm.isTrostPlace = game.PlaceId == 14012874501
+Farm.activeUI = Farm.isLobbyPlace and "Lobby" or (Farm.isTrostPlace and "Gameplay / Trost" or "Gameplay")
+Farm.cinematicEnabled = savedPreferences ~= nil and savedPreferences.MiscAutoCinematicsV73 == true
+
+Farm.initializeLobbyUI = function()
 window:CreateSection({name="LOBBY"})
 
 -- Lobby is the first tab. Requests verified against uploaded Town Central UI.
 -- Party creation and Start only run in Town Central, never in Outskirts.
-local lobbyTab = window:CreateTab({ name = "Lobby", icon = 93364949241311 })
-lobbyTab:CreateSection({ name = "Lobby Pages" })
-lobbyTab:CreateDropdown({
-    name="Open Lobby Page",options={"Lobby","Equipment","Misc"},value="Lobby",
-    forgetState=true,flag="LobbyPageNavigatorV93",
-    callback=function(v)
-        local choice=type(v)=="table" and v[1] or v
-        if choice=="Equipment" or choice=="Misc" then
-            pcall(function() window:Navigate(choice) end)
-        end
-    end,
-})
+local lobbyTab = window:CreateTab({ name = "Lobby" })
 lobbyTab:CreateSection({ name = "Game Mode" })
 local mapDropdown
 local objectiveDropdown
@@ -5372,8 +6021,12 @@ Farm.lobbyText = lobbyTab:CreateText({
 })
 
 -- Equipment is between Lobby and Combat. No combat or queue code changed.
-local equipmentTab = window:CreateTab({ name = "Equipment", icon = 100604009889706 })
-equipmentTab:CreateSection({ name = "Weapons" })
+local equipmentTab = window:CreateTab({ name = "Equipment" })
+equipmentTab:CreateSection({name="Live Equipment"})
+Equip.texts.status=equipmentTab:CreateText({name="Equipment Status",text="Loading Town Central inventory..."})
+equipmentTab:CreateDivider()
+equipmentTab:CreateSection({ name = "Equipment Upgrades" })
+Equip.texts.grade=equipmentTab:CreateText({name="Upgrade Grade Watcher",text="Waiting for lobby equipment data"})
 equipmentTab:CreateDropdown({
     name="Weapon",options={"Blades","Thunder Spears"},value="Blades",flag="EquipWeaponChoice",
     callback=function(v)
@@ -5389,9 +6042,9 @@ equipmentTab:CreateToggle({
     name="Auto Upgrade Equipped Weapon",value=false,flag="AutoUpgradeWeaponV42",
     callback=function(v) Equip.autoUpgrade=v==true; Equip.lastTimes.upgrade=-100 end,
 })
-Equip.texts.grade=equipmentTab:CreateText({name="Upgrade Grade Watcher",text="Waiting for lobby equipment data"})
-
-equipmentTab:CreateSection({name="Skills"})
+equipmentTab:CreateDivider()
+equipmentTab:CreateSection({name="Skill Tree"})
+Equip.texts.skills=equipmentTab:CreateText({name="Skill / Prestige Watcher",text="Requires lobby character data"})
 equipmentTab:CreateDropdown({
     name="Skill Tree Direction",options={"Left","Middle","Right"},value="Left",flag="EquipSkillDirection",
     callback=function(v) Equip.skillDirection=type(v)=="table" and v[1] or v end,
@@ -5404,9 +6057,11 @@ equipmentTab:CreateToggle({
     name="Auto Unlock Selected Skill Path",value=false,flag="EquipAutoSkillsV42",
     callback=function(v) Equip.autoSkills=v==true;Equip.lastTimes.skills=-100 end,
 })
-Equip.texts.skills=equipmentTab:CreateText({name="Skill / Prestige Watcher",text="Requires lobby character data"})
-
-equipmentTab:CreateSection({name="Perks"})
+equipmentTab:CreateDivider()
+equipmentTab:CreateSection({name="Perks • Equipped Slots"})
+Equip.texts.perk=equipmentTab:CreateText({
+    name="Selected Perk Bonuses",text="Select a perk to view actual in-game bonuses",
+})
 Equip.perkSlotDropdown=equipmentTab:CreateDropdown({
     name="Unlocked Perk Slot",options={"Waiting for unlocked slots"},
     value="Waiting for unlocked slots",flag="EquipPerkSlotV42",
@@ -5436,102 +6091,160 @@ Equip.perkDropdown=equipmentTab:CreateDropdown({
         end
     end,
 })
-Equip.texts.perk=equipmentTab:CreateText({
-    name="Selected Perk Bonuses",text="Select a perk to see its in-game effects",
-})
 equipmentTab:CreateToggle({
     name="Auto Equip Selected Perk",value=false,flag="EquipAutoPerkV42",
     callback=function(v) Equip.autoPerk=v==true;Equip.lastTimes.perk=-100 end,
 })
-
-equipmentTab:CreateSection({name="Artifacts"})
 equipmentTab:CreateDropdown({
-    name="Artifact Damage Focus",options={"Blade Damage","Titan Damage","Thunder Spears Damage"},
-    value="Blade Damage",flag="EquipArtifactFocusV42",
-    callback=function(v) Equip.artifactProfile=type(v)=="table" and v[1] or v end,
+    name="Sell Perk Rarities",options={"Common","Rare","Epic","Legendary"},
+    multiSelect=true,value={},flag="EquipSellPerkRarityV111",
+    callback=function(v) Equip.perkSellRarities=v end,
 })
-equipmentTab:CreateToggle({
-    name="Auto Equip Best Damage Artifacts",value=false,flag="EquipAutoArtifactV42",
-    callback=function(v) Equip.autoArtifact=v==true;Equip.lastTimes.artifact=-100 end,
-})
-equipmentTab:CreateButton({
-    name="Equip Best Artifacts Now",callback=function() equipmentAction("EquipArtifact",Equip.artifactProfile) end,
-})
-
-equipmentTab:CreateSection({name="Prestige"})
-equipmentTab:CreateButton({
-    name="Check Prestige Eligibility",callback=function() equipmentAction("PrestigeStatus") end,
+equipmentTab:CreateToggle({name="Auto Sell Perks",value=false,flag="EquipAutoSellPerksV111",
+    callback=function(v)
+        Equip.autoSellPerks=v==true
+        Equip.spendBlocked.SellInventory=nil
+        if v then Equip.securityNote="Auto Sell Perks enabled; protected equipped/selected perks" end
+    end,
 })
 
-equipmentTab:CreateSection({name="Craft"})
-equipmentTab:CreateDropdown({
-    name="Craft Category",options={"Perks","Vessels","Fragments"},value="Perks",flag="EquipCraftCategoryV42",
+equipmentTab:CreateDivider()
+equipmentTab:CreateSection({name="Artifacts • Equipped Slots"})
+Equip.texts.artifact=equipmentTab:CreateText({name="Selected Artifact Stats",text="Select an owned artifact"})
+equipmentTab:CreateDropdown({name="Artifact Slot",options={"Slot 1","Slot 2"},
+    value="Slot 1",flag="EquipArtifactSlotV111",
+    callback=function(v)
+        Equip.artifactSlot=type(v)=="table" and v[1] or v
+        Equip.lastArtifactKey=nil
+        Equip.artifactChoice=nil
+        Equip.refreshLobbyDetails()
+    end,
+})
+Equip.artifactDropdown=equipmentTab:CreateDropdown({name="Owned Artifacts",
+    options={"Waiting for artifacts"},value="Waiting for artifacts",flag="EquipArtifactItemV111",
+    callback=function(v)
+        Equip.artifactChoice=type(v)=="table" and v[1] or v
+        Equip.refreshLobbyDetails()
+    end,
+})
+equipmentTab:CreateToggle({name="Auto Equip Selected Artifact",value=false,
+    flag="EquipAutoArtifactSelectedV111",
+    callback=function(v) Equip.autoEquipSelectedArtifact=v==true end,
+})
+equipmentTab:CreateSection({name="Artifact Rolls • Targets"})
+Equip.artifactStatOneDropdown=equipmentTab:CreateDropdown({name="Stat 1",
+    options={"Waiting for rolled stat names"},value="Waiting for rolled stat names",
+    flag="EquipArtifactStat1V111",
+    callback=function(v) Equip.artifactStat1=type(v)=="table" and v[1] or v end,
+})
+equipmentTab:CreateSlider({name="Stat 1 Minimum",range={0,100},increment=1,
+    value=0,suffix="%",flag="EquipArtifactMin1V111",
+    callback=function(v) Equip.artifactMin1=tonumber(v) or 0 end,
+})
+Equip.artifactStatTwoDropdown=equipmentTab:CreateDropdown({name="Stat 2",
+    options={"Waiting for rolled stat names"},value="Waiting for rolled stat names",
+    flag="EquipArtifactStat2V111",
+    callback=function(v) Equip.artifactStat2=type(v)=="table" and v[1] or v end,
+})
+equipmentTab:CreateSlider({name="Stat 2 Minimum",range={0,100},increment=1,
+    value=0,suffix="%",flag="EquipArtifactMin2V111",
+    callback=function(v) Equip.artifactMin2=tonumber(v) or 0 end,
+})
+equipmentTab:CreateToggle({name="Auto Roll Selected Artifact",value=false,
+    flag="EquipAutoRollArtifactV111",
+    callback=function(v)
+        Equip.autoRollArtifact=v==true
+        Equip.spendBlocked.RollArtifactByID=nil
+        if v then Equip.securityNote="Auto Roll enabled; choose a stat and a positive percentage target" end
+    end,
+})
+equipmentTab:CreateDropdown({name="Sell Artifact Rarities",
+    options={"Rare","Epic","Legendary"},multiSelect=true,value={},
+    flag="EquipSellArtifactRarityV111",
+    callback=function(v) Equip.artifactRarities=v end,
+})
+equipmentTab:CreateToggle({name="Auto Sell Artifacts",value=false,
+    flag="EquipAutoSellArtifactsV111",
+    callback=function(v)
+        Equip.autoSellArtifacts=v==true
+        Equip.spendBlocked.SellInventory=nil
+        if v then Equip.securityNote="Auto Sell Artifacts enabled; equipped/selected items protected" end
+    end,
+})
+
+equipmentTab:CreateDivider()
+equipmentTab:CreateSection({name="Prestige & Memories"})
+Equip.texts.prestige=equipmentTab:CreateText({name="Prestige Watcher",text="Waiting for progression"})
+equipmentTab:CreateToggle({name="Auto Prestige",value=false,flag="EquipAutoPrestigeV111",
+    callback=function(v)
+        Equip.autoPrestige=v==true
+        if v then Equip.securityNote="Auto Prestige waiting: native prestige action not verified" end
+    end,
+})
+equipmentTab:CreateInput({name="Prestige After Gold",value="0",placeholder="Enter Gold threshold",
+    flag="EquipPrestigeGoldV111",callback=function(v)
+        Equip.prestigeGoldThreshold=math.max(0,tonumber(v) or 0)
+    end,
+})
+equipmentTab:CreateToggle({name="Auto Prestige at Gold Threshold",value=false,
+    flag="EquipAutoPrestigeAtGoldV111",callback=function(v)
+        Equip.autoPrestigeGold=v==true
+    end,
+})
+equipmentTab:CreateToggle({name="Auto Convert",value=false,flag="EquipAutoConvertV111",
+    callback=function(v)
+        Equip.autoConvert=v==true
+        if v then Equip.securityNote="Auto Convert waiting: game's convert action not verified" end
+    end,
+})
+equipmentTab:CreateDropdown({name="Memory Slot",options={"1","2","3","4","5"},
+    value="1",flag="EquipMemorySlotV111",
+    callback=function(v) Equip.memorySlot=type(v)=="table" and v[1] or v end,
+})
+Equip.memoryDropdown=equipmentTab:CreateDropdown({name="Target Memory",
+    options={"No owned memories detected"},value="No owned memories detected",
+    flag="EquipMemoryChoiceV111",
+    callback=function(v) Equip.memoryTarget=type(v)=="table" and v[1] or v end,
+})
+equipmentTab:CreateToggle({name="Auto Roll Memories",value=false,flag="EquipAutoMemoriesV111",
+    callback=function(v)
+        Equip.autoRollMemories=v==true
+        if v then Equip.securityNote="Memory rerolls waiting: game's memory-roll action not verified" end
+    end,
+})
+
+equipmentTab:CreateDivider()
+equipmentTab:CreateSection({name="Crafting • Guaranteed Only"})
+Equip.texts.craft=equipmentTab:CreateText({name="Craft Recipe Details",text="Loading built-in crafting definitions..."})
+equipmentTab:CreateDropdown({name="Craft Category",options={"Perks","Vessels"},
+    value="Perks",flag="EquipCraftCategoryV42",
     callback=function(v)
         Equip.craftCategory=type(v)=="table" and v[1] or v
         Equip.lastCraftKey=nil
+        Equip.refreshLobbyDetails()
     end,
 })
-Equip.craftTargetDropdown=equipmentTab:CreateDropdown({
-    name="Available Craft Recipe",options={"Open the game's Craft screen to load recipes"},
-    value="Open the game's Craft screen to load recipes",flag="EquipCraftRecipeV42",
-    callback=function(v)
-        local choice=type(v)=="table" and v[1] or v
-        if choice~="Open the game's Craft screen to load recipes" then Equip.craftTarget=choice end
-    end,
+Equip.craftTargetDropdown=equipmentTab:CreateDropdown({name="Craft Recipe",
+    options={"Waiting for game recipe definitions"},
+    value="Waiting for game recipe definitions",flag="EquipCraftRecipeV42",
+    callback=function(v) Equip.craftTarget=type(v)=="table" and v[1] or v end,
 })
-Equip.craftMaterialDropdown=equipmentTab:CreateDropdown({
-    name="Owned Craft Material",options={"Refresh owned materials"},
-    value="Refresh owned materials",flag="EquipCraftMaterialChoiceV42",
-    callback=function(v)
-        local choice=type(v)=="table" and v[1] or v
-        Equip.craftSelectedMaterial=Equip.craftMaterialMap[choice] or ""
-    end,
-})
-equipmentTab:CreateButton({
-    name="Add Selected Material",callback=function()
-        local id=Equip.craftSelectedMaterial
-        if id=="" then Equip.status="Select an owned material first";return end
-        local ids={}
-        for existing in string.gmatch(Equip.craftMaterialIDs,"[^,%s]+") do ids[existing]=true end
-        if not ids[id] then
-            Equip.craftMaterialIDs=Equip.craftMaterialIDs=="" and id or (Equip.craftMaterialIDs..","..id)
-        end
-        Equip.status="Craft materials selected: "..Equip.craftMaterialIDs
-    end,
-})
-equipmentTab:CreateButton({
-    name="Clear Selected Materials",callback=function()
-        Equip.craftMaterialIDs=""
-        Equip.status="Craft material selection cleared"
-    end,
-})
-equipmentTab:CreateInput({
-    name="Craft Target Tag",placeholder="Exact target tag from game's craft menu",value="",flag="EquipCraftTargetV42",
-    callback=function(v) Equip.craftTarget=tostring(v or "") end,
-})
-equipmentTab:CreateInput({
-    name="Material IDs (optional manual override)",placeholder="Or add owned materials using dropdown above",value="",flag="EquipCraftMaterialV42",
-    callback=function(v) Equip.craftMaterialIDs=tostring(v or "") end,
-})
-equipmentTab:CreateButton({
-    name="Craft Selected Items Once",callback=function()
-        local ids={}
-        for id in string.gmatch(Equip.craftMaterialIDs,"[^,%s]+") do ids[id]=1 end
-        if not next(ids) or #Equip.craftTarget<2 then
-            Equip.status="Craft requires exact target tag and selected material IDs"
-            return
-        end
-        equipmentAction("Forge",{category=Equip.craftCategory,target=Equip.craftTarget,ids=ids})
-    end,
+equipmentTab:CreateToggle({name="Auto Craft Perks at 100%",value=false,
+    flag="EquipAutoCraftPerksV111",
+    callback=function(v) Equip.autoCraftPerks=v==true end,
 })
 
-equipmentTab:CreateSection({name="Live Status"})
-Equip.texts.status=equipmentTab:CreateText({name="Equipment Status",text="Waiting for equipment watcher"})
+-- Primary status is at the top of Equipment; no duplicate footer watcher.
 
 -- Keep Lobby, Equipment and Misc together under the LOBBY sidebar heading.
-Farm.miscTab=window:CreateTab({name="Misc",icon=100604009889706})
+Farm.miscTab=window:CreateTab({name="Misc"})
+end
+if Farm.isLobbyPlace then Farm.initializeLobbyUI() end
+Farm.initializeLobbyUI = nil
+
+Farm.initializeCombatUI = function()
 window:CreateSection({name="GAMEPLAY"})
-local farmTab = window:CreateTab({ name = "Combat", icon = 84750991656135 })
+local farmTab = window:CreateTab({ name = "Combat" })
 farmTab:CreateSection({ name = "Auto Farm" })
 -- The only exposed farm method is called Tween, but intentionally runs the
 -- working Momentum (Physics) controller from v68 to preserve real velocity.
@@ -5769,6 +6482,18 @@ farmTab:CreateToggle({
     end,
 })
 
+-- v110: gameplay cinematic control remains available without a Misc tab.
+-- The saved flag is shared with the lobby Misc page; W is initialized later.
+farmTab:CreateSection({ name = "Cinematics" })
+farmTab:CreateToggle({
+    name = "Auto Skip Cinematics", value = false,
+    flag = "MiscAutoCinematicsV73",
+    callback = function(enabled)
+        Farm.cinematicEnabled = enabled == true
+        if Farm.Waves then Farm.Waves.miscFlags.cinematic = Farm.cinematicEnabled end
+    end,
+})
+
 -- Session automation is separate from the combat attack loop.
 farmTab:CreateSection({ name = "Sessions" })
 farmTab:CreateToggle({
@@ -5837,6 +6562,237 @@ farmTab:CreateButton({
     callback = resetSessionCounter,
 })
 
+end
+if not Farm.isLobbyPlace then Farm.initializeCombatUI() end
+Farm.initializeCombatUI = nil
+
+-- v120: Multi-select Raid CHESTS workflow (Free, Premium, or both).
+-- Open each eligible selected chest using the native Chests.Open controller,
+-- allow its animation to complete, and only then call native Chests.Finish.
+-- If Premium is selected without a key, skip it and FINISH normally.
+Farm.initializeRaidsUI = function()
+    if Farm.isLobbyPlace then return end
+    local raid = {
+        choices = {Free = true, Premium = false},
+        autoOpen = false, phase = "idle", lastStatus = "Waiting for Raid chests",
+        activeChoice = nil, openedAt = nil, claimedAt = nil, finishAt = nil,
+        lastProbe = 0, lastSnapshot = nil, pending = false,
+        skippedPremium = false, runToken = 0,
+    }
+    Farm.RaidChest = raid
+
+    local function clearRun()
+        raid.runToken = raid.runToken + 1
+        raid.phase = "idle"
+        raid.activeChoice = nil
+        raid.openedAt = nil
+        raid.claimedAt = nil
+        raid.finishAt = nil
+        raid.lastProbe = 0
+        raid.lastSnapshot = nil
+        raid.pending = false
+        raid.skippedPremium = false
+    end
+
+    -- This is still the game's native Actor-local controller, not a direct
+    -- S_Rewards request or a simulated mouse click.
+    local function nativeCall(action, choice)
+        local bridge, reason = resolveSlashBridge()
+        if not bridge then return false, tostring(reason or "Actor bridge unavailable") end
+        local ok, accepted, response = pcall(function()
+            return bridge:Invoke("raid_chest", {action = action, choice = choice})
+        end)
+        if not ok then return false, "Actor invocation error: " .. tostring(accepted) end
+        return accepted == true, response
+    end
+
+    local function takeAction(action, nextPhase, atField, choice)
+        if raid.pending then return end
+        raid.pending = true
+        local token = raid.runToken
+        raid.lastStatus = "Calling native " .. action .. " controller"
+        task.spawn(function()
+            local accepted, detail = nativeCall(action, choice)
+            if Farm.unloaded or token ~= raid.runToken then return end
+            raid.pending = false
+            if not raid.autoOpen then return end
+            if not accepted then
+                raid.phase = "failed"
+                raid.lastStatus = tostring(detail or "Native controller unavailable")
+            else
+                raid[atField] = os.clock()
+                raid.phase = nextPhase
+                raid.lastStatus = tostring(detail or ("Native " .. action .. " invoked"))
+            end
+        end)
+    end
+
+    local function isClaimed(info, choice)
+        return choice == "Free" and info.freeClaimed == true
+            or choice == "Premium" and info.premiumClaimed == true
+    end
+
+    -- Called from the existing 0.5 second session Heartbeat. Do not attempt
+    -- new opens while the previous chest's animation/controller is busy.
+    Farm.tryRaidChest = function(resultVisible)
+        if Farm.unloaded or not raid.autoOpen then return false end
+        if Workspace:GetAttribute("Type") ~= "Raids" then
+            if raid.phase ~= "idle" then clearRun() end
+            return false
+        end
+        if not raid.choices.Free and not raid.choices.Premium then
+            raid.lastStatus = "Select Free Chest and/or Premium Chest"
+            return false
+        end
+        local now = os.clock()
+        if raid.pending then return true end
+        if now - (raid.lastProbe or 0) >= 0.5 then
+            raid.lastProbe = now
+            local ok, info = nativeCall("status")
+            if ok and type(info) == "table" then
+                raid.lastSnapshot = info
+            else
+                raid.lastStatus = "Waiting for native controller: " .. tostring(info)
+                return true
+            end
+        end
+        local info = raid.lastSnapshot
+        if not info then return true end
+
+        if raid.phase == "idle" then
+            if not info.ready then
+                raid.lastStatus = "Waiting for CHESTS controller (" .. tostring(info.state) .. ")"
+                return true
+            end
+            if info.credit == nil then
+                raid.lastStatus = "Waiting for raid credit data"
+                return true
+            end
+            -- Free first. This leaves Premium for second, if both are selected.
+            local choice = nil
+            if raid.choices.Free and not info.freeClaimed then
+                choice = "Free"
+            elseif raid.choices.Premium and not info.premiumClaimed then
+                choice = "Premium"
+            end
+            if choice == "Premium" and info.keys == nil then
+                raid.lastStatus = "Waiting for Emperor's Key inventory"
+                return true
+            end
+            if choice == "Premium" and info.keys < 1 then
+                raid.skippedPremium = true
+                choice = nil
+            end
+            if choice and info.credit < 5 then
+                -- Chest.Open would reject this claim. Continue through the
+                -- native FINISH flow rather than repeatedly attempting it.
+                choice = nil
+                raid.lastStatus = "Raid credit below 5%; finishing without opening"
+            end
+            if choice then
+                raid.activeChoice = choice
+                raid.phase = "opening"
+                takeAction("open", "verify_open", "openedAt", choice)
+            else
+                raid.phase = "finishing"
+                takeAction("finish", "verify_finish", "finishAt", nil)
+            end
+            return true
+        end
+
+        if raid.phase == "opening" or raid.phase == "finishing" then return true end
+        if raid.phase == "verify_open" then
+            if isClaimed(info, raid.activeChoice) then
+                raid.phase = "animation"
+                raid.claimedAt = now
+                raid.lastStatus = raid.activeChoice .. " claimed; waiting for animation"
+            elseif now - (raid.openedAt or now) > 10 then
+                raid.phase = "failed"
+                raid.lastStatus = "Native OPEN returned, but the claim was not confirmed"
+            end
+            return true
+        end
+        if raid.phase == "animation" then
+            if not isClaimed(info, raid.activeChoice) then
+                raid.phase = "failed"
+                raid.lastStatus = "Chest claim state disappeared; FINISH not sent"
+                return true
+            end
+            -- The game hides the CHESTS UI during opening and restores it
+            -- after the reveal. Await that reset before the next chest.
+            if not info.ready or info.animating
+                or now - (raid.claimedAt or now) < 3 then
+                if now - (raid.claimedAt or now) > 45 then
+                    raid.phase = "failed"
+                    raid.lastStatus = "Chest animation did not finish; no new claim sent"
+                end
+                return true
+            end
+            raid.lastStatus = raid.activeChoice .. " opened successfully"
+            raid.activeChoice = nil
+            raid.phase = "idle"
+            return true
+        end
+        if raid.phase == "verify_finish" then
+            if info.finished then
+                raid.phase = "done"
+                raid.lastStatus = raid.skippedPremium
+                    and "CHESTS finished (Premium skipped: no Emperor's Key)"
+                    or "Native CHESTS flow completed"
+                return false
+            elseif now - (raid.finishAt or now) > 12 then
+                raid.phase = "failed"
+                raid.lastStatus = "FINISH called but chest screen is still open"
+            end
+            return true
+        end
+        if raid.phase == "failed" or raid.phase == "done" then
+            -- Do not reissue opening or FINISH after a completed attempt.
+            return false
+        end
+        return false
+    end
+
+    local raidsTab = window:CreateTab({name = "Raids"})
+    raidsTab:CreateSection({name = "Raid Chests"})
+    raid.statusText = raidsTab:CreateText({
+        name = "Chest Status", text = "Waiting for Raid chests",
+    })
+    raidsTab:CreateDropdown({
+        name = "Chest Type", options = {"Free Chest", "Premium Chest"},
+        multiSelect = true,
+        value = {"Free Chest"}, flag = "RaidChestChoicesV120",
+        callback = function(selected)
+            local chosen = {Free = false, Premium = false}
+            if type(selected) == "string" then selected = {selected} end
+            if type(selected) == "table" then
+                for key, value in pairs(selected) do
+                    local option = type(key) == "number" and value
+                        or (value == true and key or nil)
+                    if option == "Free Chest" then chosen.Free = true end
+                    if option == "Premium Chest" then chosen.Premium = true end
+                end
+            end
+            if raid.choices.Free ~= chosen.Free or raid.choices.Premium ~= chosen.Premium then
+                raid.choices = chosen
+                clearRun()
+            end
+        end,
+    })
+    raidsTab:CreateToggle({
+        name = "Auto Open Chest", value = false, flag = "RaidAutoOpenChestV115",
+        callback = function(enabled)
+            raid.autoOpen = enabled == true
+            if not raid.autoOpen then
+                clearRun()
+                raid.lastStatus = "Auto Open Chest off"
+            end
+        end,
+    })
+end
+Farm.initializeRaidsUI()
+Farm.initializeRaidsUI = nil
+
 -- V73: Trost Waves / Misc controls. Scoped inside a function to avoid the
 -- 200-main-local limit seen in v67. No guessed server action names are sent.
 Farm.initializeWavesAndMisc = function()
@@ -5872,7 +6828,7 @@ Farm.initializeWavesAndMisc = function()
         equipRejected={}, equipStatus="Waiting for equipment upgrades",
         actor=nil,bridge=nil,bridgeRequestedAt=-100,
         miscBridge=nil,miscBridgeRequestedAt=-100,
-        miscFlags={quests=false,cinematic=false,achievements=false,daily=false},
+        miscFlags={quests=false,cinematic=Farm.cinematicEnabled==true,achievements=false,daily=false,battlepass=false},
     }
     Farm.Waves=W
     local TROST=14012874501
@@ -6218,9 +7174,9 @@ local P=game:GetService("Players").LocalPlayer
 local actor=P:FindFirstChild("PlayerScripts")
 actor=actor and actor:FindFirstChildOfClass("Actor")
 if not actor then return end
-local b=actor:FindFirstChild("HollowMoonMiscClaimsV78")
+local b=actor:FindFirstChild("HollowMoonMiscClaimsV112")
 if b and not b:IsA("BindableFunction") then b:Destroy();b=nil end
-if not b then b=Instance.new("BindableFunction");b.Name="HollowMoonMiscClaimsV78";b.Parent=actor end
+if not b then b=Instance.new("BindableFunction");b.Name="HollowMoonMiscClaimsV112";b.Parent=actor end
 local cache,lastScan=nil,-100
 local function valid(h)
  return type(h)=="table" and type(h.Cache)=="table" and h.Cache.Player==P
@@ -6266,7 +7222,33 @@ b.OnInvoke=function(command,flags)
     h.Cache.Data=updated;return true,"Daily login reward claimed"
   end
  end
- if flags.quests and type(slot.Quests)=="table" then
+ -- Battle Pass tiers are claimed through Functions/Tier, NOT Functions/Quest.
+ -- Only claim currently earned and unclaimed tiers; never request Premium tiers
+ -- unless this account already has Premium access in the live slot data.
+ if flags.battlepass and type(slot.Battlepass)=="table" then
+  local bp=slot.Battlepass
+  if type(bp.Claimed)=="table" and type(bp.Tier)=="number" then
+   local eligible={}
+   for tier=0,math.min(100,math.max(0,math.floor(bp.Tier))) do
+    for _,rewardType in ipairs({"Free","Paid"}) do
+     local key=tostring(tier).."_"..rewardType
+     if bp.Claimed[key]==nil and (rewardType=="Free" or bp.Premium==true) then
+      eligible[#eligible+1]={Tier=tier,Type=rewardType}
+      if #eligible>=12 then break end
+     end
+    end
+    if #eligible>=12 then break end
+   end
+   if #eligible>0 then
+    local updated,detail=call(h,"Functions","Tier",eligible)
+    if type(updated)=="table" and updated.Slots then
+     h.Cache.Data=updated
+     return true,"Claimed "..tostring(#eligible).." Battle Pass tier rewards"
+    end
+   end
+  end
+ end
+ if (flags.quests or flags.battlepass) and type(slot.Quests)=="table" then
   local defs=h.Modules and h.Modules.Quest or {}
   local function amountFor(q)
     if type(q.Amount)=="number" then return q.Amount end
@@ -6279,7 +7261,8 @@ b.OnInvoke=function(command,flags)
     end
   end
   for category,items in pairs(slot.Quests) do
-   if category~="Battlepass" and type(items)=="table" then
+   if ((category=="Battlepass" and flags.battlepass)
+       or (category~="Battlepass" and flags.quests)) and type(items)=="table" then
     for index,q in pairs(items) do
      if type(q)=="table" and type(q.Tag)=="string" and q.Rewarded~=true then
       local needed=amountFor(q)
@@ -6319,7 +7302,7 @@ end
 ]==]
     local function actorBridge(kind)
         local isWave=kind=="waves"
-        local name=isWave and "HollowMoonWavesSnapshotV78" or "HollowMoonMiscClaimsV78"
+        local name=isWave and "HollowMoonWavesSnapshotV78" or "HollowMoonMiscClaimsV112"
         local actor
         if isWave then
             local character=LocalPlayer.Character
@@ -6998,7 +7981,7 @@ end
         if W.miscFlags.cinematic then
             pcall(function() b:Invoke("skip") end)
         end
-        if W.miscFlags.quests or W.miscFlags.achievements or W.miscFlags.daily then
+        if W.miscFlags.quests or W.miscFlags.achievements or W.miscFlags.daily or W.miscFlags.battlepass then
             local ok,worked,detail=pcall(function() return b:Invoke("claim",W.miscFlags) end)
             if ok and worked==true then log(detail) end
         end
@@ -7469,14 +8452,52 @@ end
             tostring(cost or "unknown"),#desc>0 and table.concat(desc,", ") or "loading")) end) end
     end
     -- UI: Misc applies to Town Central claims; Waves has independent workflows.
-    local misc=Farm.miscTab
-    misc:CreateSection({name="Rewards"})
-    misc:CreateToggle({name="Auto Claim Quests",value=false,flag="MiscAutoQuestV73",callback=function(v) W.miscFlags.quests=v==true end})
-    misc:CreateToggle({name="Auto Claim Achievements",value=false,flag="MiscAutoAchievementsV73",callback=function(v) W.miscFlags.achievements=v==true end})
-    misc:CreateToggle({name="Auto Claim Daily Rewards",value=false,flag="MiscAutoDailyV73",callback=function(v) W.miscFlags.daily=v==true end})
-    misc:CreateToggle({name="Auto Skip Cinematics",value=false,flag="MiscAutoCinematicsV73",callback=function(v) W.miscFlags.cinematic=v==true end})
+    W.miscFlags.cinematic = Farm.cinematicEnabled == true
+    if Farm.isLobbyPlace then
+        local misc=Farm.miscTab
+        misc:CreateSection({name="Reward Claims"})
+        misc:CreateToggle({name="Auto Claim Quests",value=false,flag="MiscAutoQuestV73",callback=function(v) W.miscFlags.quests=v==true end})
+        misc:CreateToggle({name="Auto Claim Achievements",value=false,flag="MiscAutoAchievementsV73",callback=function(v) W.miscFlags.achievements=v==true end})
+        misc:CreateToggle({name="Auto Claim Daily Rewards",value=false,flag="MiscAutoDailyV73",callback=function(v) W.miscFlags.daily=v==true end})
+        misc:CreateToggle({name="Auto Claim Battle Pass Rewards",value=false,
+            flag="MiscAutoBattlepassV111",callback=function(v) W.miscFlags.battlepass=v==true end})
+        misc:CreateDivider()
+        misc:CreateSection({name="Owned Crates"})
+        Equip.texts.crates=misc:CreateText({name="Crate Inventory",text="Loading crate quantities..."})
+        Equip.crateDropdown=misc:CreateDropdown({name="Owned Crates",
+            options={"No owned crates detected"},value="No owned crates detected",
+            flag="MiscCrateChoiceV111",callback=function(v)
+                Equip.selectedCrate=type(v)=="table" and v[1] or v
+            end})
+        misc:CreateToggle({name="Auto Open Crates",value=false,flag="MiscAutoOpenCratesV111",
+            callback=function(v)
+                Equip.autoOpenCrates=v==true
+                Equip.spendBlocked.OpenCrate=nil
+                if v then Equip.securityNote="Auto Open Crates enabled for selected owned crate" end
+            end})
+        misc:CreateDivider()
+        misc:CreateSection({name="Timed Boosts"})
+        Equip.texts.boosts=misc:CreateText({name="Boost Inventory",text="Loading boost quantities..."})
+        misc:CreateDropdown({name="Select Boosts",
+            options={"Luck Boosts","Gold Boosts","Exp Boosts"},multiSelect=true,
+            value={},flag="MiscBoostChoiceV111",
+            callback=function(v) Equip.selectedBoosts=v end})
+        misc:CreateInput({name="Maintain Boost Hours",value="1",placeholder="Hours (e.g. 1)",
+            flag="MiscBoostHoursV111",callback=function(v)
+                Equip.boostTargetHours=math.clamp(tonumber(v) or 1,0,168)
+            end})
+        misc:CreateToggle({name="Auto Use Boosts",value=false,flag="MiscAutoBoostsV111",
+            callback=function(v)
+                Equip.autoUseBoosts=v==true
+                if v then Equip.securityNote="Boost use waiting: game boost-time and use action not verified" end
+            end})
+    end
 
-    local waves=window:CreateTab({name="Waves",icon=85925158736685})
+    -- Show Waves as a gameplay tab in every Mission/Raid/Waves place.
+    -- Controls are visible and saved everywhere but actual Waves operations
+    -- remain guarded by wavesActive() (Trost place + live Waves objective).
+    if not Farm.isLobbyPlace then
+    local waves=window:CreateTab({name="Waves"})
     waves:CreateSection({name="Wave Farming"})
     waves:CreateToggle({
         name="Auto Farm Waves", value=false, flag="WavesAutoFarmV97",
@@ -7543,7 +8564,9 @@ end
     W.blessingText=waves:CreateText({name="Blessing Watcher",text="Waiting for Waves Host and blessing values"})
     waves:CreateToggle({name="Auto Reroll Blessings",value=false,flag="WavesAutoBlessV73",callback=function(v) W.flags.blessing=v==true end})
     waves:CreateSection({name="Live Status"})
-    W.text=waves:CreateText({name="Wave Workflow Status",text="Waiting for Trost Waves"})
+    W.text=waves:CreateText({name="Wave Workflow Status",
+        text=Farm.isTrostPlace and "Waiting for active Trost Waves" or "Inactive outside Trost Waves"})
+    end -- gameplay Waves tab (actions still Trost-Waves-only)
     -- Heartbeat checks frequently; only ONE yielding intermission worker can
     -- run at a time. No RemoteFunction calls are fired each Heartbeat.
     W.connection=RunService.Heartbeat:Connect(function(dt)
@@ -7551,9 +8574,12 @@ end
             if W.connection then W.connection:Disconnect();W.connection=nil end
             return
         end
-        -- Cinematic E input runs independently of Waves state so it also
-        -- works in Missions and Raids. It is gated by the saved Misc toggle.
+        -- Cinematic detection also runs in other gameplay places, even though
+        -- Misc is lobby-only. Never start Trost workflows outside Trost.
         cinematicPromptStep(dt)
+        -- Gameplay outside Trost keeps the Waves page but does not poll its
+        -- market, crate, upgrade, vote, or leave workflows.
+        if not Farm.isLobbyPlace and not Farm.isTrostPlace then return end
         W.farmSyncElapsed = (W.farmSyncElapsed or 0) + dt
         if W.farmSyncElapsed >= 0.3 then
             W.farmSyncElapsed = 0
@@ -7631,11 +8657,14 @@ end
     if wavesActive() then startUtilityWatcher() end
     do end
 end
+-- v113: Every gameplay place creates the same Waves settings page. The
+-- controller's own live-place checks prevent Waves actions in Missions/Raids.
+-- Its cinematic watcher also works in all gameplay modes.
 Farm.initializeWavesAndMisc()
 Farm.initializeWavesAndMisc=nil
 
 window:CreateSection({name="SYSTEM"})
-local settingsTab = window:CreateTab({ name = "Settings", icon = 93364949241311 })
+local settingsTab = window:CreateTab({ name = "Settings" })
 settingsTab:CreateSection({ name = "Automation" })
 settingsTab:CreateToggle({
     name = "Anti AFK", value = false, flag = "AntiAFKV44",
@@ -8468,8 +9497,19 @@ local ALL_SETTING_FLAGS = {
     "EquipCraftTargetV42", "EquipCraftMaterialV42",
     "WavesUpgradeChoiceV78", "WavesEquipChoiceV76",
     "WavesLeaveWaveInputV78", "WavesAutoLeaveV78", "WavesAutoFarmV97",
+    "RaidChestChoicesV120", "RaidAutoOpenChestV115",
     "WavesChoicePerksV76", "WavesChoiceArtifactsV76",
     "WavesChoiceMemoriesV76", "WavesChoiceShiftingV76",
+    "EquipSellPerkRarityV111", "EquipAutoSellPerksV111",
+    "EquipArtifactSlotV111", "EquipArtifactItemV111", "EquipAutoArtifactSelectedV111",
+    "EquipArtifactStat1V111", "EquipArtifactMin1V111",
+    "EquipArtifactStat2V111", "EquipArtifactMin2V111",
+    "EquipAutoRollArtifactV111", "EquipSellArtifactRarityV111", "EquipAutoSellArtifactsV111",
+    "EquipAutoPrestigeV111", "EquipPrestigeGoldV111", "EquipAutoPrestigeAtGoldV111",
+    "EquipAutoConvertV111", "EquipMemorySlotV111", "EquipMemoryChoiceV111",
+    "EquipAutoMemoriesV111", "EquipAutoCraftPerksV111",
+    "MiscAutoBattlepassV111", "MiscCrateChoiceV111", "MiscAutoOpenCratesV111",
+    "MiscBoostChoiceV111", "MiscBoostHoursV111", "MiscAutoBoostsV111",
     "MiscAutoQuestV73", "MiscAutoAchievementsV73", "MiscAutoDailyV73",
     "MiscAutoCinematicsV73", "WavesAutoVoteStartV73", "WavesAutoVoteSkipV73",
     "WavesAutoCrateV73", "WavesAutoInjuriesV73", "WavesAutoBaseV73",
@@ -8492,11 +9532,22 @@ local RESTORE_FIRST = {
     "EquipCraftTargetV42", "EquipCraftMaterialV42",
     "MomentumTravelSpeed", "MomentumOrbitWidthV69", "KillLastTitanAt", "AutoLeaveMode", "AutoLeaveValue",
     "CombatSkillSlotsV46",
+    "EquipSellPerkRarityV111", "EquipAutoSellPerksV111",
+    "EquipArtifactSlotV111", "EquipArtifactItemV111", "EquipAutoArtifactSelectedV111",
+    "EquipArtifactStat1V111", "EquipArtifactMin1V111",
+    "EquipArtifactStat2V111", "EquipArtifactMin2V111",
+    "EquipAutoRollArtifactV111", "EquipSellArtifactRarityV111", "EquipAutoSellArtifactsV111",
+    "EquipAutoPrestigeV111", "EquipPrestigeGoldV111", "EquipAutoPrestigeAtGoldV111",
+    "EquipAutoConvertV111", "EquipMemorySlotV111", "EquipMemoryChoiceV111",
+    "EquipAutoMemoriesV111", "EquipAutoCraftPerksV111",
+    "MiscAutoBattlepassV111", "MiscCrateChoiceV111", "MiscAutoOpenCratesV111",
+    "MiscBoostChoiceV111", "MiscBoostHoursV111", "MiscAutoBoostsV111",
     "MiscAutoQuestV73", "MiscAutoAchievementsV73", "MiscAutoDailyV73", "MiscAutoCinematicsV73",
     "WavesAutoVoteStartV73", "WavesAutoVoteSkipV73", "WavesAutoCrateV73",
     "WavesAutoInjuriesV73", "WavesAutoBaseV73", "WavesAutoEquipV73", "WavesAutoBlessV73",
     "WavesUpgradeChoiceV78", "WavesEquipChoiceV76",
     "WavesLeaveWaveInputV78", "WavesAutoLeaveV78", "WavesAutoFarmV97",
+    "RaidChestChoicesV120", "RaidAutoOpenChestV115",
     "WavesChoicePerksV76", "WavesAutoBuyPerksV73",
     "WavesChoiceArtifactsV76", "WavesAutoBuyArtifactsV73",
     "WavesChoiceMemoriesV76", "WavesAutoBuyMemoriesV73",
@@ -8506,7 +9557,20 @@ local RESTORE_FIRST = {
 local SETTINGS_BACKUP_PATH = PREFERENCES_FILE
 local inPreferencesRestore = false
 local function capturePreferenceValues()
+    -- Use the last verified shared backup as a base: lobby-only and game-only
+    -- controls are intentionally absent from the current Rayfield window.
     local values = {}
+    if type(savedPreferences)=="table" then
+        for flag, prior in pairs(savedPreferences) do
+            if type(prior)=="table" then
+                local copy={}
+                for key,item in pairs(prior) do copy[key]=item end
+                values[flag]=copy
+            else
+                values[flag]=prior
+            end
+        end
+    end
     for _, flag in ipairs(ALL_SETTING_FLAGS) do
         local ok, value = pcall(function() return window:Get(flag) end)
         if (not ok or value == nil) and window.Flags then
@@ -8541,8 +9605,8 @@ local function commitPreferences(reason)
     local values = capturePreferenceValues()
     local count = 0
     for _flag, _value in pairs(values) do count = count + 1 end
-    if count < 20 then
-        return false, "Only " .. tostring(count) .. " controls were readable; refusing to overwrite a saved backup"
+    if count < 8 then
+        return false, "Only " .. tostring(count) .. " settings were readable; refusing to overwrite the shared backup"
     end
     local okRayfield, rayfieldError = pcall(function() window:Save() end)
     if not canUsePreferenceFiles() then
@@ -8572,6 +9636,15 @@ local function restorePreferences()
         attempted[flag]=true
         local value=prefs[flag]
         if flag=="LobbyModifiersV52" and value==nil then value=prefs.LobbyModifier end
+        if flag=="RaidChestChoicesV120" and value==nil then
+            local oldChoice = prefs.RaidChestChoiceV115
+            if type(oldChoice) == "string" then
+                local wasPremium = oldChoice == "Premium" or oldChoice == "Premium Chest"
+                value = {wasPremium and "Premium Chest" or "Free Chest"}
+            elseif type(oldChoice) == "table" then
+                value = oldChoice
+            end
+        end
         local oldWaveFlags={
             WavesUpgradeChoiceV76="WavesUpgradeChoiceV73",
             WavesEquipChoiceV76="WavesEquipChoiceV73",
@@ -8621,6 +9694,10 @@ local function restorePreferences()
             -- Once live Items arrive, updateItems will reflect the saved picks.
             return
         end
+        -- Do not attempt to restore hidden controls. Rayfield maintains
+        -- distinct files for each mode; shared JSON retains their values.
+        local hasControl, current = pcall(function() return window:Get(flag) end)
+        if not hasControl or current == nil then return end
         if flag=="LobbyModifiersV52" then
             local selected=normalizeModifierSelection(value,Farm.lobbyModifier,
                 Farm.lobbyMode,Farm.lobbyObjective,Farm.lobbyDifficulty)
@@ -8715,6 +9792,8 @@ task.defer(function()
     if Farm.autoExecute and not Farm.queuedAutoExecute then syncAutoExecute() end
 end)
 Farm.sessionMonitor = RunService.Heartbeat:Connect(sessionHeartbeat)
-Equip.watcher = RunService.Heartbeat:Connect(equipmentHeartbeat)
+if Farm.isLobbyPlace then
+    Equip.watcher = RunService.Heartbeat:Connect(equipmentHeartbeat)
+end
 saveSession()
-window:Navigate("Lobby")
+window:Navigate(Farm.isLobbyPlace and "Lobby" or "Combat")
