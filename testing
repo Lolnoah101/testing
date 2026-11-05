@@ -1,6 +1,6 @@
 --[[
     HollowMoonHub v127 | Attack on Titan: Revolution (Outskirts)
-    Lobby v119: Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    Lobby v129: Shadow Ban Status webhook reporting (verified-flag only); Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -267,6 +267,8 @@ local Farm = {
     waitingFreezeRoot = nil, -- tracked character during final-Titan air hold (never anchored)
     waitingFreezeActive = false,
     lastTitanAirPosition = nil,
+    lastTitanAirOrbitEnabled = true, -- v129 controlled test: move during final-Titan wait
+    lastTitanAirOrbitStartedAt = nil,
     lastTitanAirRoot = nil,
     lastTitanAirAttachment = nil,
     lastTitanAirAlign = nil,
@@ -324,7 +326,7 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v127"
+Farm.buildVersion = "v129"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
 do end
 
@@ -760,6 +762,7 @@ local function releaseLastTitanWaitFreeze()
     Farm.lastTitanAirAttachment = nil
     Farm.lastTitanAirRoot = nil
     Farm.lastTitanAirPosition = nil
+    Farm.lastTitanAirOrbitStartedAt = nil
     Farm.waitingFreezeActive = false
     Farm.waitingFreezeRoot = nil
     if align then pcall(function() align:Destroy() end) end
@@ -793,14 +796,29 @@ local function updateLastTitanWaitFreeze()
     end
     -- Complete an in-flight slash before taking over player movement.
     if Farm.attacking or Farm.frozenRoot or Farm.skillReservation then
+        releaseLastTitanWaitFreeze()
         return false
+    end
+    if not Farm.waitingFreezeActive then
+        Farm.lastTitanAirOrbitStartedAt = Farm.clockNow()
     end
     local fake = titan:FindFirstChild("Fake")
     local head = (fake and fake:FindFirstChild("Head")) or titan:FindFirstChild("Head")
     local anchor = (head and head:IsA("BasePart")) and head or nape
     local extra = anchor == head and head.Size.Y * 0.5 or 0
     local altitude = math.max(120, tonumber(Farm.farmDistance) or 200)
-    Farm.lastTitanAirPosition = anchor.Position + Vector3.new(0, altitude + extra, 0)
+    -- Controlled inactivity test: keep a slow, 16-stud horizontal orbit rather
+    -- than remaining motionless over the Titan. We do not touch the server's
+    -- match timer or send fake activity/attack requests. All motion remains in
+    -- the existing AlignPosition controller at the player's safe farm height.
+    local horizontal = Vector3.zero
+    if Farm.lastTitanAirOrbitEnabled then
+        local startedAt = Farm.lastTitanAirOrbitStartedAt or Farm.clockNow()
+        local angle = math.max(0, Farm.clockNow() - startedAt) * (2 * math.pi / 12)
+        horizontal = Vector3.new(math.sin(angle) * 16, 0, (1 - math.cos(angle)) * 16)
+    end
+    Farm.lastTitanAirPosition = anchor.Position + horizontal
+        + Vector3.new(0, altitude + extra, 0)
     Farm.waitingFreezeRoot = root
     Farm.waitingFreezeActive = true
     return true
@@ -6533,6 +6551,16 @@ farmTab:CreateToggle({
     end,
 })
 
+farmTab:CreateToggle({
+    name = "Move During Last Titan Wait",
+    value = true,
+    flag = "LastTitanAirOrbitV129",
+    callback = function(enabled)
+        Farm.lastTitanAirOrbitEnabled = enabled == true
+        Farm.lastTitanAirOrbitStartedAt = Farm.clockNow()
+    end,
+})
+
 farmTab:CreateButton({
     name = "Reset Match Timer",
     callback = resetMatchTimer,
@@ -6560,7 +6588,9 @@ Farm.timerStatusConnection = RunService.Heartbeat:Connect(function(dt)
     elseif elapsed >= Farm.lastTitanAtSeconds then
         state = "Ready to finish"
     elseif Farm.waitingFreezeActive then
-        state = "Last Titan protected (air hold)"
+        state = Farm.lastTitanAirOrbitEnabled
+            and "Last Titan protected (air orbit test)"
+            or "Last Titan protected (air hold)"
     elseif reserved then
         state = "Holding 1 Titan"
     else
@@ -9463,6 +9493,22 @@ Farm.initializeMatchWebhook = function()
         if #raw > 990 then raw = raw:sub(1, 985) .. "..." end
         return "```\n" .. raw .. "\n```"
     end
+    -- A shadow-ban status cannot be inferred from missed hits, matchmaking,
+    -- rewards, client timing, or the lack of a visible ban warning.
+    -- Only report definite status if the game explicitly provides a boolean
+    -- on the local Player. Without that signal, avoid a false "not banned".
+    local function getShadowBanStatus()
+        local keys = {"ShadowBanned", "Shadow_Banned", "ShadowBan"}
+        for _, key in ipairs(keys) do
+            local value = LocalPlayer:GetAttribute(key)
+            if type(value) == "boolean" then
+                return value
+                    and "You are shadow banned (game-reported)"
+                    or "You are not shadow banned (game-reported)"
+            end
+        end
+        return "Unable to verify — game does not expose a confirmed status"
+    end
     local function buildEmbed(testMode, rewardOrdinary, rewardDrops, rewardSpecial, matchStats)
         local total = {}
         addNumberLine(total, "Prestige", {"Prestige","prestige"})
@@ -9523,17 +9569,18 @@ Farm.initializeMatchWebhook = function()
             {name="User",value=formatField({clean(LocalPlayer.Name,64)}),inline=true},
             {name="Totals",value=formatField(total),inline=true},
             {name="Info",value=formatField(info),inline=true},
+            {name="Shadow Ban Status",value=getShadowBanStatus(),inline=false},
             {name="Stats",value=display(stats,"No match stats detected"),inline=true},
             {name="Rewards",value=display(ordinary,"No reward amounts detected"),inline=true},
             {name="Drops",value=display(drops,"No drops detected"),inline=true},
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test (v125)"
+            title = testMode and "HollowMoonHub • Webhook Test (v129)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v125"},
+            footer = {text="HollowMoonHub • Match Tracker • v129"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
