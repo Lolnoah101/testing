@@ -1,5 +1,5 @@
 --[[
-    HollowMoonHub v125 | Attack on Titan: Revolution (Outskirts)
+    HollowMoonHub v127 | Attack on Titan: Revolution (Outskirts)
     Lobby v119: Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
@@ -324,7 +324,7 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v126"
+Farm.buildVersion = "v127"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
 do end
 
@@ -1004,7 +1004,7 @@ end
 -- This optional test attempts to run within the character's own Actor VM.
 -- It requires an executor exposing run_on_actor and getgc in that Actor.
 -- NO mouse events, keyboard events, or fallback simulated inputs are used.
-local BRIDGE_NAME = "HollowMoonClientSlashV126"
+local BRIDGE_NAME = "HollowMoonClientSlashV127"
 local ACTOR_SOURCE = [==[
 local Players = game:GetService("Players")
 local character = Players.LocalPlayer.Character
@@ -1013,14 +1013,14 @@ if not actor then
     do end
     return
 end
-local bridge = actor:FindFirstChild("HollowMoonClientSlashV126")
+local bridge = actor:FindFirstChild("HollowMoonClientSlashV127")
 if bridge and not bridge:IsA("BindableFunction") then
     bridge:Destroy()
     bridge = nil
 end
 if not bridge then
     bridge = Instance.new("BindableFunction")
-    bridge.Name = "HollowMoonClientSlashV126"
+    bridge.Name = "HollowMoonClientSlashV127"
     bridge.Parent = actor
 end
 
@@ -8040,10 +8040,11 @@ end
         else log("Blessing spin rejected; will recheck cost/stock") end
         return true
     end
-    -- v106: Cinematic prompts can appear in Missions/Raids, not just Trost
-    -- and Town Central. The old native Actor skip was only polled every 5s
-    -- in two places, and did not respond to the on-screen "SKIP [E]" button.
-    -- Never press E when only the ordinary Waves "Skip" vote is visible.
+    -- v127 mobile raid optimization: Stohess shows a touch-only SKIP button
+    -- without the desktop '[E]' keyboard hint. Locate the native raid Skip GUI
+    -- directly instead of walking every PlayerGui descendant each 0.3 seconds.
+    -- The Actor bridge still checks Can_Skip, Interacted, and the button's
+    -- visibility before invoking the game's original Raids.Skip controller.
     local function visibleCinematicSkipPrompt()
         local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
         if not gui then return false end
@@ -8056,6 +8057,19 @@ end
             end
             return current == gui
         end
+        local raidMode = Workspace:GetAttribute("Type") == "Raids"
+            or game.PlaceId == 15824912319
+        if raidMode then
+            local interface = gui:FindFirstChild("Interface")
+            local skipUI = interface and interface:FindFirstChild("Skip")
+            if skipUI and skipUI:IsA("GuiObject") then
+                return visibleThroughGui(skipUI)
+            end
+            -- Raid Skip is not available yet. Do not confuse a wave-vote or
+            -- ordinary skip label with the native raid cinematic button.
+            return false
+        end
+        -- Preserve the pre-v127 Missions/Waves keyboard prompt detection.
         local function compact(raw)
             return tostring(raw or ""):gsub("<[^>]+>", ""):upper():gsub("%s+", "")
         end
@@ -8069,9 +8083,6 @@ end
                     or label:find("PRESSETOSKIP", 1, true) then
                     return true
                 end
-                -- Some cinematic layouts put SKIP and [E] into separate
-                -- labels under a single button/frame. Require a visible E
-                -- key prompt in that same parent, not a generic Skip label.
                 if label == "SKIP" and node.Parent and node.Parent:IsA("GuiObject") then
                     for _, sibling in ipairs(node.Parent:GetChildren()) do
                         if sibling ~= node
