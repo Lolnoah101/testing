@@ -1,5 +1,5 @@
 --[[
-    HollowMoonHub v127 | Attack on Titan: Revolution (Outskirts)
+    HollowMoonHub v135 | Attack on Titan: Revolution (Outskirts)
     Lobby v129: Shadow Ban Status webhook reporting (verified-flag only); Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
@@ -326,7 +326,7 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v134"
+Farm.buildVersion = "v135"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
 do end
 
@@ -5220,6 +5220,7 @@ local SESSION_DEFAULT = {
     lastRewardJob = "",
     rewardLatched = false,
     retryLatched = false,
+    retryAcceptedEpoch = 0,
     webhookLastSentKey = "", -- never send the same completed match twice across script reloads
     webhookWaveJob = "",
     webhookWaveSequence = 0,
@@ -5252,6 +5253,26 @@ Farm.autoRetry = Farm.session.autoRetry == true
 Farm.autoLeave = Farm.session.autoLeave == true
 Farm.autoLeaveMode = Farm.session.autoLeaveMode
 Farm.autoLeaveValue = math.clamp(math.floor(Farm.session.autoLeaveValue), 1, 100000)
+-- v135: Acknowledged requests are not proof that a new match/teleport started.
+-- Keep all watchdog state on Farm, avoiding new top-level Luau registers.
+Farm.retryPending = false
+Farm.retryInFlightSince = nil
+Farm.retryRequestSerial = 0
+Farm.retryAttempts = 0
+Farm.retryAcceptedAt = (Farm.session.retryLatched == true
+    and (Farm.session.retryAcceptedEpoch or 0) > 0
+    and os.time() - Farm.session.retryAcceptedEpoch < 35)
+    and (os.clock() - (os.time() - Farm.session.retryAcceptedEpoch)) or nil
+Farm.retryThisReward = type(Farm.retryAcceptedAt) == "number"
+Farm.retryStatus = "Waiting for a completed match"
+Farm.resultsMissingSince = nil
+Farm.returningToLobbyAt = nil
+Farm.leaveLastAttemptAt = -100
+Farm.leaveAttempts = 0
+Farm.lobbyJoinAttemptCount = 0
+Farm.lobbyJoinStartedAt = nil
+Farm.lobbyJoinAwaitingAt = nil
+Farm.lobbyJoinRunId = 0
 
 local function saveSession()
     if type(writefile) ~= "function" then return end
@@ -5304,41 +5325,43 @@ end
 -- Use the same return-to-Town-Central action as the game's own Rewards/Leave button.
 -- The Outskirts client calls Host:Send("Functions", "Teleport"), which sends
 -- POST:FireServer("Functions", "Teleport"). Never disconnect the player here.
+-- Native Results/Leave request. A sent request is not a confirmed teleport.
 local function stopAndLeaveGame(reason)
-    if Farm.unloaded or not Farm.autoLeave or Farm.returningToLobby then return false end
-
+    if Farm.unloaded or not Farm.autoLeave then return false end
     if game.PlaceId == LOBBY_PLACE_ID then
         Farm.autoLeave = false
         Farm.session.autoLeave = false
+        Farm.returningToLobby = false
         saveSession()
-        do end
         return true
     end
-
-    -- Only use the game's verified return-to-lobby action; don't guess a teleport.
+    local now = os.clock()
+    if Farm.returningToLobby then return true end
+    -- Backoff even if server silently ignores the exit. Never flood a remote.
+    local interval = math.min(90, math.max(15, (Farm.leaveAttempts or 0) * 15))
+    if now - (Farm.leaveLastAttemptAt or -100) < interval then
+        Farm.leaveStatus = "Exit unconfirmed; next attempt after cooldown"
+        return true
+    end
     local assets = ReplicatedStorage:FindFirstChild("Assets")
     local remotes = assets and assets:FindFirstChild("Remotes")
     local post = remotes and remotes:FindFirstChild("POST")
     if not post or not post:IsA("RemoteEvent") then
-        do end
-        return false
+        Farm.leaveStatus = "Waiting for official lobby teleport remote"
+        return true
     end
-
+    Farm.leaveLastAttemptAt = now
+    Farm.leaveAttempts = (Farm.leaveAttempts or 0) + 1
     Farm.returningToLobby = true
-    local ok, err = pcall(function()
-        post:FireServer("Functions", "Teleport")
-    end)
+    Farm.returningToLobbyAt = now
+    local ok = pcall(function() post:FireServer("Functions", "Teleport") end)
     if not ok then
         Farm.returningToLobby = false
-        do end
-        return false
+        Farm.leaveStatus = "Lobby teleport request failed; will retry"
+        return true
     end
-
-    -- This confirms the request was sent, not that the server accepted it.
-    Farm.autoLeave = false
-    Farm.session.autoLeave = false
-    saveSession()
-    do end
+    -- Leave remains ON until the destination place is actually reached.
+    Farm.leaveStatus = "Lobby teleport requested (attempt " .. Farm.leaveAttempts .. "); awaiting transfer"
     return true
 end
 
@@ -5346,42 +5369,72 @@ local function checkAutoLeave()
     if not Farm.autoLeave then return false end
     if Farm.autoLeaveMode == "After X Matches" then
         if completedSinceLeaveEnabled() >= Farm.autoLeaveValue then
-            stopAndLeaveGame(tostring(Farm.autoLeaveValue) .. " matches completed")
-            return true
+            return stopAndLeaveGame(tostring(Farm.autoLeaveValue) .. " matches completed")
         end
     elseif sessionElapsedMinutes() >= Farm.autoLeaveValue then
-        stopAndLeaveGame(tostring(Farm.autoLeaveValue) .. " minutes elapsed")
-        return true
+        return stopAndLeaveGame(tostring(Farm.autoLeaveValue) .. " minutes elapsed")
     end
     return false
 end
 
+-- One request in flight at a time; an accepted Retry/Add only enters the
+-- retry vote. If the results remain open after a bounded wait, recheck it.
+-- We do not force a character reset or start duplicate game controllers.
 local function tryAutoRetry()
-    if Farm.returningToLobby or not Farm.autoRetry or Farm.retryThisReward or Farm.unloaded then return end
-    if os.clock() - Farm.retryLastAttempt < 7 then return end
-    Farm.retryLastAttempt = os.clock()
-    local remotes = ReplicatedStorage:FindFirstChild("Assets")
-    remotes = remotes and remotes:FindFirstChild("Remotes")
+    if Farm.returningToLobby or not Farm.autoRetry or Farm.unloaded then return end
+    local now = os.clock()
+    if Farm.retryThisReward then
+        if now - (Farm.retryAcceptedAt or now) < 30 then
+            Farm.retryStatus = "Retry vote accepted; waiting for next match"
+            return
+        end
+        Farm.retryThisReward = false
+        Farm.session.retryLatched = false
+        Farm.session.retryAcceptedEpoch = 0
+        Farm.retryStatus = "Retry accepted, but results did not close; checking again"
+        saveSession()
+    end
+    if Farm.retryPending then
+        if now - (Farm.retryInFlightSince or now) <= 15 then return end
+        -- The previous InvokeServer did not respond. Invalidate its late result.
+        Farm.retryRequestSerial = Farm.retryRequestSerial + 1
+        Farm.retryPending = false
+        Farm.retryStatus = "Retry request timed out; will back off"
+    end
+    local attempts = Farm.retryAttempts or 0
+    local gap = attempts == 0 and 1 or math.min(90, 7 * (2 ^ math.min(attempts - 1, 4)))
+    if now - (Farm.retryLastAttempt or -100) < gap then return end
+    local assets = ReplicatedStorage:FindFirstChild("Assets")
+    local remotes = assets and assets:FindFirstChild("Remotes")
     local get = remotes and remotes:FindFirstChild("GET")
     if not get or not get:IsA("RemoteFunction") then
-        do end
+        Farm.retryStatus = "Waiting for retry remote"
         return
     end
-    -- Identical request to the Outskirts Rewards Retry button.
+    Farm.retryLastAttempt = now
+    Farm.retryAttempts = attempts + 1
+    Farm.retryPending = true
+    Farm.retryInFlightSince = now
+    Farm.retryRequestSerial = Farm.retryRequestSerial + 1
+    local serial = Farm.retryRequestSerial
+    Farm.retryStatus = "Requesting retry (attempt " .. Farm.retryAttempts .. ")"
     task.spawn(function()
-        local ok, accepted = pcall(function()
+        local ok, response = pcall(function()
             return get:InvokeServer("Functions", "Retry", "Add")
         end)
-        if Farm.unloaded then return end
-        if ok and accepted == true then
+        if Farm.unloaded or serial ~= Farm.retryRequestSerial then return end
+        Farm.retryPending = false
+        if not Farm.autoRetry then return end
+        if ok and response == true then
             Farm.retryThisReward = true
+            Farm.retryAcceptedAt = os.clock()
             Farm.session.retryLatched = true
+            Farm.session.retryAcceptedEpoch = os.time()
+            Farm.retryStatus = "Retry vote accepted; checking for match transition"
             saveSession()
-            do end
-        elseif not ok then
-            do end
         else
-            do end
+            Farm.retryStatus = ok and ("Retry not accepted: " .. tostring(response))
+                or "Retry request failed; awaiting cooldown"
         end
     end)
 end
@@ -5393,8 +5446,14 @@ local function resetSessionCounter()
     Farm.session.leaveStartedAt = os.time()
     Farm.session.rewardLatched = false
     Farm.session.retryLatched = false
+    Farm.session.retryAcceptedEpoch = 0
     Farm.session.lastRewardJob = ""
     Farm.retryThisReward = false
+    Farm.retryPending = false
+    Farm.retryRequestSerial = Farm.retryRequestSerial + 1
+    Farm.retryAttempts = 0
+    Farm.retryAcceptedAt = nil
+    Farm.retryStatus = "Session counter reset"
     Farm.rewardVisibleLast = false
     saveSession()
     do end
@@ -5404,40 +5463,50 @@ local function handleResultScreen()
     local visible, canRetry = isResultsVisible()
     local job = tostring(game.JobId)
     if visible then
+        Farm.resultsMissingSince = nil
         Farm.timerSawResults = true
         Farm.timerResultsClosedAt = nil
-    elseif Farm.timerSawResults then
-        Farm.timerResultsClosedAt = Farm.timerResultsClosedAt or os.clock()
-        -- A flickering result panel is NOT a new round. Require a sustained
-        -- disappearance and living Titans before releasing the old match clock.
-        if os.clock() - Farm.timerResultsClosedAt >= 1.5
+    else
+        Farm.resultsMissingSince = Farm.resultsMissingSince or os.clock()
+        -- Do not relatch new results after a one-frame UI flicker or while
+        -- moving through the separate raid chest animation.
+        if Farm.session.rewardLatched and Farm.session.lastRewardJob == job
+            and os.clock() - Farm.resultsMissingSince >= 2.0
             and #getLivingTitans() > 0 then
-            Farm.timerSawResults = false
-            Farm.timerResultsClosedAt = nil
-            Farm.matchStartedLocal = os.clock()
-            Farm.matchClockManual = false
-            Farm.matchActiveSince = nil
-            Farm.matchClockLastProbeAt = 0
-            Farm.matchLastElapsed = 0
-            Farm.matchServerSecondsLast = nil
-            Farm.matchServerAnchorValue = nil
-            Farm.matchServerAnchorAt = nil
-            Farm.matchServerLastAdvanceAt = nil
-            Farm.matchServerActive = false
-            Farm.lastTitanReserved = nil
-            releaseLastTitanWaitFreeze()
-            do end
-        end
-    end
-    if not visible then
-        -- Raid CHESTS is a separate screen. Its open timer is reset only when
-        -- the chest popup itself disappears, not when Rewards is hidden.
-        if Farm.session.rewardLatched and Farm.session.lastRewardJob == job then
             Farm.session.rewardLatched = false
             Farm.session.retryLatched = false
+            Farm.session.retryAcceptedEpoch = 0
+            Farm.retryThisReward = false
+            Farm.retryPending = false
+            Farm.retryRequestSerial = Farm.retryRequestSerial + 1
+            Farm.retryAttempts = 0
+            Farm.retryAcceptedAt = nil
+            Farm.retryStatus = "New round detected"
+            if type(Farm.resetRaidChestForNewMatch) == "function" then
+                pcall(Farm.resetRaidChestForNewMatch)
+            end
             saveSession()
         end
-        Farm.retryThisReward = false
+        if Farm.timerSawResults then
+            Farm.timerResultsClosedAt = Farm.timerResultsClosedAt or os.clock()
+            if os.clock() - Farm.timerResultsClosedAt >= 1.5
+                and #getLivingTitans() > 0 then
+                Farm.timerSawResults = false
+                Farm.timerResultsClosedAt = nil
+                Farm.matchStartedLocal = os.clock()
+                Farm.matchClockManual = false
+                Farm.matchActiveSince = nil
+                Farm.matchClockLastProbeAt = 0
+                Farm.matchLastElapsed = 0
+                Farm.matchServerSecondsLast = nil
+                Farm.matchServerAnchorValue = nil
+                Farm.matchServerAnchorAt = nil
+                Farm.matchServerLastAdvanceAt = nil
+                Farm.matchServerActive = false
+                Farm.lastTitanReserved = nil
+                releaseLastTitanWaitFreeze()
+            end
+        end
         Farm.rewardVisibleLast = false
         return
     end
@@ -5446,36 +5515,34 @@ local function handleResultScreen()
         Farm.session.rewardLatched = true
         Farm.session.lastRewardJob = job
         Farm.session.retryLatched = false
+        Farm.session.retryAcceptedEpoch = 0
         Farm.retryThisReward = false
+        Farm.retryPending = false
+        Farm.retryRequestSerial = Farm.retryRequestSerial + 1
+        Farm.retryAttempts = 0
+        Farm.retryAcceptedAt = nil
+        Farm.retryLastAttempt = -100
+        Farm.retryStatus = "Results detected; collecting rewards"
         saveSession()
-        do end
-        -- Send before Auto Retry / Leave changes the result screen.
         if game.PlaceId ~= 14012874501 and type(Farm.onMatchComplete) == "function" then
-            -- Trost reports its own definitive Waves.Finalised transition.
             Farm.onMatchComplete(job .. ":" .. tostring(Farm.session.matches))
         end
-    elseif Farm.session.retryLatched then
-        Farm.retryThisReward = true
     end
     Farm.rewardVisibleLast = true
-    -- Give a pending webhook a bounded time to finish before teleport/retry
-    -- replaces the results UI. Never hold gameplay indefinitely if HTTP fails.
+    -- Reward collection and Discord have independent bounded windows.
     if Farm.Webhook and (
         (Farm.Webhook.collecting and os.clock() - (Farm.Webhook.collectingSince or 0) < 8)
         or (Farm.Webhook.sending and os.clock() - (Farm.Webhook.sendingSince or 0) < 9)) then
         return
     end
-    -- Raid chest requests are independent of the Lobby's inventory crates.
-    -- The game may display raid rewards only after this result panel populates.
-    -- Keep requests asynchronous; never block the half-second session watcher.
-    if type(Farm.tryRaidChest) == "function" then
-        if Farm.tryRaidChest(true) then
-            return -- Briefly defer Auto Retry while the raid chest is pending.
-        end
-    end
-    -- Leave takes precedence over a retry on a result screen.
+    -- Raid chest processing is allowed to defer retry only for a bounded time.
+    if type(Farm.tryRaidChest) == "function" and Farm.tryRaidChest(true) then return end
     if checkAutoLeave() then return end
-    if canRetry then tryAutoRetry() end
+    if canRetry then
+        tryAutoRetry()
+    elseif Farm.autoRetry then
+        Farm.retryStatus = "Results shown, but retry button is unavailable"
+    end
 end
 
 -- Public client request path. Mirrors the lobby Host:Invoke implementation,
@@ -5601,14 +5668,18 @@ local function requestLobbyJoin()
     end
     do end
     Farm.lobbyJoining = true
-    -- Don't block Heartbeat: the game can yield during party creation.
+    Farm.lobbyJoinStartedAt = os.clock()
+    Farm.lobbyJoinAttemptCount = (Farm.lobbyJoinAttemptCount or 0) + 1
+    Farm.lobbyJoinRunId = (Farm.lobbyJoinRunId or 0) + 1
+    local joinId = Farm.lobbyJoinRunId
+    -- A failed creation always gets a scheduled, rate-limited retry.
     task.spawn(function()
         local settings={mode=Farm.lobbyMode,map=Farm.lobbyMap,
             objective=Farm.lobbyObjective,modifier=Farm.lobbyModifier,
             difficulty=Farm.lobbyDifficulty}
         local bridge,reason=getLobbyBridge()
-        if not Farm.lobbyAutoJoin or Farm.unloaded then
-            Farm.lobbyJoining=false
+        if not Farm.lobbyAutoJoin or Farm.unloaded or joinId ~= Farm.lobbyJoinRunId then
+            if joinId == Farm.lobbyJoinRunId then Farm.lobbyJoining=false end
             return
         end
         Farm.lobbyCurrentStatus="Creating "..settings.mode.." / "..settings.map
@@ -5629,19 +5700,28 @@ local function requestLobbyJoin()
             success,detail=fallbackDirectLobbyJoin(settings)
             if not success then detail=tostring(reason).." / "..tostring(detail) end
         end
+        if Farm.unloaded or joinId ~= Farm.lobbyJoinRunId then return end
+        Farm.lobbyJoining=false
+        Farm.lobbyJoinStartedAt=nil
         Farm.lobbyCurrentStatus=tostring(detail)
         if success then
-            do end
-        else
-            do end
+            -- A successful Start response is not proof that the teleport happened.
+            Farm.lobbyJoinAwaitingAt=os.clock()
+            Farm.lobbyCurrentStatus="Match start accepted; waiting for teleport"
+        elseif Farm.lobbyAutoJoin and game.PlaceId==LOBBY_PLACE_ID then
+            local gap=math.min(180, 8*(2^math.min((Farm.lobbyJoinAttemptCount or 1)-1,5)))
+            Farm.lobbyJoinAttempted=false
+            Farm.lobbyJoinDue=os.clock()+gap
+            Farm.lobbyCurrentStatus="Join failed: "..tostring(detail).." | retry in "..gap.."s"
         end
-        Farm.lobbyJoining=false
     end)
     return true
 end
 
 local function scheduleLobbyJoin()
     Farm.lobbyJoinDue = nil
+    Farm.lobbyJoinAwaitingAt = nil
+    Farm.lobbyJoinAttemptCount = 0
     if not Farm.lobbyJoining then Farm.lobbyJoinAttempted = false end
     Farm.lobbyJoinWarned = false
     if Farm.lobbyAutoJoin and game.PlaceId == LOBBY_PLACE_ID then
@@ -5657,6 +5737,12 @@ local function sessionHeartbeat(dt)
     if Farm.sessionMonitorElapsed < 0.5 then return end
     Farm.sessionMonitorElapsed = 0
     if Farm.unloaded then return end
+    local now=os.clock()
+    -- A missing/failed server teleport must not permanently disable results monitoring.
+    if Farm.returningToLobby and now - (Farm.returningToLobbyAt or now) >= 25 then
+        Farm.returningToLobby = false
+        Farm.leaveStatus = "Lobby transfer not confirmed; will retry exit after cooldown"
+    end
     if not Farm.returningToLobby then
         handleResultScreen()
         -- Raid chest popups may be separate from the normal Rewards panel.
@@ -5668,10 +5754,28 @@ local function sessionHeartbeat(dt)
     end
     if Farm.lobbyAutoJoin then
         if game.PlaceId == LOBBY_PLACE_ID then
-            if Farm.lobbyJoinDue == nil and not Farm.lobbyJoinAttempted then
+            if Farm.lobbyJoining and Farm.lobbyJoinStartedAt
+                and now - Farm.lobbyJoinStartedAt >= 80 then
+                -- Discard a stalled controller response. Spaced retry is safer
+                -- than leaving Auto Join permanently latched for hours.
+                Farm.lobbyJoinRunId = Farm.lobbyJoinRunId + 1
+                Farm.lobbyJoining = false
+                Farm.lobbyJoinStartedAt = nil
+                Farm.lobbyJoinAttempted = false
+                Farm.lobbyJoinDue = now + 45
+                Farm.lobbyCurrentStatus = "Join controller timed out; retry in 45s"
+            end
+            if Farm.lobbyJoinAwaitingAt and now - Farm.lobbyJoinAwaitingAt >= 60 then
+                Farm.lobbyJoinAwaitingAt=nil
+                Farm.lobbyJoinAttempted=false
+                Farm.lobbyJoinDue=now+40
+                Farm.lobbyCurrentStatus="No teleport after Start; rechecking party in 40s"
+            end
+            if Farm.lobbyJoinDue == nil and not Farm.lobbyJoinAttempted
+                and not Farm.lobbyJoining and not Farm.lobbyJoinAwaitingAt then
                 scheduleLobbyJoin()
             end
-            if Farm.lobbyJoinDue and os.clock() >= Farm.lobbyJoinDue then
+            if Farm.lobbyJoinDue and now >= Farm.lobbyJoinDue and not Farm.lobbyJoining then
                 Farm.lobbyJoinDue = nil
                 Farm.lobbyJoinAttempted = true
                 requestLobbyJoin()
@@ -5690,8 +5794,11 @@ local function sessionHeartbeat(dt)
             and string.format("%d/%d matches", completedSinceLeaveEnabled(), Farm.autoLeaveValue)
             or string.format("%.1f/%d minutes", sessionElapsedMinutes(), Farm.autoLeaveValue)
         pcall(function()
-            Farm.sessionText:Set(string.format("Total %d | Leave: %s | Retry %s",
-                Farm.session.matches, Farm.autoLeave and goal or "Off", Farm.autoRetry and "On" or "Off"))
+            Farm.sessionText:Set(string.format("Total %d | Leave: %s | Retry: %s%s",
+                Farm.session.matches,
+                Farm.autoLeave and (Farm.leaveStatus or goal) or "Off",
+                Farm.autoRetry and (Farm.retryStatus or "On") or "Off",
+                Farm.retryAttempts > 0 and (" | Attempts: " .. Farm.retryAttempts) or ""))
         end)
     end
     if Farm.lobbyText then
@@ -7190,7 +7297,19 @@ farmTab:CreateToggle({
     callback = function(enabled)
         Farm.autoRetry = enabled == true
         Farm.session.autoRetry = Farm.autoRetry
-        if Farm.autoRetry then Farm.retryLastAttempt = -100 end
+        Farm.retryPending = false
+        Farm.retryRequestSerial = Farm.retryRequestSerial + 1
+        Farm.retryThisReward = false
+        Farm.retryAcceptedAt = nil
+        Farm.session.retryLatched = false
+        Farm.session.retryAcceptedEpoch = 0
+        Farm.retryAttempts = 0
+        if Farm.autoRetry then
+            Farm.retryLastAttempt = -100
+            Farm.retryStatus = "Auto Retry enabled; monitoring results"
+        else
+            Farm.retryStatus = "Auto Retry off"
+        end
         saveSession()
     end,
 })
@@ -7236,6 +7355,13 @@ farmTab:CreateToggle({
         if Farm.autoLeave and not old then
             Farm.session.leaveStartedAt = os.time()
             Farm.session.leaveStartMatches = Farm.session.matches
+            Farm.returningToLobby = false
+            Farm.leaveLastAttemptAt = -100
+            Farm.leaveAttempts = 0
+            Farm.leaveStatus = nil
+        elseif not Farm.autoLeave then
+            Farm.returningToLobby = false
+            Farm.leaveStatus = nil
         end
         saveSession()
     end,
@@ -7265,6 +7391,8 @@ Farm.initializeRaidsUI = function()
         activeChoice = nil, openedAt = nil, claimedAt = nil, finishAt = nil,
         lastProbe = 0, lastSnapshot = nil, pending = false,
         skippedPremium = false, runToken = 0,
+        waitingSince = nil, probePending = false, probeStartedAt = nil,
+        probeTimedOut = false, actionStartedAt = nil,
     }
     Farm.RaidChest = raid
 
@@ -7279,7 +7407,14 @@ Farm.initializeRaidsUI = function()
         raid.lastSnapshot = nil
         raid.pending = false
         raid.skippedPremium = false
+        raid.waitingSince = nil
+        raid.probePending = false
+        raid.probeStartedAt = nil
+        raid.probeTimedOut = false
+        raid.actionStartedAt = nil
     end
+
+    Farm.resetRaidChestForNewMatch = clearRun
 
     -- This is still the game's native Actor-local controller, not a direct
     -- S_Rewards request or a simulated mouse click.
@@ -7296,12 +7431,14 @@ Farm.initializeRaidsUI = function()
     local function takeAction(action, nextPhase, atField, choice)
         if raid.pending then return end
         raid.pending = true
+        raid.actionStartedAt = os.clock()
         local token = raid.runToken
         raid.lastStatus = "Calling native " .. action .. " controller"
         task.spawn(function()
             local accepted, detail = nativeCall(action, choice)
             if Farm.unloaded or token ~= raid.runToken then return end
             raid.pending = false
+            raid.actionStartedAt = nil
             if not raid.autoOpen then return end
             if not accepted then
                 raid.phase = "failed"
@@ -7332,24 +7469,59 @@ Farm.initializeRaidsUI = function()
             return false
         end
         local now = os.clock()
-        if raid.pending then return true end
-        if now - (raid.lastProbe or 0) >= 0.5 then
-            raid.lastProbe = now
-            local ok, info = nativeCall("status")
-            if ok and type(info) == "table" then
-                raid.lastSnapshot = info
-            else
-                raid.lastStatus = "Waiting for native controller: " .. tostring(info)
-                return true
+        if resultVisible and not raid.waitingSince then raid.waitingSince = now end
+        if raid.pending then
+            if now - (raid.actionStartedAt or now) <= 20 then return true end
+            raid.runToken = raid.runToken + 1
+            raid.pending = false
+            raid.phase = "failed"
+            raid.lastStatus = "Chest action timed out; Auto Retry released"
+            return false
+        end
+        if raid.probePending then
+            if now - (raid.probeStartedAt or now) > 12 then
+                -- A hung BindableFunction invoke must not spawn more probes.
+                raid.probeTimedOut = true
+                raid.phase = "failed"
+                raid.lastStatus = "Chest status timed out; Auto Retry released"
+                return false
             end
+        elseif not raid.probeTimedOut and now - (raid.lastProbe or 0) >= 0.8 then
+            raid.lastProbe = now
+            raid.probePending = true
+            raid.probeStartedAt = now
+            local token = raid.runToken
+            task.spawn(function()
+                local ok, info = nativeCall("status")
+                if Farm.unloaded or token ~= raid.runToken or raid.probeTimedOut then return end
+                raid.probePending = false
+                if ok and type(info) == "table" then
+                    raid.lastSnapshot = info
+                else
+                    raid.lastStatus = "Waiting for native controller: " .. tostring(info)
+                end
+            end)
         end
         local info = raid.lastSnapshot
-        if not info then return true end
+        if not info then
+            if raid.waitingSince and now - raid.waitingSince > 25 then
+                raid.phase = "failed"
+                raid.lastStatus = "Chest controller unavailable; Auto Retry released"
+                return false
+            end
+            -- Do not block a visible normal Rewards/Retry screen just because
+            -- the independent CHESTS controller hasn't loaded.
+            return not resultVisible
+        end
 
         if raid.phase == "idle" then
             if not info.ready then
                 raid.lastStatus = "Waiting for CHESTS controller (" .. tostring(info.state) .. ")"
-                return true
+                -- On the normal results UI, this is not an active chest
+                -- animation; do not block Auto Retry indefinitely.
+                if resultVisible and raid.waitingSince
+                    and now - raid.waitingSince >= 15 then return false end
+                return not resultVisible
             end
             if info.credit == nil then
                 raid.lastStatus = "Waiting for raid credit data"
@@ -10076,11 +10248,11 @@ Farm.initializeMatchWebhook = function()
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test (v129)"
+            title = testMode and "HollowMoonHub • Webhook Test (v135)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v129"},
+            footer = {text="HollowMoonHub • Match Tracker • v135"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
