@@ -326,7 +326,7 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v129"
+Farm.buildVersion = "v134"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
 do end
 
@@ -2863,7 +2863,7 @@ end
 function Farm:SyncFarmMode()
     if self.unloaded then return end
     local wanted = nil
-    if game.PlaceId ~= 14916516914 then
+    if game.PlaceId ~= 14916516914 and game.PlaceId ~= 13379208636 then
         local wavesActive = false
         if game.PlaceId == 14012874501 then
             if self.Waves and type(self.Waves.isActive) == "function" then
@@ -2898,7 +2898,7 @@ end
 -- broken if there is no character, no Titan nape, or a station utility owns
 -- movement. Report the actual reason rather than silently appearing idle.
 function Farm:ReportFarmMovementStatus()
-    if self.unloaded or not self.generalFarmEnabled or game.PlaceId == 14916516914 then return end
+    if self.unloaded or not self.generalFarmEnabled or game.PlaceId == 14916516914 or game.PlaceId == 13379208636 then return end
     if self.farmOwner == "waves" then return end
     local message
     local root = getPlayerRoot()
@@ -2935,7 +2935,7 @@ end
 
 -- Quiet mode watcher: the game can spawn Titans AFTER the script starts.
 -- Reconcile independently of UI and report only meaningful status changes.
-if game.PlaceId ~= 14916516914 then
+if game.PlaceId ~= 14916516914 and game.PlaceId ~= 13379208636 then
 Farm.farmModeConnection = RunService.Heartbeat:Connect(function(dt)
     if Farm.unloaded then
         if Farm.farmModeConnection then
@@ -3503,7 +3503,7 @@ Farm.fastResumeFromSaved = function()
     -- covered Outskirts and Trost, so other Raid/Mission places waited for
     -- the full Rayfield UI before their saved Auto Farm flag was restored.
     -- Town Central remains excluded, and the Waves toggle remains separate.
-    if game.PlaceId == 14916516914 then
+    if game.PlaceId == 14916516914 or game.PlaceId == 13379208636 then
         Farm.fastResumeStatus = "Town Central: no early farming"
         return
     end
@@ -5726,6 +5726,10 @@ function Farm:Unload()
     if self.RaidChest then
         self.RaidChest.autoOpen = false
     end
+    if self.MenuFamily then
+        self.MenuFamily.enabled=false
+        if self.MenuFamily.connection then self.MenuFamily.connection:Disconnect();self.MenuFamily.connection=nil end
+    end
     if self.Waves then
         if self.Waves.connection then
             self.Waves.connection:Disconnect()
@@ -5993,18 +5997,511 @@ local window = Rayfield:CreateWindow({
         autoLoad = true,
         -- Keep this name stable so v40-v51 saved settings remain compatible.
         -- Rayfield Gen2 stores flags in Rayfield/Configurations/.
-        fileName = (game.PlaceId == 14916516914)
-            and "HollowMoon_AOT_Lobby_v40"
-            or "HollowMoon_AOT_Gameplay_v110",
+        fileName = game.PlaceId == 13379208636 and "HollowMoon_AOT_Menu_v130"
+            or (game.PlaceId == 14916516914 and "HollowMoon_AOT_Lobby_v40"
+            or "HollowMoon_AOT_Gameplay_v110"),
     },
 })
 Farm.window = window
 -- v110: the place chooses which UI/controller layer is created. Town Central
 -- is a separate Roblox place; missions and raids use the gameplay interface.
+Farm.isMenuPlace = game.PlaceId == 13379208636
 Farm.isLobbyPlace = game.PlaceId == 14916516914
 Farm.isTrostPlace = game.PlaceId == 14012874501
-Farm.activeUI = Farm.isLobbyPlace and "Lobby" or (Farm.isTrostPlace and "Gameplay / Trost" or "Gameplay")
+Farm.activeUI = Farm.isMenuPlace and "Menu" or (Farm.isLobbyPlace and "Lobby" or (Farm.isTrostPlace and "Gameplay / Trost" or "Gameplay"))
 Farm.cinematicEnabled = savedPreferences ~= nil and savedPreferences.MiscAutoCinematicsV73 == true
+
+-- v134: Auto Roll stops only on selected target families, not the game's
+-- manual-roll protection prompts for Epic/other rarities.
+-- v132: Character-slot-aware main-menu Family roller. The uploaded main-menu place confirms
+-- ReplicatedStorage.Modules.Families, GET("Data","Copy") and
+-- GET("Family","Roll", "Normal"/"Lucky"). UI animation is NOT required.
+-- Only one request is ever in flight; no polling request runs every Heartbeat.
+Farm.initializeMenuUI = function()
+    if not Farm.isMenuPlace then return end
+    local state = {
+        enabled=false, busy=false, reading=false, data=nil, choice={},
+        slotChoice="Slot 1", currency="Normal", lastRead=-100, lastAttempt=-100, rolls=0,
+        lastFamily=nil, status="Loading family data", options={},
+        nameForChoice={}, rarityForName={}, nextAttemptAt=0,
+        lastText="", elapsed=0, connection=nil, watcher=nil,
+        lastReadError=nil, bridgeRequestedAt=-100, bridgeError=nil,
+    }
+    Farm.MenuFamily = state
+    local rarityOrder={"Common","Rare","Epic","Legendary","Mythic","Secret"}
+    -- Always keep the verified UPDATE 5 family names as an offline fallback.
+    -- v130 mistakenly iterated these arrays as dictionary keys, leaving the dropdown empty.
+    local known={
+        Common={"Ral","Reeves","Pikale","Munsell","Inocenio","Iglehaut","Hume","Blouse","Bozado","Boyega"},
+        Rare={"Smith","Springer","Kirstein","Grice","Azumabito","Braus","Kruger"},
+        Epic={"Tybur","Leonhart","Galliard","Finger","Braun","Arlert","Ksaver","Zoe"},
+        Legendary={"Yeager","Reiss","Ackerman"},
+        Mythic={"Fritz","Helos"}, Secret={"Shiki"},
+    }
+    local dropdown
+    local function getRemote()
+        local assets=ReplicatedStorage:FindFirstChild("Assets")
+        local remotes=assets and assets:FindFirstChild("Remotes")
+        local get=remotes and remotes:FindFirstChild("GET")
+        return get and get:IsA("RemoteFunction") and get or nil
+    end
+    -- The real main-menu Host keeps Cache.Data and Modules.Update.Current_Slot
+    -- in PlayerScripts.Actor. Data/Copy may not be available from this script VM.
+    -- Never start a second game Host; inspect its already-running Actor cache.
+    local FAMILY_BRIDGE_NAME="HollowMoonMenuFamilyDataV133"
+    local FAMILY_ACTOR_SOURCE=[==[
+local player=game:GetService("Players").LocalPlayer
+local scripts=player and player:FindFirstChild("PlayerScripts")
+local actor=scripts and scripts:FindFirstChildOfClass("Actor")
+if not actor then return end
+local bridge=actor:FindFirstChild("HollowMoonMenuFamilyDataV133")
+if bridge and not bridge:IsA("BindableFunction") then bridge:Destroy();bridge=nil end
+if not bridge then
+    bridge=Instance.new("BindableFunction")
+    bridge.Name="HollowMoonMenuFamilyDataV133"
+    bridge.Parent=actor
+end
+local liveHost,lastScan=nil,-100
+local function validHost(obj)
+    if type(obj)~="table" then return false end
+    local cache=rawget(obj,"Cache")
+    local modules=rawget(obj,"Modules")
+    return type(cache)=="table" and cache.Player==player
+        and type(cache.Data)=="table" and type(cache.Data.Slots)=="table"
+        and type(modules)=="table" and type(modules.Update)=="table"
+end
+local function locateHost()
+    if validHost(liveHost) then return liveHost end
+    liveHost=nil
+    if os.clock()-lastScan<0.8 then return nil end
+    lastScan=os.clock()
+    if type(getgc)~="function" then return nil end
+    local ok,objects=pcall(getgc,true)
+    if not ok or type(objects)~="table" then ok,objects=pcall(getgc) end
+    if not ok or type(objects)~="table" then return nil end
+    for _,item in pairs(objects) do
+        if validHost(item) then liveHost=item;return item end
+    end
+    return nil
+end
+bridge.OnInvoke=function(command)
+    if command~="snapshot" then return nil,"Unsupported menu command" end
+    local host=locateHost()
+    if not host then return nil,"Live menu Host not initialized" end
+    local data=host.Cache.Data
+    local current=host.Modules.Update.Current_Slot or player:GetAttribute("Slot")
+        or data.Current_Slot
+    local snap={Current_Slot=current,Slots={},Spins={},Roll_Protection={}}
+    for _,key in ipairs({"A","B","C"}) do
+        local record=data.Slots[key]
+        if type(record)=="table" and type(record.Avatar)=="table" then
+            snap.Slots[key]={Avatar={Family=record.Avatar.Family,
+                Pity=record.Avatar.Pity}}
+        end
+    end
+    for _,kind in ipairs({"Normal","Lucky"}) do
+        local spins=data.Spins and data.Spins[kind]
+        if type(spins)=="table" then
+            snap.Spins[kind]={Amount=tonumber(spins.Amount) or 0,
+                Free=tonumber(spins.Free) or 0}
+        end
+    end
+    if type(data.Roll_Protection)=="table" then
+        for rarity,on in pairs(data.Roll_Protection) do
+            if type(rarity)=="string" and type(on)=="boolean" then
+                snap.Roll_Protection[rarity]=on
+            end
+        end
+    end
+    return snap,nil
+end
+]==]
+    local function getFamilyBridge()
+        local scripts=LocalPlayer:FindFirstChild("PlayerScripts")
+        local actor=scripts and scripts:FindFirstChildOfClass("Actor")
+        if not actor then return nil,"PlayerScripts.Actor unavailable" end
+        local bridge=actor:FindFirstChild(FAMILY_BRIDGE_NAME)
+        if bridge and bridge:IsA("BindableFunction") then return bridge end
+        if os.clock()-state.bridgeRequestedAt<2 then
+            return nil,"Menu data bridge initializing"
+        end
+        local runner=type(run_on_actor)=="function" and run_on_actor or ENV.run_on_actor
+        if type(runner)~="function" then return nil,"Actor access unavailable" end
+        state.bridgeRequestedAt=os.clock()
+        local ok,err=pcall(runner,actor,FAMILY_ACTOR_SOURCE)
+        if not ok then return nil,"Menu Actor setup failed: "..tostring(err) end
+        for _=1,8 do
+            local ready=actor:FindFirstChild(FAMILY_BRIDGE_NAME)
+            if ready and ready:IsA("BindableFunction") then return ready end
+            task.wait(0.04)
+        end
+        return nil,"Menu data bridge not ready"
+    end
+    local function actorSnapshot()
+        local bridge,err=getFamilyBridge()
+        if not bridge then return nil,err end
+        local ok,data,reason=pcall(function() return bridge:Invoke("snapshot") end)
+        if not ok then return nil,"Menu Actor read failed: "..tostring(data) end
+        if type(data)=="table" and type(data.Slots)=="table" then
+            return data,nil
+        end
+        return nil,reason or "Menu Actor data not ready"
+    end
+    local function formatNumber(value)
+        if type(value)~="number" then return "?" end
+        local s=tostring(math.floor(math.max(0,value)))
+        return s:reverse():gsub("(%d%d%d)","%1,"):reverse():gsub("^,","")
+    end
+    local function selectedNames(value)
+        local names={}
+        if type(value)~="table" then value={value} end
+        for key,v in pairs(value) do
+            local choice
+            if type(key)=="number" then choice=v
+            elseif v==true then choice=key end
+            if type(choice)=="string" then
+                local name=state.nameForChoice[choice] or choice
+                if state.rarityForName[name] then names[name]=true end
+            end
+        end
+        return names
+    end
+    local function selectedCount()
+        local n=0
+        for _ in pairs(selectedNames(state.choice)) do n=n+1 end
+        return n
+    end
+    local function populateFamilies()
+        local listed={}
+        for rarity,group in pairs(known) do
+            listed[rarity]={}
+            for _,name in ipairs(group) do listed[rarity][name]=true end
+        end
+        local modules=ReplicatedStorage:FindFirstChild("Modules")
+        local assets=ReplicatedStorage:FindFirstChild("Assets")
+        if not modules then modules=assets and assets:FindFirstChild("Modules") end
+        local module=modules and modules:FindFirstChild("Families")
+        if module and module:IsA("ModuleScript") then
+            local ok,definitions=pcall(require,module)
+            if ok and type(definitions)=="table" then
+                -- Accept either keyed game definitions or list-shaped definitions.
+                for rarity,group in pairs(definitions) do
+                    if type(rarity)=="string" and type(group)=="table" then
+                        listed[rarity]=listed[rarity] or {}
+                        for key,value in pairs(group) do
+                            local name=type(key)=="string" and key or (type(value)=="string" and value or nil)
+                            if name then listed[rarity][name]=true end
+                        end
+                    end
+                end
+            end
+        end
+        local options,names,rarities={},{},{}
+        for _,rarity in ipairs(rarityOrder) do
+            local group=listed[rarity]
+            if type(group)=="table" then
+                local entries={}
+                for name in pairs(group) do entries[#entries+1]=name end
+                table.sort(entries)
+                for _,name in ipairs(entries) do
+                    local label=name.." ("..rarity..")"
+                    options[#options+1]=label
+                    names[label]=name
+                    rarities[name]=rarity
+                end
+            end
+        end
+        state.options,state.nameForChoice,state.rarityForName=options,names,rarities
+        if dropdown then pcall(function() dropdown:Refresh(options) end) end
+    end
+    populateFamilies()
+    local function menuFamilyFromUI()
+        local gui=LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local interface=gui and gui:FindFirstChild("Interface")
+        local custom=interface and interface:FindFirstChild("Customisation")
+        local family=custom and custom:FindFirstChild("Family")
+        if not family then return nil end
+        -- UI hierarchy: Customisation.Family.Family.Title, not
+        -- Customisation.Family.Title (which does not exist in UPDATE 5).
+        local inner=family:FindFirstChild("Family")
+        local title=(inner and inner:FindFirstChild("Title"))
+            or family:FindFirstChild("Title")
+        local label
+        if title and (title:IsA("TextLabel") or title:IsA("TextButton")) then
+            label=title.Text
+        elseif title then
+            local nested=title:FindFirstChildWhichIsA("TextLabel",true)
+            if nested then label=nested.Text end
+        end
+        if type(label)~="string" then return nil end
+        local lowered=label:lower()
+        for name in pairs(state.rarityForName) do
+            if lowered:match("^%s*"..name:lower().."%f[%W]") or lowered:match("^%s*"..name:lower().."%s*$") then
+                return name
+            end
+        end
+        return nil
+    end
+    local function menuSpinsFromUI()
+        -- Display-only fallback. Never spend rolls using an unverified GUI number.
+        local gui=LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local interface=gui and gui:FindFirstChild("Interface")
+        local custom=interface and interface:FindFirstChild("Customisation")
+        local family=custom and custom:FindFirstChild("Family")
+        local buttons=family and family:FindFirstChild("Buttons")
+        local roll=buttons and buttons:FindFirstChild("Roll")
+        local label=roll and roll:FindFirstChild("Title")
+        local raw=label and (label:IsA("TextLabel") or label:IsA("TextButton")) and label.Text or nil
+        if type(raw)~="string" then return nil end
+        local digits=raw:match("[Rr][Oo][Ll][Ll]%s*%(([%d,]+)%)")
+        return digits and tonumber((digits:gsub(",",""))) or nil
+    end
+    -- The menu's character slots are keyed A/B/C. Rayfield displays 1/2/3.
+    -- A slot selection is a VIEW selection. The game decides the active slot;
+    -- never silently spend spins on a different one.
+    local slotKeys={ ["Slot 1"]="A",["Slot 2"]="B",["Slot 3"]="C" }
+    local slotIndex={ A=1,B=2,C=3 }
+    local function normalizeSlot(raw)
+        if type(raw)=="number" then return ({"A","B","C"})[raw] end
+        if type(raw)~="string" then return nil end
+        local up=raw:upper()
+        if up=="A" or up=="B" or up=="C" then return up end
+        if up=="1" or up=="SLOT 1" then return "A" end
+        if up=="2" or up=="SLOT 2" then return "B" end
+        if up=="3" or up=="SLOT 3" then return "C" end
+        return nil
+    end
+    local function slotRecord(data,key)
+        if type(data)~="table" or type(data.Slots)~="table" then return nil end
+        local idx=slotIndex[key]
+        local record=data.Slots[key] or data.Slots[string.lower(key)]
+            or (idx and data.Slots[idx]) or (idx and data.Slots[tostring(idx)])
+        return type(record)=="table" and type(record.Avatar)=="table" and record or nil
+    end
+    local function selectedSlot()
+        local key=slotKeys[state.slotChoice] or "A"
+        return key,slotRecord(state.data,key)
+    end
+    local function activeSlot(data,shownFamily)
+        local raw=LocalPlayer:GetAttribute("Slot")
+        local key=normalizeSlot(raw)
+        if key and slotRecord(data,key) then return key end
+        key=normalizeSlot(type(data)=="table" and data.Current_Slot or nil)
+        if key and slotRecord(data,key) then return key end
+        -- The menu may store Current_Slot in a private client controller.
+        -- A uniquely matching displayed family can identify the active slot.
+        if type(shownFamily)=="string" then
+            local match,count=nil,0
+            for _,candidate in ipairs({"A","B","C"}) do
+                local rec=slotRecord(data,candidate)
+                if rec and rec.Avatar.Family==shownFamily then
+                    match=candidate;count=count+1
+                end
+            end
+            if count==1 then return match end
+        end
+        return nil
+    end
+    local function balances(data,kind)
+        if type(data)~="table" or type(data.Spins)~="table" then return nil,nil end
+        local item=data.Spins[kind]
+        if type(item)~="table" then return nil,nil end
+        return math.max(0,tonumber(item.Amount) or 0),math.max(0,tonumber(item.Free) or 0)
+    end
+    local function updateWatcher()
+        local visible=menuFamilyFromUI()
+        local key,slot=selectedSlot()
+        local active=activeSlot(state.data,visible)
+        local name=slot and slot.Avatar and slot.Avatar.Family
+        local fromScreen=false
+        -- Display the actual Family page title even before Data.Copy/Actor
+        -- is ready. Label it as *unverified* rather than assigning it to the
+        -- selected character slot and accidentally rolling the wrong one.
+        if not name and visible then name=visible;fromScreen=true end
+        local rarity=state.rarityForName[tostring(name)]
+        local normal,normalFree=balances(state.data,"Normal")
+        local lucky,luckyFree=balances(state.data,"Lucky")
+        if normal==nil and state.currency=="Normal" then normal=menuSpinsFromUI();normalFree=0 end
+        if lucky==nil and state.currency=="Lucky" then lucky=menuSpinsFromUI();luckyFree=0 end
+        local suffix=active==key and " (active)" or (active and " (active: Slot "..slotIndex[active]..")" or " (active slot unverified)")
+        local text=string.format(
+            "%s%s\nCurrent Family: %s%s\nNormal Spins: %s | Lucky Spins: %s\nTargets: %d | Rolls: %d | %s",
+            state.slotChoice,suffix,
+            tostring(name or "Waiting for family"),
+            (rarity and " ("..rarity..")" or "")
+                ..(fromScreen and " [game screen; slot unverified]" or ""),
+            formatNumber(normal and normal+(normalFree or 0)),
+            formatNumber(lucky and lucky+(luckyFree or 0)),
+            selectedCount(),state.rolls,tostring(state.status))
+        if text~=state.lastText and state.watcher then
+            state.lastText=text
+            pcall(function() state.watcher:Set(text) end)
+        end
+    end
+    local function stop(message)
+        state.enabled=false
+        state.status=message
+        task.defer(function()
+            if not Farm.unloaded and Farm.MenuFamily==state then
+                pcall(function() window:Set("MenuAutoRollFamilyV130",false) end)
+                state.status=message
+                updateWatcher()
+            end
+        end)
+    end
+    local function readData()
+        if state.reading then return end
+        state.reading=true
+        -- Main-menu player data belongs to the live Actor Host. Prefer its
+        -- already-initialized cache; ordinary GET Data/Copy is a fallback.
+        local data,reason=actorSnapshot()
+        if not data then
+            local get=getRemote()
+            if get then
+                local ok,result=pcall(function()
+                    return get:InvokeServer("Data","Copy")
+                end)
+                if ok and type(result)=="table"
+                    and type(result.Slots)=="table" then
+                    data=result
+                end
+            end
+        end
+        state.reading=false
+        state.lastRead=os.clock()
+        if data and type(data.Slots)=="table" then
+            state.data=data
+            state.lastReadError=nil
+            if not state.enabled then state.status="Ready" end
+        else
+            state.lastReadError=reason or "Menu data not ready"
+            if not state.enabled then
+                state.status=menuFamilyFromUI()
+                    and "Family visible; waiting for verified slot data"
+                    or "Waiting for menu player data"
+            end
+        end
+        updateWatcher()
+    end
+    local function rollOnce()
+        if Farm.unloaded or not state.enabled then return end
+        if selectedCount()==0 then return stop("Select a target family") end
+        local data=state.data
+        local visible=menuFamilyFromUI()
+        local selectedKey,record=selectedSlot()
+        if not record then
+            return stop(state.slotChoice.." unavailable; check character unlock")
+        end
+        local active=activeSlot(data,visible)
+        if not active then
+            return stop("Active slot unverified; select the character in-game")
+        end
+        if active~=selectedKey then
+            return stop(state.slotChoice.." is not active; select it in-game first")
+        end
+        local current=tostring(record.Avatar.Family or "")
+        if current=="" then state.status="Waiting for family data";return end
+        local wanted=selectedNames(state.choice)
+        if wanted[current] then return stop("Target reached: "..current) end
+        -- The game's Roll_Protection setting controls its manual confirmation
+        -- prompt; it is not a Family target selection. In Auto Roll, only
+        -- user-selected family names should stop further spins. Keep the
+        -- slot, balance, request-result, and target checks below/above.
+        local amount,free=balances(data,state.currency)
+        if amount==nil then state.status="Waiting for verified spin balance";return end
+        if amount+free<1 then return stop("Out of "..state.currency.." spins") end
+        local get=getRemote()
+        if not get then state.status="GET remote unavailable";return end
+        state.status="Rolling ("..state.currency..")"
+        local ok,newSpins,newFamily,newPity,rollTrail,spinLuck=pcall(function()
+            return get:InvokeServer("Family","Roll",state.currency)
+        end)
+        if not ok or type(newFamily)~="string" or type(newSpins)~="table" then
+            return stop("Roll unconfirmed; stopped to protect spins")
+        end
+        if Farm.unloaded then return end
+        data.Spins=newSpins
+        record.Avatar.Family=newFamily
+        if type(newPity)=="table" then record.Avatar.Pity=newPity end
+        if spinLuck~=nil then data.Spin_Luck=spinLuck end
+        state.rolls=state.rolls+1
+        state.lastFamily=newFamily
+        state.status="Rolled "..newFamily
+        if wanted[newFamily] then return stop("Target reached: "..newFamily) end
+    end
+    window:CreateSection({name="MENU"})
+    local tab=window:CreateTab({name="Family"})
+    tab:CreateSection({name="Family Roller"})
+    state.watcher=tab:CreateText({name="Family Status",text="Reading selected family and spins..."})
+    tab:CreateDropdown({
+        name="Character Slot",options={"Slot 1","Slot 2","Slot 3"},
+        value="Slot 1",flag="MenuCharacterSlotV132",
+        callback=function(v)
+            local selected=type(v)=="table" and v[1] or v
+            if not slotKeys[selected] then selected="Slot 1" end
+            if state.enabled then stop("Slot changed; Auto Roll paused") end
+            state.slotChoice=selected
+            state.lastRead=-100
+            updateWatcher()
+        end,
+    })
+    dropdown=tab:CreateDropdown({
+        name="Target Families",options=state.options,multiSelect=true,
+        value={},flag="MenuFamilyTargetsV130",
+        callback=function(v)
+            state.choice=v
+            if state.enabled then state.status="Targets updated" end
+            updateWatcher()
+        end,
+    })
+    tab:CreateDropdown({
+        name="Spin Type",options={"Normal","Lucky"},value="Normal",
+        flag="MenuFamilyCurrencyV130",
+        callback=function(v)
+            state.currency=type(v)=="table" and v[1] or v
+            if state.currency~="Lucky" then state.currency="Normal" end
+            updateWatcher()
+        end,
+    })
+    tab:CreateToggle({
+        name="Auto Roll Family",value=false,flag="MenuAutoRollFamilyV130",
+        callback=function(v)
+            state.enabled=v==true
+            if state.enabled then
+                state.status="Checking family and spins"
+                state.data=nil;state.lastRead=-100;state.nextAttemptAt=0
+            else
+                state.status="Paused"
+            end
+            updateWatcher()
+        end,
+    })
+    state.connection=RunService.Heartbeat:Connect(function(dt)
+        if Farm.unloaded then return end
+        state.elapsed=state.elapsed+dt
+        if state.elapsed<0.12 then return end
+        state.elapsed=state.elapsed%0.12
+        local now=os.clock()
+        if not state.busy and not state.reading and
+            (state.data==nil and now-state.lastRead>=1.0
+             or not state.enabled and now-state.lastRead>=2.0) then
+            task.spawn(readData)
+        elseif state.enabled and state.data and not state.busy and not state.reading
+            and now>=state.nextAttemptAt then
+            state.busy=true
+            task.spawn(function()
+                local ok=pcall(rollOnce)
+                if not ok then stop("Roll error; stopped") end
+                state.busy=false
+                state.nextAttemptAt=os.clock()+0.16
+                updateWatcher()
+            end)
+        end
+        updateWatcher()
+    end)
+    task.defer(readData)
+    updateWatcher()
+end
 
 Farm.initializeLobbyUI = function()
 window:CreateSection({name="LOBBY"})
@@ -6406,6 +6903,8 @@ equipmentTab:CreateToggle({name="Auto Craft Perks at 100%",value=false,
 Farm.miscTab=window:CreateTab({name="Misc"})
 end
 if Farm.isLobbyPlace then Farm.initializeLobbyUI() end
+if Farm.isMenuPlace then Farm.initializeMenuUI() end
+Farm.initializeMenuUI=nil
 Farm.initializeLobbyUI = nil
 
 Farm.initializeCombatUI = function()
@@ -6751,7 +7250,7 @@ farmTab:CreateButton({
 })
 
 end
-if not Farm.isLobbyPlace then Farm.initializeCombatUI() end
+if not Farm.isLobbyPlace and not Farm.isMenuPlace then Farm.initializeCombatUI() end
 Farm.initializeCombatUI = nil
 
 -- v120: Multi-select Raid CHESTS workflow (Free, Premium, or both).
@@ -6759,7 +7258,7 @@ Farm.initializeCombatUI = nil
 -- allow its animation to complete, and only then call native Chests.Finish.
 -- If Premium is selected without a key, skip it and FINISH normally.
 Farm.initializeRaidsUI = function()
-    if Farm.isLobbyPlace then return end
+    if Farm.isLobbyPlace or Farm.isMenuPlace then return end
     local raid = {
         choices = {Free = true, Premium = false},
         autoOpen = false, phase = "idle", lastStatus = "Waiting for Raid chests",
@@ -6984,6 +7483,7 @@ Farm.initializeRaidsUI = nil
 -- V73: Trost Waves / Misc controls. Scoped inside a function to avoid the
 -- 200-main-local limit seen in v67. No guessed server action names are sent.
 Farm.initializeWavesAndMisc = function()
+    if Farm.isMenuPlace then return end
     local W = {
         running=true, busy=false, status="Waiting for data", lastAction="None",
         flags={farm=false,start=false,skip=false,crate=false,heal=false,base=false,equip=false,blessing=false,leave=false},
@@ -9861,6 +10361,7 @@ settingsTab:CreateButton({
 -- top-level otherwise fails compilation before the UI can load.
 Farm.initializePreferences = function()
 local ALL_SETTING_FLAGS = {
+    "MenuCharacterSlotV132", "MenuFamilyTargetsV130", "MenuFamilyCurrencyV130", "MenuAutoRollFamilyV130",
     "LobbyMode", "LobbyMap", "LobbyObjective", "LobbyModifiersV52", "LobbyDifficulty",
     "LobbyJoinDelay", "LobbyAutoJoin", "EquipWeaponChoice", "AutoEquipWeaponV42",
     "AutoUpgradeWeaponV42", "EquipSkillDirection", "EquipSkillBranch",
@@ -9898,6 +10399,7 @@ local ALL_SETTING_FLAGS = {
 }
 -- Restore dependencies first; enable potentially active automation last.
 local RESTORE_FIRST = {
+    "MenuCharacterSlotV132", "MenuFamilyTargetsV130", "MenuFamilyCurrencyV130",
     "LobbyMode", "LobbyMap", "LobbyObjective", "LobbyModifiersV52", "LobbyDifficulty",
     "LobbyJoinDelay", "EquipWeaponChoice", "EquipSkillDirection", "EquipSkillBranch",
     "EquipPerkSlotV42", "EquipPerkChoiceV42", "EquipArtifactFocusV42",
@@ -9978,7 +10480,7 @@ local function commitPreferences(reason)
     local values = capturePreferenceValues()
     local count = 0
     for _flag, _value in pairs(values) do count = count + 1 end
-    if count < 8 then
+    if count < (Farm.isMenuPlace and 3 or 8) then
         return false, "Only " .. tostring(count) .. " settings were readable; refusing to overwrite the shared backup"
     end
     local okRayfield, rayfieldError = pcall(function() window:Save() end)
@@ -10164,9 +10666,11 @@ setupSettingsListeners()
 task.defer(function()
     if Farm.autoExecute and not Farm.queuedAutoExecute then syncAutoExecute() end
 end)
-Farm.sessionMonitor = RunService.Heartbeat:Connect(sessionHeartbeat)
+if not Farm.isMenuPlace then
+    Farm.sessionMonitor = RunService.Heartbeat:Connect(sessionHeartbeat)
+end
 if Farm.isLobbyPlace then
     Equip.watcher = RunService.Heartbeat:Connect(equipmentHeartbeat)
 end
 saveSession()
-window:Navigate(Farm.isLobbyPlace and "Lobby" or "Combat")
+window:Navigate(Farm.isMenuPlace and "Family" or (Farm.isLobbyPlace and "Lobby" or "Combat"))
