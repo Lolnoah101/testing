@@ -1,6 +1,6 @@
 --[[
-    HollowMoonHub v135 | Attack on Titan: Revolution (Outskirts)
-    Lobby v129: Shadow Ban Status webhook reporting (verified-flag only); Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, freeze safely in midair only while waiting for the last protected Titan.
+    HollowMoonHub v137 | Attack on Titan: Revolution (Outskirts)
+    Lobby v129: Shadow Ban Status webhook reporting (verified-flag only); Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, follow the final Titan overhead with a bounded solo hold deadline.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
     Resume after the attack using an eased height correction.
@@ -272,6 +272,17 @@ local Farm = {
     lastTitanAirRoot = nil,
     lastTitanAirAttachment = nil,
     lastTitanAirAlign = nil,
+    -- Independent upper bound for a solo-Titan hold. The results snapshot is
+    -- not a live clock; never wait indefinitely for it to advance.
+    lastTitanSoloTarget = nil,
+    lastTitanSoloDeadline = nil,
+    lastTitanSoloDeadlineLocal = nil,
+    lastTitanSoloSince = nil,
+    lastTitanSoloReleased = false,
+    lastTitanHoldFarSince = nil,
+    lastTitanHoldRepositionAt = -100,
+    lastMovementHeartbeatAt = 0,
+    lastMovementHeartbeatError = nil,
     matchJobId = tostring(game.JobId),
     matchPlaceId = game.PlaceId,
     matchStartedLocal = previousClock and previousClock.startedAt or os.clock(),
@@ -326,7 +337,7 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v135"
+Farm.buildVersion = "v137"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
 do end
 
@@ -470,6 +481,11 @@ local function resetMatchTimer()
     Farm.matchServerLastAdvanceAt = nil
     Farm.matchServerActive = false
     Farm.lastTitanReserved = nil
+    Farm.lastTitanSoloTarget = nil
+    Farm.lastTitanSoloDeadline = nil
+    Farm.lastTitanSoloDeadlineLocal = nil
+    Farm.lastTitanSoloSince = nil
+    Farm.lastTitanSoloReleased = false
 end
 
 local function cancelTween()
@@ -717,17 +733,52 @@ local function getLivingTitans()
     return alive
 end
 
+-- A finished game may expose a static Workspace.Seconds snapshot; that value
+-- is deliberately not used as a live clock. For one remaining Titan we keep
+-- a separate monotonic deadline so the protected hold cannot run for hours.
+function Farm:ResetSoloHoldDeadline()
+    Farm.lastTitanSoloTarget = nil
+    Farm.lastTitanSoloDeadline = nil
+    Farm.lastTitanSoloDeadlineLocal = nil
+    Farm.lastTitanSoloSince = nil
+    Farm.lastTitanSoloReleased = false
+    Farm.lastTitanHoldFarSince = nil
+end
+
 local function getReservedLastTitan()
     if not Farm.lastTitanEnabled then
         Farm.lastTitanReserved = nil
+        Farm:ResetSoloHoldDeadline()
         return nil
     end
     local elapsed = getMatchElapsed()
-    if elapsed >= Farm.lastTitanAtSeconds then
+    local alive = getLivingTitans()
+    if #alive ~= 1 then
+        -- A new round / wave changes the target population, resetting the
+        -- independent solo timer; a momentary missing Nape won't extend a
+        -- prior clock because its stable target is still tracked below.
+        if #alive > 1 then Farm:ResetSoloHoldDeadline() end
+    else
+        local sole = alive[1]
+        if Farm.lastTitanSoloTarget ~= sole then
+            Farm.lastTitanSoloTarget = sole
+            Farm.lastTitanSoloSince = Farm.clockNow()
+            -- The match clock can be stale or marked Results even while a
+            -- Titan is alive. The solo hold has its own bounded wall-time.
+            local remaining = math.max(0, Farm.lastTitanAtSeconds - elapsed) + 4
+            Farm.lastTitanSoloDeadline = Farm.lastTitanSoloSince + remaining
+            Farm.lastTitanSoloDeadlineLocal = os.clock() + remaining
+            Farm.lastTitanSoloReleased = false
+        end
+        if Farm.clockNow() >= (Farm.lastTitanSoloDeadline or math.huge)
+            or os.clock() >= (Farm.lastTitanSoloDeadlineLocal or math.huge) then
+            Farm.lastTitanSoloReleased = true
+        end
+    end
+    if elapsed >= Farm.lastTitanAtSeconds or Farm.lastTitanSoloReleased then
         Farm.lastTitanReserved = nil
         return nil
     end
-    local alive = getLivingTitans()
     if #alive == 0 then
         Farm.lastTitanReserved = nil
         return nil
@@ -763,6 +814,7 @@ local function releaseLastTitanWaitFreeze()
     Farm.lastTitanAirRoot = nil
     Farm.lastTitanAirPosition = nil
     Farm.lastTitanAirOrbitStartedAt = nil
+    Farm.lastTitanHoldFarSince = nil
     Farm.waitingFreezeActive = false
     Farm.waitingFreezeRoot = nil
     if align then pcall(function() align:Destroy() end) end
@@ -794,10 +846,14 @@ local function updateLastTitanWaitFreeze()
         releaseLastTitanWaitFreeze()
         return false
     end
-    -- Complete an in-flight slash before taking over player movement.
-    if Farm.attacking or Farm.frozenRoot or Farm.skillReservation then
-        releaseLastTitanWaitFreeze()
-        return false
+    -- Keep following the last Titan while an ordinary skill or slash is
+    -- being processed; neither is a reason to lose movement ownership.
+    -- If an older swing option actually anchored the root, retain an
+    -- existing hold and let the normal swing cleanup unanchor it first.
+    if Farm.frozenRoot and root.Anchored then
+        return Farm.waitingFreezeActive and Farm.waitingFreezeRoot == root
+            and Farm.lastTitanAirAlign ~= nil
+            and Farm.lastTitanAirAlign.Parent == root
     end
     if not Farm.waitingFreezeActive then
         Farm.lastTitanAirOrbitStartedAt = Farm.clockNow()
@@ -1967,6 +2023,11 @@ local function requestCombatSkill()
     if Farm.skillReservation or Farm.unloaded or Farm.attacking
         or Farm.utilityBusy or Farm.bladeRecoveryActive
         or Farm.waitingFreezeActive then return end
+    if Farm.lastTitanEnabled and #getLivingTitans() == 1
+        and getReservedLastTitan() then
+        Farm.combatSkillLastMessage = "Holding final Titan for selected match time"
+        return
+    end
     if not hasAuraTarget() then
         Farm.combatSkillLastMessage = "No available Titan target"
         return
@@ -2741,10 +2802,32 @@ function Farm:UpdateLastTitanAirHold()
     else
         -- Follow a moving Titan's head at the user's selected safe height.
         self.lastTitanAirAlign.Position = goal
+        local away = (root.Position - goal).Magnitude
+        if away > 100 then
+            self.lastTitanHoldFarSince = self.lastTitanHoldFarSince or os.clock()
+            -- A genuine movement stall should not last half an hour.
+            -- One guarded recovery teleport follows the currently live target;
+            -- never teleport repeatedly each Heartbeat.
+            if os.clock() - self.lastTitanHoldFarSince > 5
+                and os.clock() - (self.lastTitanHoldRepositionAt or -100) > 15
+                and not self.attacking and not self.frozenRoot
+                and not self.skillReservation and not movementUtilityBusy() then
+                pcall(function()
+                    root.CFrame = CFrame.new(goal) * root.CFrame.Rotation
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                end)
+                self.lastTitanHoldRepositionAt = os.clock()
+                self.lastTitanHoldFarSince = nil
+            end
+        else
+            self.lastTitanHoldFarSince = nil
+        end
     end
 end
 
 local function heartbeatFarm(dt)
+    Farm.lastMovementHeartbeatAt = os.clock()
     if not Farm.running or Farm.unloaded or movementUtilityBusy() then
         releaseSkillNapeAssist()
         releaseLastTitanWaitFreeze()
@@ -2886,7 +2969,19 @@ function Farm:SyncFarmMode()
         end
     end
 
-    if wanted == self.farmOwner and (wanted == nil or self.running) then return end
+    if wanted == self.farmOwner and (wanted == nil or self.running) then
+        -- Separate from Auto Retry: restart a disconnected / stalled movement
+        -- heartbeat even when the Auto Farm toggle is still ON.
+        if wanted and self.running and (
+            not self.movementConnection or not self.movementConnection.Connected
+            or os.clock() - (self.lastMovementHeartbeatAt or 0) > 5) then
+            if self.movementConnection then self.movementConnection:Disconnect() end
+            self.movementConnection = RunService.Heartbeat:Connect(heartbeatFarm)
+            self.lastMovementHeartbeatAt = os.clock()
+            self.movementElapsed = REPATH_TIME
+        end
+        return
+    end
     if self.running or self.farmOwner ~= nil then self:Stop() end
     if wanted then
         self.farmOwner = wanted
@@ -5217,6 +5312,9 @@ local SESSION_DEFAULT = {
     autoLeave = false,
     autoLeaveMode = "After X Matches",
     autoLeaveValue = 30,
+    -- Persistent, independent stall exit. Disabled by default.
+    autoLeaveIfStuck = false,
+    stuckMinutes = 10,
     lastRewardJob = "",
     rewardLatched = false,
     retryLatched = false,
@@ -5253,6 +5351,15 @@ Farm.autoRetry = Farm.session.autoRetry == true
 Farm.autoLeave = Farm.session.autoLeave == true
 Farm.autoLeaveMode = Farm.session.autoLeaveMode
 Farm.autoLeaveValue = math.clamp(math.floor(Farm.session.autoLeaveValue), 1, 100000)
+Farm.autoLeaveIfStuck = Farm.session.autoLeaveIfStuck == true
+Farm.stuckMinutes = math.clamp(math.floor(Farm.session.stuckMinutes or 10), 1, 120)
+Farm.stuckStatus = "Off"
+Farm.stuckLastProgressAt = nil
+Farm.stuckPrevTitanCount = nil
+Farm.stuckHealth = setmetatable({}, {__mode="k"})
+Farm.stuckTriggered = false
+Farm.stuckTickAt = -100
+Farm.stuckStatusText = nil
 -- v135: Acknowledged requests are not proof that a new match/teleport started.
 -- Keep all watchdog state on Farm, avoiding new top-level Luau registers.
 Farm.retryPending = false
@@ -5326,11 +5433,16 @@ end
 -- The Outskirts client calls Host:Send("Functions", "Teleport"), which sends
 -- POST:FireServer("Functions", "Teleport"). Never disconnect the player here.
 -- Native Results/Leave request. A sent request is not a confirmed teleport.
-local function stopAndLeaveGame(reason)
-    if Farm.unloaded or not Farm.autoLeave then return false end
+local function stopAndLeaveGame(reason, fromStuckWatchdog)
+    -- The optional stuck exit does not depend on the normal Auto Leave toggle.
+    if Farm.unloaded or not (Farm.autoLeave or (fromStuckWatchdog and Farm.autoLeaveIfStuck)) then
+        return false
+    end
     if game.PlaceId == LOBBY_PLACE_ID then
-        Farm.autoLeave = false
-        Farm.session.autoLeave = false
+        if not fromStuckWatchdog then
+            Farm.autoLeave = false
+            Farm.session.autoLeave = false
+        end
         Farm.returningToLobby = false
         saveSession()
         return true
@@ -5504,6 +5616,7 @@ local function handleResultScreen()
                 Farm.matchServerLastAdvanceAt = nil
                 Farm.matchServerActive = false
                 Farm.lastTitanReserved = nil
+                Farm:ResetSoloHoldDeadline()
                 releaseLastTitanWaitFreeze()
             end
         end
@@ -5732,6 +5845,102 @@ local function scheduleLobbyJoin()
     end
 end
 
+-- v137: Observe real match progress rather than merely attack input or movement.
+-- Swings/skills can continue forever when the character is far from its target;
+-- those attempts must not reset this timeout. Health decreases and Titan-count
+-- changes do reset it. An intentional timed last-Titan hold is exempt until its
+-- independent deadline releases. Only native lobby-return requests are used.
+function Farm:ResetStuckWatchdog(status)
+    self.stuckLastProgressAt = os.clock()
+    self.stuckPrevTitanCount = nil
+    self.stuckHealth = setmetatable({}, {__mode="k"})
+    self.stuckTriggered = false
+    self.stuckStatus = status or "Monitoring gameplay"
+end
+
+function Farm:UpdateStuckWatchdog(now)
+    if now - (self.stuckTickAt or -100) < 2 then return end
+    self.stuckTickAt = now
+    if not self.autoLeaveIfStuck then
+        if self.stuckLastProgressAt then self:ResetStuckWatchdog("Off") end
+        self.stuckStatus = "Off"
+        return
+    end
+    if self.isLobbyPlace or self.isMenuPlace then
+        self:ResetStuckWatchdog("Inactive outside gameplay")
+        return
+    end
+    -- If an exit already timed out without teleporting, keep retrying the
+    -- official leave action with stopAndLeaveGame's existing backoff.
+    if self.stuckTriggered then
+        self.stuckStatus = "Stuck detected; awaiting lobby transfer (attempt "
+            .. tostring(self.leaveAttempts or 0) .. ")"
+        if not self.returningToLobby then
+            stopAndLeaveGame("No mission progress", true)
+        end
+        return
+    end
+    -- The player may intentionally turn Auto Farm off to explore the map.
+    -- If the saved farm toggle is on but its movement controller failed to
+    -- initialize, still monitor that situation rather than silently exiting.
+    local expectedFarm = self.running
+        or (self.isTrostPlace and self.waveFarmEnabled)
+        or (not self.isTrostPlace and self.generalFarmEnabled)
+    if not expectedFarm then
+        self:ResetStuckWatchdog("Waiting for Auto Farm")
+        return
+    end
+    -- Results, cutscenes, and raid chest animations are not farming stalls.
+    local resultsVisible = isResultsVisible()
+    local raid = self.RaidChest
+    local raidAnimating = raid and (raid.phase == "opening"
+        or raid.phase == "verify_open" or raid.phase == "animation"
+        or raid.phase == "finishing" or raid.phase == "verify_finish")
+    if resultsVisible or self.timerSawResults or raidAnimating then
+        self:ResetStuckWatchdog("Results / rewards in progress")
+        return
+    end
+    -- Do not count intentional last-Titan protection as inactivity. The
+    -- v136 solo deadline has its own bound; once released, monitoring resumes.
+    if self.lastTitanEnabled and self.lastTitanSoloTarget
+        and not self.lastTitanSoloReleased
+        and (os.clock() < (self.lastTitanSoloDeadlineLocal or -1)) then
+        self:ResetStuckWatchdog("Waiting for selected last-Titan time")
+        return
+    end
+    local targets = self:GetFarmTargetModels()
+    local alive = 0
+    local progressed = false
+    for _, model in ipairs(targets) do
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health > 0 then
+            alive = alive + 1
+            local before = self.stuckHealth[hum]
+            if type(before)=="number" and hum.Health < before - 0.05 then
+                progressed = true
+            end
+            self.stuckHealth[hum] = hum.Health
+        end
+    end
+    if self.stuckPrevTitanCount == nil or alive ~= self.stuckPrevTitanCount then
+        progressed = true
+    end
+    self.stuckPrevTitanCount = alive
+    if progressed or not self.stuckLastProgressAt then
+        self.stuckLastProgressAt = now
+    end
+    local silentFor = math.max(0, now - self.stuckLastProgressAt)
+    local threshold = self.stuckMinutes * 60
+    if silentFor < threshold then
+        self.stuckStatus = string.format("No progress %s / %s | Titans %d",
+            formatTime(silentFor), formatTime(threshold), alive)
+        return
+    end
+    self.stuckTriggered = true
+    self.stuckStatus = string.format("No progress for %s; requesting lobby", formatTime(silentFor))
+    stopAndLeaveGame("No gameplay progress for " .. tostring(self.stuckMinutes) .. " minutes", true)
+end
+
 local function sessionHeartbeat(dt)
     Farm.sessionMonitorElapsed = Farm.sessionMonitorElapsed + dt
     if Farm.sessionMonitorElapsed < 0.5 then return end
@@ -5743,6 +5952,10 @@ local function sessionHeartbeat(dt)
         Farm.returningToLobby = false
         Farm.leaveStatus = "Lobby transfer not confirmed; will retry exit after cooldown"
     end
+    -- Keep the existing result/retry Heartbeat alive even when a streamed
+    -- character or Titan disappears during a watchdog scan.
+    local watchOk = pcall(function() Farm:UpdateStuckWatchdog(now) end)
+    if not watchOk then Farm.stuckStatus = "Waiting for replicated game data" end
     if not Farm.returningToLobby then
         handleResultScreen()
         -- Raid chest popups may be separate from the normal Rewards panel.
@@ -5800,6 +6013,9 @@ local function sessionHeartbeat(dt)
                 Farm.autoRetry and (Farm.retryStatus or "On") or "Off",
                 Farm.retryAttempts > 0 and (" | Attempts: " .. Farm.retryAttempts) or ""))
         end)
+    end
+    if Farm.stuckStatusText then
+        pcall(function() Farm.stuckStatusText:Set(Farm.stuckStatus or "Waiting") end)
     end
     if Farm.lobbyText then
         pcall(function()
@@ -7135,6 +7351,7 @@ farmTab:CreateInput({
             Farm.lastTitanAtSeconds = parsed
             Farm.lastTitanAtText = formatTime(parsed)
             Farm.lastTitanReserved = nil
+            Farm:ResetSoloHoldDeadline()
             if getMatchElapsed() >= parsed then releaseLastTitanWaitFreeze() end
             do end
         else
@@ -7150,6 +7367,7 @@ farmTab:CreateToggle({
     callback = function(enabled)
         Farm.lastTitanEnabled = enabled == true
         Farm.lastTitanReserved = nil
+        Farm:ResetSoloHoldDeadline()
         if not Farm.lastTitanEnabled then
             releaseLastTitanWaitFreeze()
         end
@@ -7211,6 +7429,22 @@ Farm.timerStatusConnection = RunService.Heartbeat:Connect(function(dt)
     local snapshot = Farm.matchServerSecondsLast
     if not Farm.timerSawResults and type(snapshot) == "number" and snapshot > 0 then
         line = line .. " | Game snapshot " .. formatTime(snapshot)
+    end
+    if Farm.lastTitanSoloDeadline and not Farm.lastTitanSoloReleased
+        and aliveCount == 1 then
+        line = line .. " | Solo deadline "
+            .. formatTime(math.max(0, Farm.lastTitanSoloDeadline - Farm.clockNow()))
+    end
+    if Farm.running and aliveCount == 1 then
+        local root = getPlayerRoot()
+        local nape = getNape(getLivingTitans()[1])
+        if root and nape then
+            local flatDistance = (Vector3.new(root.Position.X, 0, root.Position.Z)
+                - Vector3.new(nape.Position.X, 0, nape.Position.Z)).Magnitude
+            if flatDistance > 75 then
+                line = line .. string.format(" | Titan %.0f studs away", flatDistance)
+            end
+        end
     end
     if Farm.timerStatusText then
         pcall(function() Farm.timerStatusText:Set(line) end)
@@ -9570,6 +9804,38 @@ settingsTab:CreateToggle({
 })
 
 
+-- v137: one compact global Recovery section. The watcher is read-only and
+-- refreshes on the existing session Heartbeat; no new per-frame loop/prints.
+settingsTab:CreateSection({name="Stuck Recovery"})
+settingsTab:CreateInput({
+    name="Stuck Time (Minutes)",
+    value=tostring(Farm.stuckMinutes),
+    placeholder="10 (1-120 minutes)",
+    flag="AutoLeaveStuckMinutesV137",
+    callback=function(value)
+        local n=tonumber(value)
+        if n and n==math.floor(n) and n>=1 and n<=120 then
+            Farm.stuckMinutes=n
+            Farm.session.stuckMinutes=n
+            Farm:ResetStuckWatchdog("Time updated")
+            saveSession()
+        end
+    end,
+})
+settingsTab:CreateToggle({
+    name="Auto Leave If Stuck", value=Farm.autoLeaveIfStuck,
+    flag="AutoLeaveIfStuckV137",
+    callback=function(enabled)
+        Farm.autoLeaveIfStuck=enabled==true
+        Farm.session.autoLeaveIfStuck=Farm.autoLeaveIfStuck
+        Farm:ResetStuckWatchdog(Farm.autoLeaveIfStuck and "Monitoring gameplay" or "Off")
+        saveSession()
+    end,
+})
+Farm.stuckStatusText=settingsTab:CreateText({
+    name="Stuck Status", text=Farm.stuckStatus,
+})
+
 -- Rayfield Gen2 adds a built-in Configurations section when autoSave is enabled.
 -- Use it for named profiles; these buttons are just one-click current-config helpers.
 -- v86: Match-result webhook. Scoped here to stay under Luau's 200-local limit.
@@ -10248,11 +10514,11 @@ Farm.initializeMatchWebhook = function()
             {name="Special Rewards",value=display(special,"None detected"),inline=false},
         }
         return {
-            title = testMode and "HollowMoonHub • Webhook Test (v135)"
+            title = testMode and "HollowMoonHub • Webhook Test (v137)"
                 or "✅ Attack on Titan • Match Complete",
             color = testMode and 0x5865F2 or 0x57F287,
             fields = fields,
-            footer = {text="HollowMoonHub • Match Tracker • v135"},
+            footer = {text="HollowMoonHub • Match Tracker • v137"},
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()),
         }
     end
@@ -10566,7 +10832,8 @@ local ALL_SETTING_FLAGS = {
     "CombatSkillSlotsV46", "CombatAutoSkillsV46",
     "KillLastTitanAt", "KillLastTitanAtTime", "AutoReloadBlades",
     "AutoRefillBlades", "AutoRetry", "AutoLeaveMode", "AutoLeaveValue",
-    "AutoLeave", "AntiAFKV44", "AutoReconnectV44", "AutoExecuteV44",
+    "AutoLeave", "AutoLeaveStuckMinutesV137", "AutoLeaveIfStuckV137",
+    "AntiAFKV44", "AutoReconnectV44", "AutoExecuteV44",
     "WebhookAutoSendV86",
 }
 -- Restore dependencies first; enable potentially active automation last.
@@ -10577,7 +10844,7 @@ local RESTORE_FIRST = {
     "EquipPerkSlotV42", "EquipPerkChoiceV42", "EquipArtifactFocusV42",
     "EquipCraftCategoryV42", "EquipCraftRecipeV42", "EquipCraftMaterialChoiceV42",
     "EquipCraftTargetV42", "EquipCraftMaterialV42",
-    "MomentumTravelSpeed", "MomentumOrbitWidthV69", "KillLastTitanAt", "AutoLeaveMode", "AutoLeaveValue",
+    "MomentumTravelSpeed", "MomentumOrbitWidthV69", "KillLastTitanAt", "AutoLeaveMode", "AutoLeaveValue", "AutoLeaveStuckMinutesV137",
     "CombatSkillSlotsV46",
     "EquipSellPerkRarityV111", "EquipAutoSellPerksV111",
     "EquipArtifactSlotV111", "EquipArtifactItemV111", "EquipAutoArtifactSelectedV111",
