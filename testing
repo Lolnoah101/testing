@@ -1,5 +1,8 @@
 --[[
-    HollowMoonHub v138 | Attack on Titan: Revolution (Mobile Last Titan hover recovery)
+    HollowMoonHub v139 | Attack on Titan: Revolution (Mobile performance & reliability)
+    Mobile v139: automatic touch-device performance mode (manually overridable),
+    event-invalidated Titan cache, budgeted noclip/momentum/hold work, guarded
+    movement Heartbeat, lighter noncombat UI work, and mobile recovery diagnostics.
     Mobile v138: last-Titan hold preserves reservation for brief Nape streaming gaps, keeps noclip enabled,
     follows a partially loaded Titan rig, recovers stalled AlignPosition quickly, and defers blade-station travel.
     Lobby v129: Shadow Ban Status webhook reporting (verified-flag only); Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, follow the final Titan overhead with a bounded solo hold deadline.
@@ -288,6 +291,24 @@ local Farm = {
     lastTitanHoldRepositionAt = -100,
     lastMovementHeartbeatAt = 0,
     lastMovementHeartbeatError = nil,
+    mobileOptimized = false,
+    mobileOptimizationMode = "Auto",
+    isMobileDevice = false,
+    mobileAverageDt = 1/60,
+    mobileFrameSamples = 0,
+    mobileLastNoclipAt = -100,
+    mobileLastNoclipHold = false,
+    mobileLastMomentumAt = -100,
+    mobileLastTitanDecisionAt = -100,
+    mobileLastStatusDraw = -100,
+    mobileStatusText = nil,
+    mobileLastStatusLine = nil,
+    mobileHeartbeatErrors = 0,
+    mobileLastErrorAt = -100,
+    targetModelCacheDirty = true,
+    titanWatchContainer = nil,
+    titanModelAddedConnection = nil,
+    titanModelRemovedConnection = nil,
     matchJobId = tostring(game.JobId),
     matchPlaceId = game.PlaceId,
     matchStartedLocal = previousClock and previousClock.startedAt or os.clock(),
@@ -342,7 +363,27 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v138"
+Farm.buildVersion = "v139"
+-- Detect a phone/tablet without guessing from FPS. Desktop touchscreens with
+-- an active keyboard keep desktop behavior unless the user opts in.
+do
+    local inputService = game:GetService("UserInputService")
+    Farm.isMobileDevice = inputService.TouchEnabled and not inputService.KeyboardEnabled
+    local mode = type(savedPreferences) == "table"
+        and savedPreferences.MobileOptimizationModeV139 or nil
+    if mode ~= "On" and mode ~= "Off" then mode = "Auto" end
+    Farm.mobileOptimizationMode = mode
+    Farm.mobileOptimized = mode == "On" or (mode == "Auto" and Farm.isMobileDevice)
+end
+-- EMA sampling is cheap and is used only for diagnostics. There is no auto
+-- reduction in user-selected movement speed or attack rate on low FPS.
+function Farm:SampleMobileFrame(dt)
+    if not self.mobileOptimized or type(dt) ~= "number" then return end
+    local sample = math.clamp(dt, 1/240, 0.25)
+    self.mobileAverageDt = (self.mobileAverageDt or sample) * 0.93 + sample * 0.07
+    self.mobileFrameSamples = (self.mobileFrameSamples or 0) + 1
+end
+
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
 do end
 
@@ -651,10 +692,18 @@ function Farm:GetFarmTargetModels()
     local now = os.clock()
     -- On low-end/mobile clients, avoid expensive repeated Workspace tree scans
     -- while raid rigs are still streaming. A cached scan still refreshes when ready.
-    local interval = self.targetModelCache and #self.targetModelCache > 0 and 0.45 or 0.9
-    if self.targetModelCache and now - (self.targetModelScannedAt or 0) < interval then
+    local hasCache = self.targetModelCache ~= nil
+    local hasNapes = hasCache and #self.targetModelCache > 0
+    -- Mobile avoids repeated heavy GetDescendants scans. A new Model/Nape
+    -- invalidates the cache and triggers a fast bounded refresh instead.
+    local interval = hasNapes and (self.mobileOptimized and 0.70 or 0.45)
+        or (self.mobileOptimized and 1.15 or 0.9)
+    local age = now - (self.targetModelScannedAt or -100)
+    if hasCache and ((not self.targetModelCacheDirty and age < interval)
+        or (self.targetModelCacheDirty and age < 0.16)) then
         return self.targetModelCache
     end
+    self.targetModelCacheDirty = false
     local found, seen = {}, {}
     local navigation, navSeen = {}, {}
     local function add(model)
@@ -682,6 +731,26 @@ function Farm:GetFarmTargetModels()
         end
     end
     local primary = Workspace:FindFirstChild("Titans")
+    if self.titanWatchContainer ~= primary then
+        if self.titanModelAddedConnection then self.titanModelAddedConnection:Disconnect() end
+        if self.titanModelRemovedConnection then self.titanModelRemovedConnection:Disconnect() end
+        self.titanModelAddedConnection, self.titanModelRemovedConnection = nil, nil
+        self.titanWatchContainer = primary
+        if primary then
+            self.titanModelAddedConnection = primary.DescendantAdded:Connect(function(child)
+                if child:IsA("Model") or child:IsA("Humanoid")
+                    or child.Name == "Nape" or child.Name == "Hitboxes"
+                    or child.Name == "HumanoidRootPart" or child.Name == "Head" then
+                    self.targetModelCacheDirty = true
+                end
+            end)
+            self.titanModelRemovedConnection = primary.DescendantRemoving:Connect(function(child)
+                if child:IsA("Model") or child.Name == "Nape" then
+                    self.targetModelCacheDirty = true
+                end
+            end)
+        end
+    end
     if primary then scan(primary) end
     if #found == 0 then
         local nested = Workspace:FindFirstChild("Titans", true)
@@ -2451,6 +2520,21 @@ local function updateMomentumNoclip()
     end
 end
 
+-- Mobile collision enforcement: the descendant callback catches newly loaded
+-- accessories immediately, so scanning all existing parts 60 times a second
+-- does not improve reliability. Always scan on character/hold changes.
+function Farm:UpdateNoclipBudgeted()
+    local now = os.clock()
+    local enteringOrLeavingHold = self.mobileLastNoclipHold ~= self.waitingFreezeActive
+    if not self.mobileOptimized or enteringOrLeavingHold
+        or self.noclipCharacter ~= LocalPlayer.Character
+        or now - (self.mobileLastNoclipAt or -100) >= 0.085 then
+        self.mobileLastNoclipAt = now
+        self.mobileLastNoclipHold = self.waitingFreezeActive
+        updateMomentumNoclip()
+    end
+end
+
 -- Rare fallback when the root has stopped moving even with noclip active.
 -- A small nudge preserves AssemblyLinearVelocity; avoid during a slash.
 local function recoverStalledMomentum(root)
@@ -2578,6 +2662,17 @@ local function updateMomentumDrive(dt)
     if not root or root.Anchored then
         removeMomentumDrive()
         return
+    end
+    -- A VectorForce remains active between updates. Recomputing the full
+    -- orbital controller every render frame is unnecessary on a phone. Keep
+    -- updates responsive (16-28 Hz) and leave the requested speed unchanged.
+    if Farm.mobileOptimized and Farm.momentumRoot == root and Farm.momentumForce
+        and Farm.momentumForce.Parent == root then
+        local now = os.clock()
+        local slowFrames = (Farm.mobileAverageDt or 1/60) > 1/32
+        local minGap = slowFrames and 0.055 or 0.036
+        if now - (Farm.mobileLastMomentumAt or -100) < minGap then return end
+        Farm.mobileLastMomentumAt = now
     end
     if Farm.momentumRoot ~= root or not Farm.momentumForce
         or Farm.momentumForce.Parent ~= root then
@@ -2896,6 +2991,7 @@ end
 
 local function heartbeatFarm(dt)
     Farm.lastMovementHeartbeatAt = os.clock()
+    Farm:SampleMobileFrame(dt)
     if not Farm.running or Farm.unloaded or movementUtilityBusy() then
         releaseSkillNapeAssist()
         releaseLastTitanWaitFreeze()
@@ -2908,16 +3004,28 @@ local function heartbeatFarm(dt)
     -- Final-Titan hold takes over only while one protected Titan remains.
     -- Its physical AlignPosition keeps us airborne without root.Anchored.
     updateSwingFreeze()
-    if updateLastTitanWaitFreeze() then
+    -- The final-Titan AI/replication decision is expensive. During a hold,
+    -- preserve movement authority between checks instead of re-scanning every
+    -- render frame; AlignPosition still follows the most recent target goal.
+    local now = os.clock()
+    local waitingForDecision = Farm.mobileOptimized
+        and now - (Farm.mobileLastTitanDecisionAt or -100) < 0.12
+    local holdingLastTitan
+    if waitingForDecision then
+        holdingLastTitan = Farm.waitingFreezeActive
+    else
+        Farm.mobileLastTitanDecisionAt = now
+        holdingLastTitan = updateLastTitanWaitFreeze()
+    end
+    if holdingLastTitan then
         cancelTween()
         if Farm.hoverForce then removeHoverSupport() end
         if Farm.momentumForce then removeMomentumDrive() end
-        -- Last Titan has exclusive movement authority, but still needs noclip.
-        updateMomentumNoclip()
+        Farm:UpdateNoclipBudgeted()
         Farm:UpdateLastTitanAirHold()
         return
     end
-    updateMomentumNoclip()
+    Farm:UpdateNoclipBudgeted()
     if Farm.method == "Momentum (Physics)" and not Farm:EnsureAirStart() then
         if Farm.momentumForce then removeMomentumDrive() end
         return -- never fly horizontally toward a Titan from an unsafe spawn height
@@ -2994,8 +3102,37 @@ function Farm:Stop()
     setAttackHeld(false)
 end
 
+-- Inconsistent streamed character/model state can throw for one mobile frame.
+-- A protected callback keeps the controller connected and makes errors visible.
+function Farm.SafeHeartbeat(dt)
+    local ok, problem = pcall(heartbeatFarm, dt)
+    if ok then
+        Farm.mobileHeartbeatErrors = 0
+        if os.clock() - (Farm.mobileLastErrorAt or -100) > 8 then
+            Farm.lastMovementHeartbeatError = nil
+        end
+        return
+    end
+    Farm.mobileHeartbeatErrors = (Farm.mobileHeartbeatErrors or 0) + 1
+    Farm.lastMovementHeartbeatError = tostring(problem):sub(1, 170)
+    Farm.mobileLastErrorAt = os.clock()
+    if Farm.mobileHeartbeatErrors >= 3 then
+        Farm.target = nil
+        Farm.targetModelCacheDirty = true
+        Farm.airStartRoot = nil
+        -- Don't tear down the protected Last Titan controller on a transient
+        -- error: keep the previous overhead goal until a valid rig reappears.
+        Farm.mobileHeartbeatErrors = 0
+    end
+end
+
 function Farm:Start()
     if self.running or self.unloaded then return end
+    self.lastMovementHeartbeatError = nil
+    self.mobileHeartbeatErrors = 0
+    self.mobileLastTitanDecisionAt = -100
+    self.mobileLastNoclipAt = -100
+    self.mobileLastMomentumAt = -100
     self.momentumNoclip = true -- inseparable from Auto Farm, including old saved settings
     self.running = true
     self.runId = self.runId + 1
@@ -3006,7 +3143,7 @@ function Farm:Start()
         updateMomentumNoclip()
         self:EnsureAirStart() -- teleport BEFORE the first movement Heartbeat
     end
-    self.movementConnection = RunService.Heartbeat:Connect(heartbeatFarm)
+    self.movementConnection = RunService.Heartbeat:Connect(Farm.SafeHeartbeat)
 end
 
 -- Only the active game mode owns Auto Farm. Saved settings remain independent.
@@ -3045,7 +3182,7 @@ function Farm:SyncFarmMode()
             not self.movementConnection or not self.movementConnection.Connected
             or os.clock() - (self.lastMovementHeartbeatAt or 0) > 5) then
             if self.movementConnection then self.movementConnection:Disconnect() end
-            self.movementConnection = RunService.Heartbeat:Connect(heartbeatFarm)
+            self.movementConnection = RunService.Heartbeat:Connect(Farm.SafeHeartbeat)
             self.lastMovementHeartbeatAt = os.clock()
             self.movementElapsed = REPATH_TIME
         end
@@ -3056,6 +3193,21 @@ function Farm:SyncFarmMode()
         self.farmOwner = wanted
         self:Start()
     end
+end
+
+function Farm:ReacquireMobileFarm()
+    if self.unloaded then return false end
+    if not self.generalFarmEnabled and not self.waveFarmEnabled then
+        return false
+    end
+    self.target = nil
+    self.targetModelCacheDirty = true
+    self.targetModelScannedAt = -100
+    self.lastMovementHeartbeatError = nil
+    self.mobileHeartbeatErrors = 0
+    self:Stop()
+    self:SyncFarmMode()
+    return self.running
 end
 
 -- v104: Diagnostics stay OUT of Rayfield. A saved ON toggle can look
@@ -5363,6 +5515,10 @@ local function equipmentHeartbeat(dt)
     Equip.elapsed=0
     if Farm.unloaded then return end
     if game.PlaceId==LOBBY_PLACE_ID and not Equip.pending then task.spawn(equipmentTick) end
+    -- Do not slow the actual equipment automation; only expensive UI repaint.
+    local now = os.clock()
+    if Farm.mobileOptimized and now - (Equip.mobileLastDraw or -100) < 1.5 then return end
+    Equip.mobileLastDraw = now
     local d=Equip.snapshot
     if d then
         local line=string.format("Equipped: %s | Grade: %s (%s/15) | Blades: %s | Spears: %s | Gold: %s",
@@ -6078,6 +6234,31 @@ local function sessionHeartbeat(dt)
     else
         Farm.lobbyCurrentStatus = "Auto Join Off"
     end
+    -- Match/session decisions still run every 0.5s. Only Rayfield labels are
+    -- throttled; writing multiple Text widgets is costly on some mobile UIs.
+    if Farm.mobileOptimized and now - (Farm.mobileLastStatusDraw or -100) < 1.35 then return end
+    Farm.mobileLastStatusDraw = now
+    if Farm.mobileStatusText then
+        local root = getPlayerRoot()
+        local fpsText = Farm.mobileFrameSamples >= 8
+            and ("~"..tostring(math.floor(1 / math.max(0.003, Farm.mobileAverageDt or 1/60) + 0.5)).." FPS")
+            or "FPS pending"
+        local owner = Farm.waitingFreezeActive and "Last Titan hold"
+            or (Farm.utilityBusy and tostring(Farm.utilityBusyOwner or "Utility")
+            or (Farm.running and tostring(Farm.farmOwner or "Auto Farm") or "Idle"))
+        local rootState = root and (root.Anchored and "Root anchored" or "Root ready")
+            or "Character loading"
+        local details = Farm.lastMovementHeartbeatError and
+            (" | Last error: " .. Farm.lastMovementHeartbeatError)
+            or (Farm.waitingFreezeActive and (" | "..tostring(Farm.lastTitanHoldStatus)) or "")
+        local report = string.format("%s (%s) | %s | %s | %s%s",
+            Farm.mobileOptimized and "Mobile optimization ON" or "Desktop scheduling",
+            Farm.mobileOptimizationMode or "Auto", fpsText, owner, rootState, details)
+        if report ~= Farm.mobileLastStatusLine then
+            Farm.mobileLastStatusLine = report
+            pcall(function() Farm.mobileStatusText:Set(report) end)
+        end
+    end
     if Farm.RaidChest and Farm.RaidChest.statusText then
         pcall(function() Farm.RaidChest.statusText:Set(Farm.RaidChest.lastStatus) end)
     end
@@ -6107,6 +6288,9 @@ end
 
 function Farm:Unload()
     if self.unloaded then return end
+    if self.titanModelAddedConnection then self.titanModelAddedConnection:Disconnect();self.titanModelAddedConnection=nil end
+    if self.titanModelRemovedConnection then self.titanModelRemovedConnection:Disconnect();self.titanModelRemovedConnection=nil end
+    self.titanWatchContainer = nil
     if type(self.settingsCommit) == "function" then pcall(self.settingsCommit, "unload") end
     self.opMethod = false
     self.opRunId = self.opRunId + 1
@@ -6881,8 +7065,10 @@ end
     state.connection=RunService.Heartbeat:Connect(function(dt)
         if Farm.unloaded then return end
         state.elapsed=state.elapsed+dt
-        if state.elapsed<0.12 then return end
-        state.elapsed=state.elapsed%0.12
+        -- Keep active rolls responsive; pause frequent menu/UI work while idle.
+        local interval = (Farm.mobileOptimized and not state.enabled) and 0.55 or 0.12
+        if state.elapsed < interval then return end
+        state.elapsed = state.elapsed % interval
         local now=os.clock()
         if not state.busy and not state.reading and
             (state.data==nil and now-state.lastRead>=1.0
@@ -7478,7 +7664,7 @@ Farm.timerStatusText = farmTab:CreateText({
 Farm.timerStatusConnection = RunService.Heartbeat:Connect(function(dt)
     if Farm.unloaded then return end
     Farm.timerStatusAccum = Farm.timerStatusAccum + dt
-    if Farm.timerStatusAccum < 0.5 then return end
+    if Farm.timerStatusAccum < (Farm.mobileOptimized and 0.95 or 0.5) then return end
     Farm.timerStatusAccum = 0
     local elapsed, source = getMatchElapsed()
     local aliveCount = #getLivingTitans()
@@ -9867,6 +10053,42 @@ Farm.initializeWavesAndMisc=nil
 
 window:CreateSection({name="SYSTEM"})
 local settingsTab = window:CreateTab({ name = "Settings" })
+settingsTab:CreateSection({ name = "Mobile Performance" })
+settingsTab:CreateDropdown({
+    name = "Mobile Optimization", options = {"Auto", "On", "Off"},
+    value = Farm.mobileOptimizationMode,
+    flag = "MobileOptimizationModeV139",
+    callback = function(selection)
+        local choice = selection
+        if type(selection) == "table" then
+            choice = selection[1]
+            if choice == nil then
+                for name, selected in pairs(selection) do
+                    if selected == true then choice = name; break end
+                end
+            end
+        end
+        if choice ~= "On" and choice ~= "Off" then choice = "Auto" end
+        Farm.mobileOptimizationMode = choice
+        Farm.mobileOptimized = choice == "On" or (choice == "Auto" and Farm.isMobileDevice)
+        Farm.mobileLastMomentumAt = -100
+        Farm.mobileLastNoclipAt = -100
+        Farm.mobileLastTitanDecisionAt = -100
+        Farm.targetModelCacheDirty = true
+        Farm.mobileLastStatusDraw = -100
+    end,
+})
+Farm.mobileStatusText = settingsTab:CreateText({
+    name = "Mobile Diagnostics",
+    text = Farm.mobileOptimized and "Mobile optimization enabled | Monitoring movement"
+        or "Desktop scheduling | Mobile optimization available",
+})
+if not Farm.isLobbyPlace and not Farm.isMenuPlace then
+    settingsTab:CreateButton({
+        name = "Reacquire Farm Movement",
+        callback = function() Farm:ReacquireMobileFarm() end,
+    })
+end
 settingsTab:CreateSection({ name = "Automation" })
 settingsTab:CreateToggle({
     name = "Anti AFK", value = false, flag = "AntiAFKV44",
@@ -10916,6 +11138,7 @@ local ALL_SETTING_FLAGS = {
     "AutoRefillBlades", "AutoRetry", "AutoLeaveMode", "AutoLeaveValue",
     "AutoLeave", "AutoLeaveStuckMinutesV137", "AutoLeaveIfStuckV137",
     "AntiAFKV44", "AutoReconnectV44", "AutoExecuteV44",
+    "MobileOptimizationModeV139",
     "WebhookAutoSendV86",
 }
 -- Restore dependencies first; enable potentially active automation last.
@@ -10927,6 +11150,7 @@ local RESTORE_FIRST = {
     "EquipCraftCategoryV42", "EquipCraftRecipeV42", "EquipCraftMaterialChoiceV42",
     "EquipCraftTargetV42", "EquipCraftMaterialV42",
     "MomentumTravelSpeed", "MomentumOrbitWidthV69", "KillLastTitanAt", "AutoLeaveMode", "AutoLeaveValue", "AutoLeaveStuckMinutesV137",
+    "MobileOptimizationModeV139",
     "CombatSkillSlotsV46",
     "EquipSellPerkRarityV111", "EquipAutoSellPerksV111",
     "EquipArtifactSlotV111", "EquipArtifactItemV111", "EquipAutoArtifactSelectedV111",
