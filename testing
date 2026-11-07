@@ -1,5 +1,8 @@
 --[[
-    HollowMoonHub v139 | Attack on Titan: Revolution (Mobile performance & reliability)
+    HollowMoonHub v140 | Attack on Titan: Revolution (Mobile & Raid Auto Join)
+    Raid v140: selectable Attack/Armored/Colossal/Female Titan raid names in Map,
+    native map+objective payload validation, legacy saved-choice migration,
+    mobile GET Data/Copy fallback for Hardest difficulty when Actor is unavailable.
     Mobile v139: automatic touch-device performance mode (manually overridable),
     event-invalidated Titan cache, budgeted noclip/momentum/hold work, guarded
     movement Heartbeat, lighter noncombat UI work, and mobile recovery diagnostics.
@@ -363,7 +366,7 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v139"
+Farm.buildVersion = "v140"
 -- Detect a phone/tablet without guessing from FPS. Desktop touchscreens with
 -- an active keyboard keep desktop behavior unless the user opts in.
 do
@@ -3918,6 +3921,33 @@ local MAPS_FOR_MODE = {
     Raids = { "Shiganshina", "Trost", "Stohess" },
     Waves = { "Trost" },
 }
+-- v140: Rayfield's Raid Map dropdown uses raid names, but the native
+-- S_Missions/Create payload MUST use the geographical Name plus Objective.
+-- These pairs come directly from Town Central's Storage.Objectives and
+-- its Missions.Icon raid selection routine (Raid attribute -> "... Titan").
+Farm.raidMapSelections = {
+    ["Attack Titan Raid"]   = { map = "Trost", objective = "Attack Titan" },
+    ["Armored Titan Raid"]  = { map = "Shiganshina", objective = "Armored Titan" },
+    ["Colossal Titan Raid"] = { map = "Shiganshina", objective = "Colossal Titan" },
+    ["Female Titan Raid"]   = { map = "Stohess", objective = "Female Titan" },
+}
+Farm.raidMapOptions = {
+    "Attack Titan Raid", "Armored Titan Raid",
+    "Colossal Titan Raid", "Female Titan Raid"
+}
+function Farm:GetRaidMapSelection(map, objective)
+    if self.raidMapSelections[map] then return map end
+    for _, label in ipairs(self.raidMapOptions) do
+        local spec = self.raidMapSelections[label]
+        if spec.map == map and spec.objective == objective then return label end
+    end
+    -- An older save may only contain the geographical map. Keep its map,
+    -- but select the first real raid objective from that game's definitions.
+    for _, label in ipairs(self.raidMapOptions) do
+        if self.raidMapSelections[label].map == map then return label end
+    end
+    return self.raidMapOptions[1]
+end
 local KNOWN_MISSION_MAPS = MAPS_FOR_MODE.Missions
 local DIFFICULTY_OPTIONS = { "Easy", "Normal", "Hard", "Severe", "Aberrant", "Freedom", "Hardest" }
 local STANDARD_MODIFIERS = {
@@ -4055,7 +4085,13 @@ local function modifierNamesForDifficulty(values, mode, objective, difficulty)
 end
 local function objectiveOptionsForMode()
     local maps = LOBBY_OBJECTIVES[Farm.lobbyMode]
-    return (maps and maps[Farm.lobbyMap]) or { "Skirmish" }
+    local options = (maps and maps[Farm.lobbyMap]) or { "Skirmish" }
+    -- Each Raid Map is a specific boss, not a geographical map with an
+    -- independently selectable objective. Do not desync the two controls.
+    if Farm.lobbyMode == "Raids" and table.find(options, Farm.lobbyObjective) then
+        return { Farm.lobbyObjective }
+    end
+    return options
 end
 local function modifierOptionsForMode()
     local result={}
@@ -4154,7 +4190,7 @@ local function selectDifficulty(mode, objective, chosen, grade, prestige)
         end
     end
     if chosen=="Hardest" then
-        return best, (not best and "No unlocked difficulty for this map") or nil
+        return best, (not best and "No unlocked difficulty for this raid/map (check blade upgrades)") or nil
     end
     if not valid then return nil,"Selected difficulty is locked or invalid" end
     return chosen
@@ -5893,19 +5929,16 @@ local function handleResultScreen()
     end
 end
 
--- Public client request path. Mirrors the lobby Host:Invoke implementation,
--- which calls GET:InvokeServer. Fallback is only used with an explicit choice:
--- Hardest requires live player upgrade information and must not be guessed.
+-- Public client request path. Mirrors the lobby Host:Invoke implementation.
+-- On mobile, Hardest can resolve from Town Central's own GET Data/Copy
+-- response; never guess eligibility when that verified data is unavailable.
 local function fallbackDirectLobbyJoin(settings)
-    if settings.difficulty == "Hardest" then
-        return false, "Hardest requires the live lobby Actor's upgrade data"
-    end
     if not table.find(difficultyOptionsForMode(), settings.difficulty) then
         return false, "Difficulty does not belong to this mode"
     end
     if not table.find(MAPS_FOR_MODE[settings.mode] or {}, settings.map)
         or not table.find((LOBBY_OBJECTIVES[settings.mode] or {})[settings.map] or {}, settings.objective) then
-        return false, "Invalid map or objective"
+        return false, "Invalid map or objective (raid selection must resolve to map + boss)"
     end
     local assets=ReplicatedStorage:FindFirstChild("Assets")
     local remotes=assets and assets:FindFirstChild("Remotes")
@@ -5914,19 +5947,64 @@ local function fallbackDirectLobbyJoin(settings)
         return false,"Lobby GET remote unavailable"
     end
     local minimum=(settings.mode=="Raids" and settings.objective=="Colossal Titan") and 3 or nil
+    local resolvedDifficulty = settings.difficulty
+    if resolvedDifficulty == "Hardest" then
+        -- Mobile executors may not support run_on_actor. Town Central's own
+        -- client Loader calls GET("Data","Copy"), returning account data and
+        -- the current character slot. Use those verified values to select
+        -- the same highest unlocked difficulty instead of refusing to join.
+        local okCopy, data, slot = pcall(function()
+            return remote:InvokeServer("Data", "Copy")
+        end)
+        if not okCopy or type(data) ~= "table" then
+            return false, "Cannot resolve Hardest: lobby Data/Copy unavailable; select a fixed unlocked difficulty"
+        end
+        if type(slot) ~= "table" then
+            slot = type(data.Slots)=="table" and data.Slots[data.Current_Slot] or nil
+        end
+        local upgrades = type(slot)=="table" and type(slot.Upgrades)=="table"
+            and slot.Upgrades[slot.Weapon] or nil
+        local total, count = 0, 0
+        if type(upgrades)=="table" then
+            for _, level in pairs(upgrades) do
+                if type(level)=="number" then total=total+level;count=count+1 end
+            end
+        end
+        local prestige = type(slot)=="table" and slot.Progression
+            and tonumber(slot.Progression.Prestige) or nil
+        if count==0 or prestige==nil then
+            return false, "Cannot resolve Hardest: character upgrade data is still loading; select a fixed unlocked difficulty"
+        end
+        local grade = math.floor(total/count)
+        local thresholds = settings.mode=="Raids"
+            and {{"Hard",6},{"Severe",10},{"Aberrant",13},{"Freedom",15}}
+            or (settings.mode=="Waves" and {{"Easy",0}}
+            or {{"Easy",0},{"Normal",2},{"Hard",5},{"Severe",9},{"Aberrant",12},{"Freedom",15}})
+        resolvedDifficulty = nil
+        for index, entry in ipairs(thresholds) do
+            if (not minimum or index>=minimum) and grade>=entry[2]
+                and (entry[1]~="Freedom" or prestige>=3) then
+                resolvedDifficulty = entry[1]
+            end
+        end
+        if not resolvedDifficulty then
+            return false, "No unlocked difficulty for " .. tostring(settings.objective)
+                .. " (weapon grade " .. tostring(grade) .. ", prestige " .. tostring(prestige) .. ")"
+        end
+    end
     local payload={Name=settings.map,Type=settings.mode,Objective=settings.objective,
-        Difficulty=settings.difficulty,Minimum=minimum}
+        Difficulty=resolvedDifficulty,Minimum=minimum}
     local ok,party=pcall(function() return remote:InvokeServer("S_Missions","Create",payload) end)
     if not ok or typeof(party)~="Instance" then
         return false,"Create returned "..(ok and typeof(party) or "error")
-            .." | "..tostring(party).." | difficulty="..tostring(settings.difficulty)
+            .." | "..tostring(party).." | difficulty="..tostring(resolvedDifficulty)
             .." | modifiers not yet applied; check existing party, eligibility and lobby state"
     end
     local leader=party:FindFirstChild("Leader")
     if leader and leader.Value~=LocalPlayer.Name then
         return false,"Party is not owned by the local player"
     end
-    local selected=modifierNamesForDifficulty(settings.modifier,settings.mode,settings.objective,settings.difficulty)
+    local selected=modifierNamesForDifficulty(settings.modifier,settings.mode,settings.objective,resolvedDifficulty)
     local function enabled(name)
         local value=party:GetAttribute("Modifiers")
         return type(value)=="string" and value:find(name,1,true)~=nil
@@ -5981,7 +6059,7 @@ local function fallbackDirectLobbyJoin(settings)
         return remote:InvokeServer("S_Missions","Start")
     end)
     if not started or response==false then return false,"Start request error: "..tostring(response) end
-    return true,"Started via GET: "..settings.mode.." / "..settings.map.." / "..settings.difficulty
+    return true,"Started via GET: "..settings.mode.." / "..settings.map.." / "..resolvedDifficulty
         .." | VERIFIED modifiers "..#selected.."/"..#selected..": "..table.concat(selected, ", ")
 end
 
@@ -6008,6 +6086,14 @@ local function requestLobbyJoin()
         Farm.lobbyCurrentStatus = "Waiting for Town Central lobby"
         return false
     end
+    if Farm.lobbyMode == "Raids" then
+        local selectedRaid = Farm.raidMapSelections[Farm:GetRaidMapSelection(Farm.lobbyMap, Farm.lobbyObjective)]
+        if not selectedRaid or selectedRaid.map ~= Farm.lobbyMap
+            or selectedRaid.objective ~= Farm.lobbyObjective then
+            Farm.lobbyCurrentStatus = "Raid selection is not synchronized; choose the Raid in Map / Raid again"
+            return false
+        end
+    end
     local preflightOK,preflightMessage=preflightModifierSelection()
     if not preflightOK then
         Farm.lobbyCurrentStatus=preflightMessage
@@ -6030,7 +6116,9 @@ local function requestLobbyJoin()
             if joinId == Farm.lobbyJoinRunId then Farm.lobbyJoining=false end
             return
         end
-        Farm.lobbyCurrentStatus="Creating "..settings.mode.." / "..settings.map
+        Farm.lobbyCurrentStatus="Creating "..settings.mode.." / "
+            ..(settings.mode=="Raids" and Farm:GetRaidMapSelection(settings.map,settings.objective) or settings.map)
+            .." / "..settings.difficulty
         local success,detail
         if bridge then
             local ok,result,message=pcall(function() return bridge:Invoke("join",settings) end)
@@ -6038,10 +6126,11 @@ local function requestLobbyJoin()
             detail=ok and message or tostring(result)
             -- Actor-local progression data can be unavailable before loading.
             -- An explicit valid difficulty can use the same GET request directly.
-            if not success and settings.difficulty~="Hardest"
+            if not success
                 and (tostring(detail):find("Actor Host",1,true)
                 or tostring(detail):find("slot data",1,true)
-                or tostring(detail):find("upgrade data",1,true)) then
+                or tostring(detail):find("upgrade data",1,true)
+                or tostring(detail):find("Prestige unavailable",1,true)) then
                 success,detail=fallbackDirectLobbyJoin(settings)
             end
         else
@@ -6280,7 +6369,11 @@ local function sessionHeartbeat(dt)
     if Farm.lobbyText then
         pcall(function()
             Farm.lobbyText:Set(string.format("%s / %s / %s / %s / %s | %s",
-                Farm.lobbyMode, Farm.lobbyMap, Farm.lobbyObjective,
+                Farm.lobbyMode,
+                Farm.lobbyMode=="Raids"
+                    and (Farm:GetRaidMapSelection(Farm.lobbyMap,Farm.lobbyObjective)
+                        .." ["..Farm.lobbyMap.."]") or Farm.lobbyMap,
+                Farm.lobbyObjective,
                 modifierSummary(Farm.lobbyModifier), Farm.lobbyDifficulty, Farm.lobbyCurrentStatus))
         end)
     end
@@ -7155,12 +7248,23 @@ local function updateObjectiveOptions()
 end
 
 local function updateMapOptions(modeChanged)
-    local options = MAPS_FOR_MODE[Farm.lobbyMode] or KNOWN_MISSION_MAPS
-    -- Reset for a new mode; when restoring saved state preserve a valid map.
-    if modeChanged or not table.find(options, Farm.lobbyMap) then
-        Farm.lobbyMap = options[1]
+    if Farm.lobbyMode == "Raids" then
+        local choice = Farm:GetRaidMapSelection(Farm.lobbyMap, Farm.lobbyObjective)
+        if modeChanged or not table.find(MAPS_FOR_MODE.Raids, Farm.lobbyMap) then
+            choice = Farm.raidMapOptions[1]
+        end
+        local selected = Farm.raidMapSelections[choice]
+        Farm.lobbyMap = selected.map
+        Farm.lobbyObjective = selected.objective
+        refreshDropdown(mapDropdown, Farm.raidMapOptions, choice)
+    else
+        local options = MAPS_FOR_MODE[Farm.lobbyMode] or KNOWN_MISSION_MAPS
+        if modeChanged or not table.find(options, Farm.lobbyMap) then
+            Farm.lobbyMap = options[1]
+        end
+        -- When leaving Raids, a raid objective is not a valid Mission objective.
+        refreshDropdown(mapDropdown, options, Farm.lobbyMap)
     end
-    refreshDropdown(mapDropdown, options, Farm.lobbyMap)
     updateObjectiveOptions()
 end
 
@@ -7178,14 +7282,23 @@ lobbyTab:CreateDropdown({
     end,
 })
 mapDropdown = lobbyTab:CreateDropdown({
-    name = "Map",
+    name = "Map / Raid",
     options = KNOWN_MISSION_MAPS,
     value = "Outskirts",
     flag = "LobbyMap",
     callback = function(value)
         local selection = type(value) == "table" and value[1] or value
-        if type(selection) == "string"
-            and table.find(MAPS_FOR_MODE[Farm.lobbyMode] or {}, selection)
+        if type(selection) ~= "string" then return end
+        if Farm.lobbyMode == "Raids" then
+            local raid = Farm.raidMapSelections[selection]
+            if raid and (Farm.lobbyMap ~= raid.map or Farm.lobbyObjective ~= raid.objective) then
+                Farm.lobbyMap = raid.map
+                Farm.lobbyObjective = raid.objective
+                updateObjectiveOptions()
+            end
+            return
+        end
+        if table.find(MAPS_FOR_MODE[Farm.lobbyMode] or {}, selection)
             and Farm.lobbyMap ~= selection then
             Farm.lobbyMap = selection
             updateObjectiveOptions()
@@ -11256,6 +11369,15 @@ local function restorePreferences()
         attempted[flag]=true
         local value=prefs[flag]
         if flag=="LobbyModifiersV52" and value==nil then value=prefs.LobbyModifier end
+        if flag=="LobbyMap" and Farm.lobbyMode=="Raids" and type(value)=="string" then
+            -- v139 saved Town Central geography, v140 shows the raid name.
+            -- Pair with the former Objective before invoking the dropdown callback.
+            value=Farm:GetRaidMapSelection(value,prefs.LobbyObjective)
+        elseif flag=="LobbyObjective" and Farm.lobbyMode=="Raids" then
+            -- The raid choice owns its objective; do not restore a separate
+            -- potentially stale saved Objective after the raid was selected.
+            return
+        end
         if flag=="RaidChestChoicesV120" and value==nil then
             local oldChoice = prefs.RaidChestChoiceV115
             if type(oldChoice) == "string" then
