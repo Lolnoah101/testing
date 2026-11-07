@@ -1,5 +1,7 @@
 --[[
-    HollowMoonHub v137 | Attack on Titan: Revolution (Outskirts)
+    HollowMoonHub v138 | Attack on Titan: Revolution (Mobile Last Titan hover recovery)
+    Mobile v138: last-Titan hold preserves reservation for brief Nape streaming gaps, keeps noclip enabled,
+    follows a partially loaded Titan rig, recovers stalled AlignPosition quickly, and defers blade-station travel.
     Lobby v129: Shadow Ban Status webhook reporting (verified-flag only); Raid chest native GUI OPEN animation then FINISH; no chest claim remote; inventory-verified sell/roll/open actions;  icon-free tabs and Waves visible on every gameplay place; Town Central inventory-first dropdowns; recipe definitions populate without opening game menus; perk bonus definitions, grouped UI, controlled Heartbeat refresh; gameplay retained from v110. Combat v110: mobile raid navigation may follow a visible Titan rig while waiting for its Nape hitbox; combat checks required services rather than full-game asset load. Preserves v107 GitHub-only Auto Execute. Delta early startup before game.Loaded, cached Rayfield Gen2 UI, single-instance queued loader; retains mobile fast resume + delayed, verified webhook reward extraction; uses direct GitHub-only Auto Execute after teleports; retains v86 match webhook and v85 slash-aware blade recovery with priority over aura/skills and quiet native combat checks; compact Gen2 UI + GitHub raw Auto Execute; retains v82 auto leave reliably triggers at selected wave with native and fallback teleport; invisible blade watcher protects reloading and resupply before crate travel; retains v81 equipment-first and emergency HQ Refills; retains v80 automatic blade reload recovery and v79 crate/vote fixes, auto leave at wave; Trost respawn-aware crate pickup, confirmed turn-in, zone upgrades; Air-start teleport before physics orbit; Auto Skills cold-module native first-cast and smart Rage Mode, Auto Farm-integrated noclip, retaining simplified Tween-named Momentum farm with 25-100% Orbit Width, fixed 200-stud altitude, Turbo + Nape/Limbs defaults; retains v68 register-limit fix, momentum noclip, stuck-recovery, speed slider 80-2000, scaled acceleration; no-drop skills and improved lobby diagnostics; verified multi-select modifier queue; one-toggle Auto Skills with non-teleporting special skill casts; multi-select described modifiers; high-altitude skill casting; skill-module fallback; slash-aware skill reservation and verifiable skill activation; stable match timer; multi-select Auto Skills 1-5 and equipped special skills; v44 combat/settings retained; equipment workflows retained, follow the final Titan overhead with a bounded solo hold deadline.
     Preserves v26 slash/input/remote logic; optional toggle restores v26 behavior.
     Swing-safe tween scheduling: pause and resume the same Tween during each slash.
@@ -264,6 +266,9 @@ local Farm = {
     lastTitanAtSeconds = 90,
     lastTitanAtText = "1:30",
     lastTitanReserved = nil,
+    lastTitanReservedSeenAt = -100,
+    lastTitanHoldMissingSince = nil,
+    lastTitanHoldStatus = "Idle",
     waitingFreezeRoot = nil, -- tracked character during final-Titan air hold (never anchored)
     waitingFreezeActive = false,
     lastTitanAirPosition = nil,
@@ -337,7 +342,7 @@ local Farm = {
 }
 ENV.HollowMoonAOTOutskirts = Farm
 -- Display-only build label: Auto Execute does not require any version marker.
-Farm.buildVersion = "v137"
+Farm.buildVersion = "v138"
 Farm.keepMovingWhileReloading = true -- user may disable in Blade Care to revert only this experiment
 do end
 
@@ -743,6 +748,7 @@ function Farm:ResetSoloHoldDeadline()
     Farm.lastTitanSoloSince = nil
     Farm.lastTitanSoloReleased = false
     Farm.lastTitanHoldFarSince = nil
+    Farm.lastTitanHoldMissingSince = nil
 end
 
 local function getReservedLastTitan()
@@ -780,11 +786,28 @@ local function getReservedLastTitan()
         return nil
     end
     if #alive == 0 then
+        -- Keep the protected model while its VISUAL rig is alive, even if
+        -- Nape replication is delayed for several seconds on mobile. If the
+        -- entire model streams out, retain it for only a short grace period.
+        local protected = Farm.lastTitanReserved
+        if protected then
+            local visible = getNape(protected) or Farm:GetNavigationAnchor(protected)
+            if visible then
+                Farm.lastTitanReservedSeenAt = os.clock()
+                return protected
+            end
+            if os.clock() - (Farm.lastTitanReservedSeenAt or -100) <= 3.0 then
+                return protected
+            end
+        end
         Farm.lastTitanReserved = nil
         return nil
     end
     for _, model in ipairs(alive) do
-        if model == Farm.lastTitanReserved then return model end
+        if model == Farm.lastTitanReserved then
+            Farm.lastTitanReservedSeenAt = os.clock()
+            return model
+        end
     end
     -- Choose the farthest living Titan as the reserved one to avoid
     -- accidentally prioritizing it in normal Auto Farm movement.
@@ -799,6 +822,7 @@ local function getReservedLastTitan()
         end
     end
     Farm.lastTitanReserved = chosen
+    Farm.lastTitanReservedSeenAt = os.clock()
     return chosen
 end
 
@@ -815,6 +839,8 @@ local function releaseLastTitanWaitFreeze()
     Farm.lastTitanAirPosition = nil
     Farm.lastTitanAirOrbitStartedAt = nil
     Farm.lastTitanHoldFarSince = nil
+    Farm.lastTitanHoldMissingSince = nil
+    Farm.lastTitanHoldStatus = "Not holding"
     Farm.waitingFreezeActive = false
     Farm.waitingFreezeRoot = nil
     if align then pcall(function() align:Destroy() end) end
@@ -834,47 +860,71 @@ local function updateLastTitanWaitFreeze()
         releaseLastTitanWaitFreeze()
         return false
     end
+
+    -- Refresh the reservation first; missing Napes must not give other workers
+    -- an opportunity to treat the protected final Titan as a normal target.
+    local reserved = getReservedLastTitan()
     local living = getLivingTitans()
-    if #living ~= 1 or living[1] ~= getReservedLastTitan() then
+    local normalSolo = #living == 1 and living[1] == reserved
+    -- Enter hold even if the LAST Nape vanishes right as the second-to-last
+    -- Titan dies. Only do so if there are no OTHER living visible Titan rigs.
+    -- A previously active hold continues for the short stream-out grace too.
+    local otherVisible = false
+    if #living == 0 and reserved then
+        for _, model in ipairs(Farm.navigationCandidateModels or {}) do
+            if model ~= reserved and Farm:GetNavigationAnchor(model) then
+                otherVisible = true
+                break
+            end
+        end
+    end
+    local streamingGap = #living == 0 and reserved ~= nil and not otherVisible
+    if not (normalSolo or streamingGap) then
         releaseLastTitanWaitFreeze()
         return false
     end
+
     local root = getPlayerRoot()
-    local titan = living[1]
-    local nape = getNape(titan)
-    if not root or not nape then
+    if not root then
         releaseLastTitanWaitFreeze()
         return false
     end
-    -- Keep following the last Titan while an ordinary skill or slash is
-    -- being processed; neither is a reason to lose movement ownership.
-    -- If an older swing option actually anchored the root, retain an
-    -- existing hold and let the normal swing cleanup unanchor it first.
-    if Farm.frozenRoot and root.Anchored then
-        return Farm.waitingFreezeActive and Farm.waitingFreezeRoot == root
-            and Farm.lastTitanAirAlign ~= nil
-            and Farm.lastTitanAirAlign.Parent == root
-    end
+
+    local titan = reserved
+    local nape = getNape(titan)
+    local fake = titan and titan:FindFirstChild("Fake")
+    local head = (fake and fake:FindFirstChild("Head"))
+        or (titan and titan:FindFirstChild("Head"))
+    local headValid = head and head:IsA("BasePart")
+    local anchor = (headValid and head) or nape
+        or (titan and Farm:GetNavigationAnchor(titan))
+
     if not Farm.waitingFreezeActive then
         Farm.lastTitanAirOrbitStartedAt = Farm.clockNow()
     end
-    local fake = titan:FindFirstChild("Fake")
-    local head = (fake and fake:FindFirstChild("Head")) or titan:FindFirstChild("Head")
-    local anchor = (head and head:IsA("BasePart")) and head or nape
-    local extra = anchor == head and head.Size.Y * 0.5 or 0
-    local altitude = math.max(120, tonumber(Farm.farmDistance) or 200)
-    -- Controlled inactivity test: keep a slow, 16-stud horizontal orbit rather
-    -- than remaining motionless over the Titan. We do not touch the server's
-    -- match timer or send fake activity/attack requests. All motion remains in
-    -- the existing AlignPosition controller at the player's safe farm height.
-    local horizontal = Vector3.zero
-    if Farm.lastTitanAirOrbitEnabled then
-        local startedAt = Farm.lastTitanAirOrbitStartedAt or Farm.clockNow()
-        local angle = math.max(0, Farm.clockNow() - startedAt) * (2 * math.pi / 12)
-        horizontal = Vector3.new(math.sin(angle) * 16, 0, (1 - math.cos(angle)) * 16)
+    if anchor then
+        Farm.lastTitanHoldMissingSince = nil
+        local extra = (headValid and anchor == head) and head.Size.Y * 0.5 or 0
+        local altitude = math.max(120, tonumber(Farm.farmDistance) or 200)
+        local horizontal = Vector3.zero
+        if Farm.lastTitanAirOrbitEnabled then
+            local startedAt = Farm.lastTitanAirOrbitStartedAt or Farm.clockNow()
+            local angle = math.max(0, Farm.clockNow() - startedAt) * (2 * math.pi / 12)
+            horizontal = Vector3.new(math.sin(angle) * 16, 0, (1 - math.cos(angle)) * 16)
+        end
+        Farm.lastTitanAirPosition = anchor.Position + horizontal
+            + Vector3.new(0, altitude + extra, 0)
+        Farm.lastTitanHoldStatus = nape and "Tracking final Titan" or "Tracking visible Titan rig"
+    elseif Farm.lastTitanAirPosition then
+        -- Briefly maintain the LAST SAFE overhead goal if even the head has
+        -- not replicated. Do not fall back to normal ground-level movement.
+        Farm.lastTitanHoldMissingSince = Farm.lastTitanHoldMissingSince or os.clock()
+        Farm.lastTitanHoldStatus = "Holding altitude; Titan rig streaming"
+    else
+        releaseLastTitanWaitFreeze()
+        return false
     end
-    Farm.lastTitanAirPosition = anchor.Position + horizontal
-        + Vector3.new(0, altitude + extra, 0)
+
     Farm.waitingFreezeRoot = root
     Farm.waitingFreezeActive = true
     return true
@@ -2358,9 +2408,12 @@ local function applyMomentumNoclipPart(part)
 end
 
 local function updateMomentumNoclip()
+    -- During the last-Titan hold, the position controller MUST keep noclip
+    -- active too; otherwise walls and roofs can trap the character on mobile.
+    local holding = Farm.waitingFreezeActive and Farm.lastTitanEnabled
     if Farm.unloaded or not Farm.running or movementUtilityBusy()
-        or Farm.method ~= "Momentum (Physics)" or not Farm.momentumNoclip
-        or Farm.waitingFreezeActive then
+        or (not holding and (Farm.method ~= "Momentum (Physics)"
+            or not Farm.momentumNoclip)) then
         if Farm.noclipCharacter then disableMomentumNoclip() end
         return
     end
@@ -2377,7 +2430,8 @@ local function updateMomentumNoclip()
         end
         Farm.noclipAddedConnection = character.DescendantAdded:Connect(function(part)
             if Farm.noclipCharacter == character and Farm.running
-                and Farm.method == "Momentum (Physics)" and Farm.momentumNoclip then
+                and ((Farm.method == "Momentum (Physics)" and Farm.momentumNoclip)
+                    or (Farm.waitingFreezeActive and Farm.lastTitanEnabled)) then
                 applyMomentumNoclipPart(part)
             end
         end)
@@ -2763,7 +2817,15 @@ end
 function Farm:UpdateLastTitanAirHold()
     local root = self.waitingFreezeRoot
     local goal = self.lastTitanAirPosition
-    if not root or not root.Parent or not goal or root.Anchored then return end
+    if not root or not root.Parent or not goal then
+        self.lastTitanHoldStatus = "Waiting for root/hover goal"
+        return
+    end
+    if root.Anchored then
+        -- Never fight a game-owned anchor or the optional slash-freeze.
+        self.lastTitanHoldStatus = "Root anchored (check slash/game state)"
+        return
+    end
 
     if self.lastTitanAirRoot ~= root or not self.lastTitanAirAlign
         or self.lastTitanAirAlign.Parent ~= root then
@@ -2775,9 +2837,9 @@ function Farm:UpdateLastTitanAirHold()
             local leftover = root:FindFirstChild(name)
             if leftover then leftover:Destroy() end
         end
-        -- Lift ONCE if the player wasn't already above the remaining Titan.
-        -- All following updates use physical position alignment, never CFrame writes.
-        if (root.Position - goal).Magnitude > 65 then
+        -- Acquire the protected overhead position immediately, not after a
+        -- slow cross-map physical ascent while the final Titan is alive.
+        if (root.Position - goal).Magnitude > 35 then
             root.CFrame = CFrame.new(goal) * root.CFrame.Rotation
         end
         root.AssemblyLinearVelocity = Vector3.zero
@@ -2791,37 +2853,43 @@ function Farm:UpdateLastTitanAirHold()
         align.Mode = Enum.PositionAlignmentMode.OneAttachment
         align.ApplyAtCenterOfMass = true
         align.RigidityEnabled = false
-        align.Responsiveness = 25
-        align.MaxVelocity = 220
-        align.MaxForce = math.max(20000, root.AssemblyMass * 2000)
+        align.Responsiveness = 35
+        align.MaxVelocity = 300
+        align.MaxForce = math.max(30000, root.AssemblyMass * 3500)
         align.Position = goal
         align.Parent = root
         self.lastTitanAirRoot = root
         self.lastTitanAirAttachment = attachment
         self.lastTitanAirAlign = align
+        self.lastTitanHoldFarSince = nil
+        self.lastTitanHoldStatus = "Air hold engaged"
     else
-        -- Follow a moving Titan's head at the user's selected safe height.
         self.lastTitanAirAlign.Position = goal
         local away = (root.Position - goal).Magnitude
-        if away > 100 then
+        -- AlignPosition alone can stall on low frame-rate/streaming clients.
+        -- Restore the active goal after a short sustained divergence, instead
+        -- of waiting 5+ seconds and then another 15 seconds for a retry.
+        if away > 55 then
             self.lastTitanHoldFarSince = self.lastTitanHoldFarSince or os.clock()
-            -- A genuine movement stall should not last half an hour.
-            -- One guarded recovery teleport follows the currently live target;
-            -- never teleport repeatedly each Heartbeat.
-            if os.clock() - self.lastTitanHoldFarSince > 5
-                and os.clock() - (self.lastTitanHoldRepositionAt or -100) > 15
+            self.lastTitanHoldStatus = "Hover off course; recovering"
+            if os.clock() - self.lastTitanHoldFarSince > 1.1
+                and os.clock() - (self.lastTitanHoldRepositionAt or -100) > 3
                 and not self.attacking and not self.frozenRoot
                 and not self.skillReservation and not movementUtilityBusy() then
-                pcall(function()
+                local ok = pcall(function()
                     root.CFrame = CFrame.new(goal) * root.CFrame.Rotation
                     root.AssemblyLinearVelocity = Vector3.zero
                     root.AssemblyAngularVelocity = Vector3.zero
                 end)
                 self.lastTitanHoldRepositionAt = os.clock()
-                self.lastTitanHoldFarSince = nil
+                if ok then
+                    self.lastTitanHoldFarSince = nil
+                    self.lastTitanHoldStatus = "Air hold position recovered"
+                end
             end
         else
             self.lastTitanHoldFarSince = nil
+            self.lastTitanHoldStatus = "Following final Titan overhead"
         end
     end
 end
@@ -2844,7 +2912,8 @@ local function heartbeatFarm(dt)
         cancelTween()
         if Farm.hoverForce then removeHoverSupport() end
         if Farm.momentumForce then removeMomentumDrive() end
-        if Farm.noclipCharacter then disableMomentumNoclip() end
+        -- Last Titan has exclusive movement authority, but still needs noclip.
+        updateMomentumNoclip()
         Farm:UpdateLastTitanAirHold()
         return
     end
@@ -3344,6 +3413,16 @@ local function tryBladeReload()
 end
 
 local function tryStationRefill()
+    -- A station refill teleports the character and takes the movement lock.
+    -- Defer it while we are protecting the ONE remaining Titan; otherwise
+    -- it cancels the overhead controller and can strand mobile clients.
+    if Farm.running and Farm.lastTitanEnabled
+        and getMatchElapsed() < Farm.lastTitanAtSeconds
+        and getReservedLastTitan() ~= nil
+        and #getLivingTitans() <= 1 then
+        Farm.utilityLastMessage = "Station refill deferred until Last Titan timer"
+        return
+    end
     -- A broken-blade shortage also reserves the attack window. Do not starve
     -- emergency refills just because Turbo Aura is continuously attacking.
     if Farm.utilityBusy then return end
@@ -7434,6 +7513,9 @@ Farm.timerStatusConnection = RunService.Heartbeat:Connect(function(dt)
         and aliveCount == 1 then
         line = line .. " | Solo deadline "
             .. formatTime(math.max(0, Farm.lastTitanSoloDeadline - Farm.clockNow()))
+    end
+    if Farm.waitingFreezeActive then
+        line = line .. " | Hover: " .. tostring(Farm.lastTitanHoldStatus or "engaging")
     end
     if Farm.running and aliveCount == 1 then
         local root = getPlayerRoot()
