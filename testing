@@ -1,11 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V33
--- HollowMoonHub | Anime Dimensions v33 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V34
+-- HollowMoonHub | Anime Dimensions v34 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V33
--- HollowMoonHub | Anime Dimensions v33 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V34
+-- HollowMoonHub | Anime Dimensions v34 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -45,6 +45,7 @@ local S = {
     speedWeek = "",
     speedOriginalCharacter = "",
     speedRestorePending = false,
+    speedRestoreLobbyEpoch = 0, -- bounded restoration: stale stats cannot freeze mode scheduler
     savedLoadout = { main = "", assist1 = "", assist2 = "" },
     lastLoadoutRepairAt = -math.huge,
     loadoutRestoreAttempts = 0,
@@ -68,10 +69,13 @@ local S = {
     modeIntent = "",
     modeRequestAt = 0,
     modeFromPlace = 0,
+    modeFromJobId = "", -- recognize a new lobby server even with the same PlaceId
     modeWasInBattle = false,
     raidUnavailableUntil = 0,
     lastRaidRotationAt = 0,
     specialBusy = false,
+    specialBusySince = 0,
+    specialWorkerGeneration = 0,
     specialSelected = false,
     specialResultHandled = false,
     autoRetry = false,
@@ -82,7 +86,9 @@ local S = {
     lobbyBusy = false,
     lobbyGeneration = 0,
     createdOwnRoom = false,
+    createdOwnRoomAt = 0,
     roomStartRequested = false,
+    roomStartRequestedAt = 0,
     resultsHandled = false,
     resultsHiddenSince = nil,
 
@@ -96,11 +102,14 @@ local S = {
     reconnectV18Reviewed = false,
     lastReconnectEpoch = 0,
     reconnectArmedAt = 0,
+    lastTeleportTransitionAt = -math.huge,
+    reconnectResumeEpoch = 0, -- one-time post-reconnect grace across place changes
+    antiAfkLastPulse = 0,
     autoExecute = false,
     autoClaimQuests = false,
     autoSellCards = false,
     cardSellRarities = {}, -- only specifically selected rarities may be enabled
-    cardSellStrictV33Reviewed = false, -- disable any legacy auto-sell settings once on upgrade
+    cardSellStrictV34Reviewed = false, -- disable any legacy auto-sell settings once on upgrade
     queuedAutoExecute = false,
     lastReconnectAttempt = -math.huge,
     safeAlternate = nil,
@@ -180,20 +189,20 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v33_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v34_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "v30MapReviewed", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
     "matchesCompleted", "sessionStopped",
     "autoJoinRaid", "raidMapChoice", "raidDifficultyChoice", "raidFriendsOnly",
     "autoSpeedRaid", "speedCharacterChoice", "speedAutoLeave", "speedUsed", "speedWeek",
-    "speedOriginalCharacter", "speedRestorePending", "speedPendingCharacter", "savedLoadout",
+    "speedOriginalCharacter", "speedRestorePending", "speedRestoreLobbyEpoch", "speedPendingCharacter", "savedLoadout",
     "autoDailyRaid", "dailyLastRequestedDate", "autoBossRush", "bossAutoRetry", "bossAutoLeave",
     "autoExtreme", "extremeDifficulty", "autoTimeChallenge", "modePriority", "modeIntent", "modeRequestAt",
-    "modeFromPlace", "modeWasInBattle", "raidUnavailableUntil",
+    "modeFromPlace", "modeFromJobId", "modeWasInBattle", "raidUnavailableUntil",
     "autoAttack", "autoSkills", "autoFarm", "autoDodge",
-    "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "autoExecute",
-    "autoClaimQuests", "autoSellCards", "cardSellRarities", "cardSellStrictV33Reviewed",
+    "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "reconnectResumeEpoch", "autoExecute",
+    "autoClaimQuests", "autoSellCards", "cardSellRarities", "cardSellStrictV34Reviewed",
     "farmMethod", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
 }
 local function savePreferences()
@@ -229,9 +238,9 @@ end
 loadPreferences()
 -- v32 could re-enable previously saved native card auto-sell rarities even
 -- when those rarities were NOT selected in HollowMoonHub. One-time fail-safe:
--- disable Auto Sell until the user re-confirms their selections in v33.
-if not S.cardSellStrictV33Reviewed then
-    S.cardSellStrictV33Reviewed = true
+-- disable Auto Sell until the user re-confirms their selections in v34.
+if not S.cardSellStrictV34Reviewed then
+    S.cardSellStrictV34Reviewed = true
     S.autoSellCards = false
     if type(S.cardSellRarities) ~= "table" then S.cardSellRarities = {} end
     savePreferences()
@@ -267,8 +276,10 @@ if not S.reconnectV18Reviewed then
 end
 -- Never rejoin while a new place is still loading, even when the user's
 -- persisted preference is ON. Separate session-local arming from state.
-S.reconnectArmedAt = os.clock() + 45
+S.reconnectArmedAt = os.clock() + 12
+S.antiAfkLastPulse = os.clock()
 S.lastReconnectEpoch = math.max(0, tonumber(S.lastReconnectEpoch) or 0)
+S.reconnectResumeEpoch = math.max(0, tonumber(S.reconnectResumeEpoch) or 0)
 
 -- The outer v30 loader waits for StatsLoaded, required modules and a stable
 -- character BEFORE this core runs. This second check protects later respawns.
@@ -283,7 +294,7 @@ end
 -- GitHub must host a complete Anime Dimensions script. Accept older/newer
 -- version headers, but never execute an unrelated game script.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V33"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V34"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -311,7 +322,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v33] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v34] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -335,7 +346,7 @@ local function installTeleportBootstrap()
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v33] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v34] GitHub Auto Execute fetch failed")
             return
         end
         -- Accept ANY complete HollowMoonHub Anime Dimensions version.
@@ -349,17 +360,17 @@ local function installTeleportBootstrap()
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v33] GitHub returned a different script: "
+            warn("[HollowMoonHub AD v34] GitHub returned a different script: "
                 .. firstLine:sub(1, 140) .. ". Not executing; check branch/file/raw URL.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v33] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v34] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v33] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v34] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -612,12 +623,17 @@ local function invokeRoom(action, value)
 end
 local function autoStartWorker()
     if game.PlaceId == 7338881230 then return end -- raid lobby is raid-only
+    if os.time() < (S.reconnectResumeEpoch or 0) then return end
     if S.specialSelected or S.specialBusy then return end
     if S.lobbyBusy or not S.alive or not inLobby() or not S.autoStart or S.sessionStopped then return end
     S.lobbyBusy = true
     S.lobbyGeneration = S.lobbyGeneration + 1
     local token = S.lobbyGeneration
     task.spawn(function()
+        -- A runtime exception in the room worker must not leave lobbyBusy
+        -- permanently set. Network teleport success deliberately keeps it set
+        -- until the destination place loads (or watchdog expiry).
+        local workerOK,workerErr=pcall(function()
         -- Wait for replicated stats without blocking the interface.
         local started = os.clock()
         while S.alive and S.autoStart and token == S.lobbyGeneration
@@ -655,6 +671,7 @@ local function autoStartWorker()
             return
         end
         S.createdOwnRoom = true
+        S.createdOwnRoomAt = os.clock()
         task.wait(S.startDelay)
         if not (S.alive and S.autoStart and token == S.lobbyGeneration and inLobby()) then
             S.lobbyBusy = false; return
@@ -667,9 +684,15 @@ local function autoStartWorker()
             return
         end
         S.roomStartRequested = true
+        S.roomStartRequestedAt = os.clock()
         savePreferences()
         -- Don't send duplicate start commands while Roblox is teleporting.
         S.lobbyBusy = true
+        end)
+        if not workerOK then
+            S.lobbyBusy=false
+            warnOnce("Room automation error: " .. tostring(workerErr))
+        end
     end)
 end
 
@@ -1022,10 +1045,14 @@ local function modeRequest(action,argument,mode)
     -- An explicit Fail is a rejection; nil is treated as pending, never
     -- repeatedly called inside the teleport window.
     if not mainFunction then return false end
+    local initialWorkerGeneration=S.specialWorkerGeneration
     local ok,res=pcall(function()
         if argument==nil then return mainFunction:InvokeServer(action) end
         return mainFunction:InvokeServer(action,argument)
     end)
+    -- A hung invocation may finish after its 35-second watchdog cancelled
+    -- that scheduler worker. Never let the stale completion overwrite intent.
+    if initialWorkerGeneration ~= S.specialWorkerGeneration then return false end
     if not ok or type(res)=="table" and res.status=="Fail" then
         warnOnce(mode..": "..tostring(ok and res and res.message or res))
         specialFailureUntil[mode]=os.clock()+45
@@ -1041,6 +1068,7 @@ local function modeRequest(action,argument,mode)
     end
     S.modeIntent=mode
     S.modeFromPlace=game.PlaceId
+    S.modeFromJobId=game.JobId
     S.modeRequestAt=os.time()
     savePreferences()
     return true
@@ -1066,6 +1094,7 @@ end
 local function saveOriginalSpeedCharacter()
     rememberEquippedLoadout() -- snapshot BEFORE Speed Raid switches characters
     if S.speedRestorePending and isEquippedName(S.speedOriginalCharacter) then return end
+    S.speedRestoreLobbyEpoch = 0 -- begin timeout only after we reach the lobby
     local main=stat("CharacterName")
     if isEquippedName(main) then
         S.speedOriginalCharacter=main
@@ -1091,7 +1120,24 @@ local function equipSavedSlot(name, slot)
 end
 local function restoreSpeedCharacter()
     if not S.speedRestorePending or not regularLobby() or not statsReady() then return end
-    if os.clock()-S.lastLoadoutRepairAt<1.2 then return end
+    -- Some characters do not replicate equip/assist stats after a Speed Raid.
+    -- Those nil stats previously caused an unconditional return every 2s,
+    -- permanently blocking every other mode. Bound this state across reloads.
+    if (tonumber(S.speedRestoreLobbyEpoch) or 0) <= 0 then
+        S.speedRestoreLobbyEpoch=os.time()
+        savePreferences()
+    end
+    if os.time() - S.speedRestoreLobbyEpoch >= 28 then
+        S.speedRestorePending=false
+        S.speedRestoreLobbyEpoch=0
+        S.speedOriginalCharacter=""
+        S.speedPendingCharacter=""
+        S.loadoutRestoreAttempts=0
+        savePreferences()
+        warnOnce("Speed Raid loadout could not be fully restored; scheduler resumed. Check assists before Boss Rush.")
+        return
+    end
+    if os.clock()-S.lastLoadoutRepairAt<1.0 then return end
     local saved=type(S.savedLoadout)=="table" and S.savedLoadout or {}
     local wantedMain=isEquippedName(S.speedOriginalCharacter) and S.speedOriginalCharacter or saved.main
     local currentMain=stat("CharacterName")
@@ -1110,6 +1156,7 @@ local function restoreSpeedCharacter()
     end
     if missingSlot==nil then
         S.speedRestorePending=false
+        S.speedRestoreLobbyEpoch=0
         S.speedOriginalCharacter=""
         S.speedPendingCharacter=""
         S.loadoutRestoreAttempts=0
@@ -1124,6 +1171,7 @@ local function restoreSpeedCharacter()
         -- cannot stall every other mode indefinitely.
         warnOnce("Could not fully restore Speed Raid loadout; check owned characters/assist slots")
         S.speedRestorePending=false
+        S.speedRestoreLobbyEpoch=0
         S.speedOriginalCharacter=""
         S.loadoutRestoreAttempts=0
         savePreferences()
@@ -1159,6 +1207,9 @@ end
 local function stopSpeedAutomation(reason)
     S.autoSpeedRaid=false
     S.speedPendingCharacter=""
+    -- The old code could leave this true after Speed Raid was exhausted.
+    -- That prevented Auto Start Dimensions from resuming in the lobby.
+    S.specialSelected = specialEnabled()
     savePreferences()
     if S.speedRaidToggle then pcall(function() S.speedRaidToggle:Set(false,true) end) end
     warnOnce("Speed Raid stopped: "..tostring(reason))
@@ -1255,6 +1306,7 @@ local function scheduleRaidInLobby()
     if not result or result.status~="Success" then return false end
     S.modeIntent="Raid"
     S.modeFromPlace=game.PlaceId
+    S.modeFromJobId=game.JobId
     S.modeRequestAt=os.time()
     S.createdOwnRoom=true
     savePreferences()
@@ -1292,6 +1344,7 @@ local function queueRaid(id,difficulty)
     end
     S.modeIntent="RaidQueue"
     S.modeFromPlace=game.PlaceId
+    S.modeFromJobId=game.JobId
     S.modeRequestAt=os.time()
     S.lobbyBusy=true -- queue is active until place transition / manual cancellation
     savePreferences()
@@ -1303,19 +1356,49 @@ end
 local lastSpecialCheck=0
 local function specialLobbyTick()
     if not (S.alive and inLobby() and statsReady()) then return end
-    if S.specialBusy then return end
     local now=os.clock()
-    if now-lastSpecialCheck<2 then return end
+    -- If a Roblox InvokeServer inside the previous asynchronous worker never
+    -- returns, don't leave all modes frozen behind specialBusy forever.
+    if S.specialBusy then
+        if now - (S.specialBusySince or now) < 35 then return end
+        S.specialBusy=false
+        S.specialWorkerGeneration=(S.specialWorkerGeneration or 0)+1
+        warnOnce("Mode scheduler recovered from a stuck request")
+    end
+    if now-lastSpecialCheck<1 then return end
     lastSpecialCheck=now
     local epoch=os.time()
+    -- Recover only parties that THIS script created in a normal Dimension
+    -- lobby and that never teleported, not public / multiplayer raid queues.
+    -- The real RoomModule uses RemovePlayerFromParty for leaving a party.
+    if regularLobby() and S.createdOwnRoom
+        and (S.createdOwnRoomAt or 0)>0
+        and now-S.createdOwnRoomAt>90 then
+        if remote then pcall(function()
+            remote:FireServer("RemovePlayerFromParty")
+        end) end
+        S.createdOwnRoom=false
+        S.createdOwnRoomAt=0
+        S.roomStartRequested=false
+        S.roomStartRequestedAt=0
+        S.lobbyBusy=false
+        S.lobbyGeneration=S.lobbyGeneration+1
+        warnOnce("A created room never transferred; released stale party and resumed mode checks")
+    end
     -- Returning from a battle must clear the previous mode even when the
     -- destination is the SAME lobby PlaceId that originally queued it.
-    if S.modeWasInBattle then
+    local cameBackToNewServer = S.modeIntent~=""
+        and type(S.modeFromJobId)=="string" and S.modeFromJobId~=""
+        and type(game.JobId)=="string" and game.JobId~=""
+        and S.modeFromJobId~=game.JobId
+    if S.modeWasInBattle or cameBackToNewServer then
         S.modeWasInBattle=false
         S.modeIntent="";S.modeRequestAt=0;S.modeFromPlace=game.PlaceId
+        S.modeFromJobId=game.JobId
         savePreferences()
     elseif S.modeIntent~="" and game.PlaceId~=(tonumber(S.modeFromPlace) or 0) then
         S.modeIntent="";S.modeRequestAt=0;S.modeFromPlace=game.PlaceId
+        S.modeFromJobId=game.JobId
         savePreferences()
     end
     if S.modeIntent~="" and epoch-(tonumber(S.modeRequestAt) or 0)<45 then return end
@@ -1323,14 +1406,25 @@ local function specialLobbyTick()
         -- Await another eligibility check instead of hammering the same remote.
         S.modeIntent="";savePreferences()
     end
-    if not specialEnabled() then
-        S.specialSelected=false
-        return
-    end
+    -- Don't suppress regular Dimensions when Speed Raid is now exhausted or
+    -- when all special modes are disabled. The mode priority list includes it.
+    local hasSpecial=specialEnabled()
+    S.specialSelected=hasSpecial
+    if not hasSpecial and not (S.autoStart and not S.sessionStopped) then return end
+    -- Pause auto-entry briefly after a genuine network reconnect only.
+    -- Normal lobby-to-battle transitions do NOT set this grace period.
+    if os.time() < (S.reconnectResumeEpoch or 0) then return end
     -- Avoid competing with a room that was already created by Auto Start.
     if S.lobbyBusy or S.createdOwnRoom or (S.speedRestorePending and regularLobby()) then return end
     S.specialBusy=true
+    S.specialBusySince=os.clock()
+    S.specialWorkerGeneration=(S.specialWorkerGeneration or 0)+1
+    local workerGeneration=S.specialWorkerGeneration
     task.spawn(function()
+        -- A failure in any individual mode check MUST release specialBusy.
+        -- Previously the spawned coroutine could error and permanently freeze
+        -- the entire lobby workflow, including after returning from Speed Raid.
+        local worked, failure = pcall(function()
         local launched=false
         if game.PlaceId==RAID_LOBBY then
             if S.autoJoinRaid and S.raidWindowOpen() then
@@ -1338,8 +1432,9 @@ local function specialLobbyTick()
                 local id=chooseRaid(level)
                 local diff=id and chooseRaidDifficulty(id,level)
                 if id and diff then
-                    local info=getSettings().MapInfo[id]
-                    if (tonumber(info.minimumPlayersToStart) or 1)>1
+                    local cfg=getSettings()
+                    local info=cfg and cfg.MapInfo and cfg.MapInfo[id]
+                    if info and (tonumber(info.minimumPlayersToStart) or 1)>1
                         and not S.raidFriendsOnly and info.canBeQueued then
                         launched=queueRaid(id,diff)
                     else
@@ -1370,6 +1465,8 @@ local function specialLobbyTick()
             end)
             for _, mode in ipairs(ordered) do
                 if launched then break end
+                local holdForRepair=false
+                local modeOK,modeError=pcall(function()
                 if mode=="BossRush" and S.autoBossRush then
                     -- The server requires Assist 1 and Assist 2 to be equipped.
                     -- Don't request a doomed entry or block lower-priority modes.
@@ -1379,7 +1476,8 @@ local function specialLobbyTick()
                             if repairMissingBossRushAssists() then
                                 -- Hold this priority slot while a saved assist is
                                 -- being re-equipped, rather than starting another mode.
-                                break
+                                holdForRepair=true
+                                return
                             end
                             if not S.bossAssistWaitingNotified then
                                 warnOnce("Boss Rush waiting: equip Assist 1 and Assist 2 (no saved loadout)")
@@ -1422,10 +1520,24 @@ local function specialLobbyTick()
                             and not S.specialBusy then autoStartWorker() end
                     end)
                 end
+                end)
+                if not modeOK then
+                    -- A problem in one selected mode should not stop the next
+                    -- eligible mode from being considered in this tick.
+                    warnOnce("Skipped "..tostring(mode).." after mode error: "..tostring(modeError))
+                end
+                if holdForRepair then break end
             end
         end
-        S.specialBusy=false
         if launched then S.specialSelected=(launched~="Dimensions") end
+        end)
+        if S.specialWorkerGeneration == workerGeneration then
+            S.specialBusy=false
+            S.specialBusySince=0
+        end
+        if not worked then
+            warnOnce("Mode scheduler error: " .. tostring(failure))
+        end
     end)
 end
 
@@ -2781,21 +2893,42 @@ end
 -- ================================================================
 -- SETTINGS: Anti-AFK / reconnect / GitHub Auto Execute
 -- ================================================================
--- Anti-AFK uses the local idle signal; supported input methods vary by runtime.
-local idleOk, idleConn = pcall(function() return player.Idled:Connect(function()
+-- The native Idled event fires after ~2 minutes and repeatedly thereafter,
+-- but some executor environments miss idle events. Use an infrequent periodic
+-- fallback as well. Only VirtualUser input (not mouse targeting or camera aim).
+local function antiAfkPulse()
     if not (S.alive and S.antiAfk) then return end
+    local now=os.clock()
+    if now - (S.antiAfkLastPulse or 0) < 65 then return end
+    S.antiAfkLastPulse=now
     task.spawn(function()
-        pcall(function()
+        local ok, err=pcall(function()
             VirtualUser:CaptureController()
             local camera = Workspace.CurrentCamera
             local cameraCF = camera and camera.CFrame or CFrame.new()
-            VirtualUser:Button2Down(Vector2.new(0, 0), cameraCF)
-            task.wait(0.15)
-            VirtualUser:Button2Up(Vector2.new(0, 0), cameraCF)
+            VirtualUser:Button2Down(Vector2.new(0,0),cameraCF)
+            task.wait(0.12)
+            VirtualUser:Button2Up(Vector2.new(0,0),cameraCF)
         end)
+        if not ok and not S.antiAfkFailureReported then
+            S.antiAfkFailureReported=true
+            warnOnce("Anti-AFK simulated input unavailable in this executor: "..tostring(err))
+        end
     end)
-end) end)
-if idleOk and idleConn then S.connections[#S.connections+1] = idleConn end
+end
+local idleOk,idleConn=pcall(function()
+    return player.Idled:Connect(antiAfkPulse)
+end)
+if idleOk and idleConn then S.connections[#S.connections+1]=idleConn end
+-- Backup pulse every seven minutes, not every frame and not during startup.
+task.spawn(function()
+    while S.alive do
+        task.wait(60)
+        if S.antiAfk and os.clock() - (S.antiAfkLastPulse or 0) >= 420 then
+            antiAfkPulse()
+        end
+    end
+end)
 
 -- Reconnect only after a persistent, explicit network disconnect (code 277).
 -- Never reconnect due to general ErrorPrompt text, teleport initialization
@@ -2807,19 +2940,22 @@ local RECONNECT_COOLDOWN_SECONDS = 600
 local function attemptReconnect()
     if not (S.alive and S.autoReconnect) or S.reconnectTriggered then return end
     if os.clock() < (S.reconnectArmedAt or math.huge) then return end
-    if not statsReady() then return end
-    if S.lobbyBusy or S.roomStartRequested then return end
+    -- On a real disconnect StatsLoaded can become unavailable, and a room
+    -- transfer may still appear busy. Neither should prevent recovery.
+    -- However, do not confuse a 277 shown during normal teleport loading
+    -- with a new active-session disconnect.
+    if os.clock() - (S.lastTeleportTransitionAt or -math.huge) < 12 then return end
     local epoch = os.time()
     if epoch - (S.lastReconnectEpoch or 0) < RECONNECT_COOLDOWN_SECONDS then return end
 
     S.reconnectTriggered = true
     S.lastReconnectEpoch = epoch
     S.lastReconnectAttempt = os.clock()
-    -- Prevent a saved Auto Start setting from sending the player straight
-    -- back into another room after recovery, appearing to reconnect forever.
-    S.autoStart = false
-    S.sessionStopped = true
-    savePreferences()  -- Persist cooldown and paused Auto Start before teleport.
+    -- Keep the user's Auto Start and mode toggles intact. Old versions
+    -- permanently disabled them and left the player stranded after a rejoin.
+    -- A short persisted grace on the NEXT lobby entry prevents entry loops.
+    S.reconnectResumeEpoch = epoch + 25
+    savePreferences()
     if S.autoExecute then installTeleportBootstrap() end
     task.spawn(function()
         local ok, err = pcall(function()
@@ -2871,6 +3007,18 @@ local function watchDisconnectPrompt()
                 pending[gui] = nil
                 if S.alive and S.autoReconnect and confirmedNetworkDisconnect(gui) then
                     attemptReconnect()
+                    -- If the prompt appeared during script startup or a normal
+                    -- place-teleport transition, the 12s safety gate may have
+                    -- rejected the first attempt. Recheck the SAME visible
+                    -- error once later; never reconnect from a vanished prompt.
+                    if not S.reconnectTriggered then
+                        task.delay(14,function()
+                            if S.alive and S.autoReconnect and not S.reconnectTriggered
+                                and confirmedNetworkDisconnect(gui) then
+                                attemptReconnect()
+                            end
+                        end)
+                    end
                 end
             end)
         end
@@ -2908,6 +3056,19 @@ local function watchDisconnectPrompt()
     end
 end
 watchDisconnectPrompt()
+local onTeleOK,onTeleConn=pcall(function()
+    return player.OnTeleport:Connect(function(state)
+        if state==Enum.TeleportState.Started
+            or state==Enum.TeleportState.InProgress
+            or state==Enum.TeleportState.WaitingForServer then
+            S.lastTeleportTransitionAt=os.clock()
+        elseif state==Enum.TeleportState.Failed then
+            -- A failed place teleport is NOT an error-277 network disconnect.
+            S.lastTeleportTransitionAt=os.clock()
+        end
+    end)
+end)
+if onTeleOK and onTeleConn then S.connections[#S.connections+1]=onTeleConn end
 local failedOK, failedConn = pcall(function()
     return TeleportService.TeleportInitFailed:Connect(function(who)
         if who == player and S.alive and S.autoReconnect then
@@ -3173,7 +3334,10 @@ local function buildUI()
                     if S.sessionStopped then S.matchesCompleted=0 end
                     S.sessionStopped=false
                     S.createdOwnRoom=false
-                    task.defer(autoStartWorker)
+                    S.createdOwnRoomAt=0
+                    S.roomStartRequested=false
+                    -- The centralized scheduler starts the highest-priority
+                    -- eligible mode on its next tick; no independent kickoff.
                 else S.lobbyBusy=false end
                 savePreferences()
             end,
@@ -3401,6 +3565,35 @@ local function buildUI()
         addPrioritySlider(priorityRight,"Extreme Dimension","ExtremeDimension")
         addPrioritySlider(priorityRight,"Time Challenge","TimeChallenge")
         addPrioritySlider(priorityRight,"Dimensions","Dimensions")
+        priorityRight:CreateSection({name="Recovery"})
+        priorityRight:CreateButton({
+            name="Resume Mode Queue",
+            callback=function()
+                -- Only the user can deliberately clear a prior manual stop or
+                -- stale v33 reconnect pause. Keep every mode toggle unchanged.
+                S.sessionStopped=false
+                S.matchesCompleted=0
+                S.modeIntent=""
+                S.modeRequestAt=0
+                S.modeFromJobId=game.JobId
+                S.modeWasInBattle=false
+                S.lobbyBusy=false
+                S.lobbyGeneration=S.lobbyGeneration+1
+                S.createdOwnRoom=false
+                S.createdOwnRoomAt=0
+                S.roomStartRequested=false
+                S.roomStartRequestedAt=0
+                S.specialBusy=false
+                S.specialBusySince=0
+                S.specialWorkerGeneration=(S.specialWorkerGeneration or 0)+1
+                S.speedRestorePending=false
+                S.speedRestoreLobbyEpoch=0
+                S.specialSelected=specialEnabled()
+                S.reconnectResumeEpoch=0
+                savePreferences()
+                warnOnce("Mode queue reset; enabled modes will be checked again")
+            end,
+        })
 
     end
 
@@ -3594,7 +3787,12 @@ local function buildUI()
         protectionCol:CreateSection({name="Session"})
         protectionCol:CreateToggle({
             name="Anti-AFK",flag="AD16_AntiAFK",value=S.antiAfk,
-            callback=function(on) S.antiAfk=on==true; savePreferences() end,
+            callback=function(on)
+                S.antiAfk=on==true
+                S.antiAfkLastPulse=os.clock()
+                S.antiAfkFailureReported=false
+                savePreferences()
+            end,
         })
         protectionCol:CreateToggle({
             name="Auto Reconnect",flag="AD16_AutoReconnect",value=S.autoReconnect,
@@ -3761,11 +3959,8 @@ task.spawn(function()
     end
 end)
 
--- After the UI is available, resume the auto-create workflow if enabled.
--- No room-creation calls are sent outside lobby places.
-if inLobby() and S.autoStart and not S.sessionStopped and not S.specialSelected then
-    task.defer(autoStartWorker)
-end
+-- Auto Start is now handled by the SAME priority scheduler as other modes.
+-- Do not create a room in parallel with a special mode during startup.
 ]====]
 
 -- Readiness gate OUTSIDE the core. An executor may run us immediately on
@@ -3774,7 +3969,7 @@ end
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV33
+local priorBoot = env.HollowMoonADStartupV34
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -3785,7 +3980,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV33 = boot
+env.HollowMoonADStartupV34 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -3851,7 +4046,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV33 ~= boot then return end
+    if env.HollowMoonADStartupV34 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -3868,13 +4063,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v33] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v34] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v33] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v34] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -3882,16 +4077,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v33_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v34_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v33] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v34] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v33] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v34] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
