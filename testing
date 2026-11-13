@@ -1,10 +1,10 @@
--- HMH_ANIME_DIMENSIONS_V20
--- HollowMoonHub | Anime Dimensions v20 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V21
+-- HollowMoonHub | Anime Dimensions v21 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
--- HMH_ANIME_DIMENSIONS_V20
--- HollowMoonHub | Anime Dimensions v20 | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V21
+-- HollowMoonHub | Anime Dimensions v21 | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -131,7 +131,7 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v20_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v21_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
@@ -178,7 +178,7 @@ end
 S.reconnectArmedAt = os.clock() + 45
 S.lastReconnectEpoch = math.max(0, tonumber(S.lastReconnectEpoch) or 0)
 
--- The outer v20 loader waits for StatsLoaded, required modules and a stable
+-- The outer v21 loader waits for StatsLoaded, required modules and a stable
 -- character BEFORE this core runs. This second check protects later respawns.
 local function statsReady()
     local gui = player:FindFirstChildOfClass("PlayerGui")
@@ -188,10 +188,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host THIS Anime Dimensions script. The supplied raw URL currently
--- hosts an AOT script, so validate the exact project marker before executing.
+-- GitHub must host a complete Anime Dimensions script. Accept older/newer
+-- version headers, but never execute an unrelated game script.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V20"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V21"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -203,7 +203,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v20 main entry adds a second gate for
+        -- until player stats load; the v21 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -219,7 +219,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v20] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v21] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -235,22 +235,39 @@ local function installTeleportBootstrap()
             end
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-        local ok, code = pcall(function() return game:HttpGet(url) end)
-        if not ok or type(code) ~= "string" then
-            warn("[HollowMoonHub AD v20] GitHub Auto Execute fetch failed")
+        -- Bust cached copies of the raw file after updating it in GitHub.
+        local freshURL = url .. "?hmh_ad_v21=" .. tostring(os.time())
+        local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
+        if not ok or type(code) ~= "string" or #code == 0 then
+            -- Some executors reject the optional no-cache parameter/query string.
+            ok, code = pcall(function() return game:HttpGet(url) end)
+        end
+        if not ok or type(code) ~= "string" or #code == 0 then
+            warn("[HollowMoonHub AD v21] GitHub Auto Execute fetch failed")
             return
         end
-        if not string.find(code:sub(1, 2400), "HMH_ANIME_DIMENSIONS_V20", 1, true) then
-            warn("[HollowMoonHub AD v20] Wrong/outdated GitHub script. Not executing")
+        -- Accept ANY complete HollowMoonHub Anime Dimensions version.
+        -- An older v19 loader rejected v20 solely because the marker changed.
+        -- Still reject other games, e.g. the AOT script previously at this URL.
+        local header = code:sub(1, 4096)
+        local firstLine = header:match("^[^\r\n]+") or "<empty>"
+        local validHeader = firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V%d+%s*$") ~= nil
+        local isAnimeDimensions = validHeader
+            and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
+            and header:find("6938803436", 1, true) ~= nil
+            and header:find("6990129309", 1, true) ~= nil
+        if not isAnimeDimensions then
+            warn("[HollowMoonHub AD v21] GitHub returned a different script: "
+                .. firstLine:sub(1, 140) .. ". Not executing; check branch/file/raw URL.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v20] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v21] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v20] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v21] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -2356,7 +2373,7 @@ end
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV20
+local priorBoot = env.HollowMoonADStartupV21
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -2367,7 +2384,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV20 = boot
+env.HollowMoonADStartupV21 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -2433,7 +2450,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV20 ~= boot then return end
+    if env.HollowMoonADStartupV21 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -2450,13 +2467,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v20] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v21] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v20] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v21] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -2464,16 +2481,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v20_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v21_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v20] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v21] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v20] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v21] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
