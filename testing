@@ -1,11 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V32
--- HollowMoonHub | Anime Dimensions v32 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V33
+-- HollowMoonHub | Anime Dimensions v33 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V32
--- HollowMoonHub | Anime Dimensions v32 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V33
+-- HollowMoonHub | Anime Dimensions v33 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -99,8 +99,8 @@ local S = {
     autoExecute = false,
     autoClaimQuests = false,
     autoSellCards = false,
-    cardSellRarities = {}, -- no default auto selling: user must explicitly choose rarities
-    nativeAutoSellBefore = {}, -- restore game native preferences when script auto sell is turned off
+    cardSellRarities = {}, -- only specifically selected rarities may be enabled
+    cardSellStrictV33Reviewed = false, -- disable any legacy auto-sell settings once on upgrade
     queuedAutoExecute = false,
     lastReconnectAttempt = -math.huge,
     safeAlternate = nil,
@@ -180,7 +180,7 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v32_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v33_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "v30MapReviewed", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
@@ -193,7 +193,7 @@ local PERSIST_KEYS = {
     "modeFromPlace", "modeWasInBattle", "raidUnavailableUntil",
     "autoAttack", "autoSkills", "autoFarm", "autoDodge",
     "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "autoExecute",
-    "autoClaimQuests", "autoSellCards", "cardSellRarities", "nativeAutoSellBefore",
+    "autoClaimQuests", "autoSellCards", "cardSellRarities", "cardSellStrictV33Reviewed",
     "farmMethod", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
 }
 local function savePreferences()
@@ -227,6 +227,15 @@ local function loadPreferences()
     end
 end
 loadPreferences()
+-- v32 could re-enable previously saved native card auto-sell rarities even
+-- when those rarities were NOT selected in HollowMoonHub. One-time fail-safe:
+-- disable Auto Sell until the user re-confirms their selections in v33.
+if not S.cardSellStrictV33Reviewed then
+    S.cardSellStrictV33Reviewed = true
+    S.autoSellCards = false
+    if type(S.cardSellRarities) ~= "table" then S.cardSellRarities = {} end
+    savePreferences()
+end
 -- A one-time reset for old state files which explicitly saved the Halloween
 -- event while the UI was later set back to "Hardest". Halloween remains
 -- selectable manually after the migration; it is never an automatic pick.
@@ -274,7 +283,7 @@ end
 -- GitHub must host a complete Anime Dimensions script. Accept older/newer
 -- version headers, but never execute an unrelated game script.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V32"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V33"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -302,7 +311,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v32] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v33] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -326,7 +335,7 @@ local function installTeleportBootstrap()
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v32] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v33] GitHub Auto Execute fetch failed")
             return
         end
         -- Accept ANY complete HollowMoonHub Anime Dimensions version.
@@ -340,17 +349,17 @@ local function installTeleportBootstrap()
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v32] GitHub returned a different script: "
+            warn("[HollowMoonHub AD v33] GitHub returned a different script: "
                 .. firstLine:sub(1, 140) .. ". Not executing; check branch/file/raw URL.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v32] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v33] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v32] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v33] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -2962,55 +2971,55 @@ local function claimReadyQuests()
     end
 end
 
+-- The game's own UI has these six BoolValue flags, each controlled by
+-- MainRemoteEvent:FireServer("ChangeSetting", "Setting_AutoSell"..rarity, bool).
+-- Never restore earlier native settings: they could include unselected rarities.
 local function nativeCardSellSettings()
-    if not (statsReady() and remote) then return nil end
+    if not (statsReady() and remote) then return nil, false end
     local display = statDisplay()
-    if not display then return nil end
-    local flags = {}
+    if not display then return nil, false end
+    local flags, complete, found = {}, true, false
     for _, rarity in ipairs(CARD_SELL_RARITIES) do
         local flag = display:FindFirstChild("Setting_AutoSell" .. rarity)
-        if not flag or not flag:IsA("BoolValue") then return nil end
-        flags[rarity] = flag
+        if flag and flag:IsA("BoolValue") then
+            flags[rarity] = flag
+            found = true
+        else
+            complete = false
+        end
     end
-    return flags
+    return found and flags or nil, complete
 end
 
 local function hasChosenCardRarity()
+    if type(S.cardSellRarities) ~= "table" then return false end
     for _, rarity in ipairs(CARD_SELL_RARITIES) do
-        if S.cardSellRarities[rarity] then return true end
+        if S.cardSellRarities[rarity] == true then return true end
     end
     return false
 end
 
 local function applyNativeCardSell(force)
-    if not S.alive then return end
-    local flags = nativeCardSellSettings()
-    if not flags then return end
-    -- No selected rarities means NO change to the game's auto-sell settings.
-    -- This protects cards until the user makes an explicit selection.
-    local restoring = not S.autoSellCards and next(S.nativeAutoSellBefore) ~= nil
-    if not restoring and (not S.autoSellCards or not hasChosenCardRarity()) then return end
+    if not S.alive then return false end
+    local flags, complete = nativeCardSellSettings()
+    if not flags then return false end
 
-    if S.autoSellCards and next(S.nativeAutoSellBefore) == nil then
-        for _, rarity in ipairs(CARD_SELL_RARITIES) do
-            S.nativeAutoSellBefore[rarity] = flags[rarity].Value == true
-        end
-        savePreferences()
-    end
-
-    local allAligned = true
+    -- This toggle fully owns the game's native auto-sell configuration.
+    -- ON: only selected rarities are enabled (others explicitly OFF).
+    -- OFF: every native card auto-sell setting is OFF, avoiding surprises.
+    -- Fail closed when a rarity stat has not loaded: disable available flags
+    -- until all six can be reconciled, rather than accidentally leaving an
+    -- unselected rarity enabled.
+    local enabled = complete and S.autoSellCards and hasChosenCardRarity()
+    local allAligned = complete
     for _, rarity in ipairs(CARD_SELL_RARITIES) do
-        local desired
-        if restoring then
-            desired = S.nativeAutoSellBefore[rarity] == true
-        else
-            desired = S.cardSellRarities[rarity] == true
-        end
-        if flags[rarity].Value ~= desired then
+        local desired = enabled and S.cardSellRarities[rarity] == true or false
+        local flag = flags[rarity]
+        if flag and flag.Value ~= desired then
             allAligned = false
             local name = "Setting_AutoSell" .. rarity
             local now = os.clock()
-            if force or now - (cardSellLastSent[name] or -math.huge) >= 2.0 then
+            if force or now - (cardSellLastSent[name] or -math.huge) >= 1.5 then
                 cardSellLastSent[name] = now
                 local ok, err = pcall(function()
                     remote:FireServer("ChangeSetting", name, desired)
@@ -3019,11 +3028,7 @@ local function applyNativeCardSell(force)
             end
         end
     end
-    if restoring and allAligned then
-        -- Original game auto-sell choices are back. Stop owning these flags.
-        S.nativeAutoSellBefore = {}
-        savePreferences()
-    end
+    return allAligned
 end
 
 -- These are deliberately lightweight periodic workers, not per-Heartbeat
@@ -3040,23 +3045,19 @@ task.spawn(function()
 end)
 task.spawn(function()
     while S.alive do
-        if S.autoSellCards or next(S.nativeAutoSellBefore) ~= nil then
-            local ok, err = pcall(applyNativeCardSell)
-            if not ok then warnOnce("Card sell worker: " .. tostring(err)) end
-        end
+        -- Reconcile OFF as well as ON. In particular, disable any stale native
+        -- rarity flags left active by v32, the game UI, or a previous session.
+        local ok, err = pcall(applyNativeCardSell)
+        if not ok then warnOnce("Card sell worker: " .. tostring(err)) end
         task.wait(0.9)
     end
 end)
 
 function S.Unload()
     if not S.alive then return end
-    -- Return the game's own rarity settings to their previous values.
-    -- Keep the baseline persisted if the server has not yet confirmed them,
-    -- so a later execution can finish restoring without deleting cards.
+    -- Strict mode: leaving the script must not reactivate unselected rarities.
     S.autoSellCards = false
-    if next(S.nativeAutoSellBefore) ~= nil then
-        pcall(applyNativeCardSell, true)
-    end
+    pcall(applyNativeCardSell, true)
     savePreferences()
     S.alive = false
     S.autoFarm, S.autoAttack, S.autoSkills, S.autoDodge = false, false, false, false
@@ -3534,32 +3535,40 @@ local function buildUI()
         local cardActionCol=cardRow:CreateGroup({direction="column"})
         cardFilterCol:CreateSection({name="Rarity Filter"})
         cardFilterCol:CreateDropdown({
-            name="Card Rarities",flag="AD22_CardRarities",multiSelect=true,
+            name="Card Rarities",flag="AD33_CardRarities",multiSelect=true,
             options=CARD_SELL_RARITIES,value=selectedCardRarities,
             callback=function(values)
+                -- Rayfield multi-select may provide a string array or a
+                -- {rarity=true/false} dictionary. Only accept known names.
+                local allowed={}
+                for _,rarity in ipairs(CARD_SELL_RARITIES) do allowed[rarity]=true end
                 local picked={}
                 if type(values)=="table" then
                     for k,v in pairs(values) do
-                        if type(v)=="string" then picked[v]=true
-                        elseif type(k)=="string" and v==true then picked[k]=true end
+                        if type(k)=="number" and type(v)=="string" and allowed[v] then
+                            picked[v]=true
+                        elseif type(k)=="string" and allowed[k] and v==true then
+                            picked[k]=true
+                        end
                     end
-                elseif type(values)=="string" then picked[values]=true end
-                S.cardSellRarities={}
-                for _,rarity in ipairs(CARD_SELL_RARITIES) do
-                    if picked[rarity] then S.cardSellRarities[rarity]=true end
+                elseif type(values)=="string" and allowed[values] then
+                    picked[values]=true
                 end
+                S.cardSellRarities=picked
                 savePreferences()
+                pcall(applyNativeCardSell, true)
             end,
         })
         cardActionCol:CreateSection({name="Automatic Selling"})
         cardActionCol:CreateToggle({
-            name="Auto Sell Cards",flag="AD22_AutoSellCards",value=S.autoSellCards,
+            name="Auto Sell Cards",flag="AD33_AutoSellCards",value=S.autoSellCards,
             callback=function(on)
                 S.autoSellCards=on==true
                 if S.autoSellCards and not hasChosenCardRarity() then
-                    warnOnce("Select one or more Card Rarities before auto-selling")
+                    warnOnce("Auto Sell Cards: no selected rarities, so no cards will be sold")
                 end
                 savePreferences()
+                pcall(applyNativeCardSell, true)
             end,
         })
 
@@ -3765,7 +3774,7 @@ end
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV32
+local priorBoot = env.HollowMoonADStartupV33
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -3776,7 +3785,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV32 = boot
+env.HollowMoonADStartupV33 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -3842,7 +3851,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV32 ~= boot then return end
+    if env.HollowMoonADStartupV33 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -3859,13 +3868,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v32] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v33] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v32] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v33] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -3873,16 +3882,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v32_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v33_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v32] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v33] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v32] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v33] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
