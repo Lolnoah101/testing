@@ -1,10 +1,10 @@
--- HMH_ANIME_DIMENSIONS_V21
--- HollowMoonHub | Anime Dimensions v21 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V23
+-- HollowMoonHub | Anime Dimensions v23 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
--- HMH_ANIME_DIMENSIONS_V21
--- HollowMoonHub | Anime Dimensions v21 | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V23
+-- HollowMoonHub | Anime Dimensions v23 | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -54,6 +54,10 @@ local S = {
     lastReconnectEpoch = 0,
     reconnectArmedAt = 0,
     autoExecute = false,
+    autoClaimQuests = false,
+    autoSellCards = false,
+    cardSellRarities = {}, -- no default auto selling: user must explicitly choose rarities
+    nativeAutoSellBefore = {}, -- restore game native preferences when script auto sell is turned off
     queuedAutoExecute = false,
     lastReconnectAttempt = -math.huge,
     safeAlternate = nil,
@@ -131,13 +135,14 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v21_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v23_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
     "matchesCompleted", "sessionStopped",
     "autoAttack", "autoSkills", "autoFarm", "autoDodge",
     "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "autoExecute",
+    "autoClaimQuests", "autoSellCards", "cardSellRarities", "nativeAutoSellBefore",
     "farmMethod", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
 }
 local function savePreferences()
@@ -178,7 +183,7 @@ end
 S.reconnectArmedAt = os.clock() + 45
 S.lastReconnectEpoch = math.max(0, tonumber(S.lastReconnectEpoch) or 0)
 
--- The outer v21 loader waits for StatsLoaded, required modules and a stable
+-- The outer v23 loader waits for StatsLoaded, required modules and a stable
 -- character BEFORE this core runs. This second check protects later respawns.
 local function statsReady()
     local gui = player:FindFirstChildOfClass("PlayerGui")
@@ -191,7 +196,7 @@ end
 -- GitHub must host a complete Anime Dimensions script. Accept older/newer
 -- version headers, but never execute an unrelated game script.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V21"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V23"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -203,7 +208,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v21 main entry adds a second gate for
+        -- until player stats load; the v23 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -219,7 +224,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v21] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v23] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -236,14 +241,14 @@ local function installTeleportBootstrap()
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         -- Bust cached copies of the raw file after updating it in GitHub.
-        local freshURL = url .. "?hmh_ad_v21=" .. tostring(os.time())
+        local freshURL = url .. "?hmh_ad_v23=" .. tostring(os.time())
         local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
         if not ok or type(code) ~= "string" or #code == 0 then
             -- Some executors reject the optional no-cache parameter/query string.
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v21] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v23] GitHub Auto Execute fetch failed")
             return
         end
         -- Accept ANY complete HollowMoonHub Anime Dimensions version.
@@ -257,17 +262,17 @@ local function installTeleportBootstrap()
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v21] GitHub returned a different script: "
+            warn("[HollowMoonHub AD v23] GitHub returned a different script: "
                 .. firstLine:sub(1, 140) .. ". Not executing; check branch/file/raw URL.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v21] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v23] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v21] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v23] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -1721,31 +1726,38 @@ local function assistVisible(num)
     if not ok or type(clientDir) ~= "table" then return false end
     local frame = clientDir.UniversalCenterUIFrame
     for i = 1,2 do
-        local slot = frame and frame:FindFirstChild("SkillAssist"..i)
-        assistVisibleCache[i] = slot and slot.Visible == true or false
+        -- ClientDirectory's UniversalCenterUIFrame is a dictionary, NOT an Instance.
+        local slot = type(frame) == "table" and frame["SkillAssist"..i] or nil
+        assistVisibleCache[i] = slot ~= nil and slot:IsA("GuiObject") and slot.Visible == true or false
     end
     return assistVisibleCache[num] == true
 end
 
--- Fruit skill Z is not Character Skill 5: the game's ClientSkillModule
--- binds Z to useFruitSkill(1), using UseFruitSkill on MainRemoteEvent.
--- Only cast while the equipped fruit's first ability is available.
-local fruitVisibleCache, fruitVisibleAt = false, -math.huge
-local function fruitSkillVisible()
+-- Z invokes UseFruitSkill(1), as confirmed in ClientSkillModule.
+-- Read the equipped fruit from the GAME'S replicated stats and definition;
+-- checking a ClientDirectory UI element is unreliable and caused Z to be skipped.
+-- In particular UniversalCenterUIFrame is a flattened *table*, not a GUI Instance.
+local fruitDefinitionCache, fruitDefinitionName, fruitDefinitionAt = nil, nil, -math.huge
+local function equippedFruitSkill1()
     local now = os.clock()
-    if now - fruitVisibleAt < 0.2 then return fruitVisibleCache end
-    fruitVisibleAt = now
-    fruitVisibleCache = false
-    local gui = player:FindFirstChildOfClass("PlayerGui")
-    local modules = gui and gui:FindFirstChild("Modules")
-    local module = modules and modules:FindFirstChild("ClientDirectory")
-    if not module then return false end
-    local ok, clientDir = pcall(require, module)
-    if not ok or type(clientDir) ~= "table" then return false end
-    local frame = clientDir.UniversalCenterUIFrame
-    local slot = frame and frame:FindFirstChild("SkillFruit1")
-    fruitVisibleCache = slot ~= nil and slot.Visible == true
-    return fruitVisibleCache
+    local display = ReplicatedStorage:FindFirstChild(player.Name .. "StatDisplay")
+    local fruitObject = display and display:FindFirstChild("EquippedFruitName")
+    local fruitName = fruitObject and fruitObject.Value
+    if type(fruitName) ~= "string" or fruitName == "" or fruitName == "None" then
+        return false, nil
+    end
+    if fruitDefinitionName ~= fruitName or now - fruitDefinitionAt >= 0.25 then
+        local settings = getSettings()
+        local entry = settings and settings.FruitInfo and settings.FruitInfo[fruitName]
+        fruitDefinitionCache = entry and entry.SkillInfo and entry.SkillInfo.Skill1 or nil
+        fruitDefinitionName = fruitName
+        fruitDefinitionAt = now
+    end
+    local def = fruitDefinitionCache
+    if type(def) ~= "table" or def.skillDisplayName == "None" then
+        return false, nil
+    end
+    return true, def
 end
 
 local function fireSkills(root, target, now)
@@ -1769,7 +1781,7 @@ local function fireSkills(root, target, now)
         local def
         local available = true
         if isFruit then
-            available = fruitSkillVisible()
+            available, def = equippedFruitSkill1()
         elseif isAssist then
             def = assistSkillDefinition(assistNum)
             available = def ~= nil or assistVisible(assistNum)
@@ -1941,8 +1953,154 @@ local failedOK, failedConn = pcall(function()
 end)
 if failedOK and failedConn then S.connections[#S.connections+1] = failedConn end
 
+-- ================================================================
+-- MISC / PLAYER: game-native quest claiming and card auto-selling
+-- The game's QuestModule uses CompleteDailyQuest for BOTH daily and
+-- weekly objectives; the card auto-sell UI uses ChangeSetting and six
+-- Setting_AutoSell* bool flags. No guessed inventory deletion remote.
+-- ================================================================
+local CARD_SELL_RARITIES = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic" }
+local cardSellLastSent = {}
+local questAttemptAfter = {}
+
+local function statDisplay()
+    return ReplicatedStorage:FindFirstChild(player.Name .. "StatDisplay")
+end
+
+local function claimReadyQuests()
+    if not (S.alive and S.autoClaimQuests and statsReady() and inLobby()) then return end
+    local settings = getSettings()
+    local display = statDisplay()
+    if not (settings and display and mainFunction) then return end
+    for _, group in ipairs({settings.DailyQuestSettings, settings.WeeklyQuestSettings}) do
+        if type(group) == "table" then
+            for _, quest in pairs(group) do
+                if not (S.alive and S.autoClaimQuests and inLobby()) then return end
+                if type(quest) == "table" and type(quest.stat) == "string"
+                    and type(quest.completionStat) == "string" then
+                    local progress = display:FindFirstChild(quest.stat)
+                    local claimed = display:FindFirstChild(quest.completionStat)
+                    local required = tonumber(quest.AmountNeeded)
+                    local amount = progress and tonumber(progress.Value)
+                    if progress and claimed and required and amount
+                        and amount >= required and claimed.Value == false then
+                        local now = os.clock()
+                        if now >= (questAttemptAfter[quest.stat] or 0) then
+                            -- A failed request is delayed so unavailable quests
+                            -- do not repeatedly hit the server every frame.
+                            questAttemptAfter[quest.stat] = now + 12
+                            local ok, response = pcall(function()
+                                return mainFunction:InvokeServer("CompleteDailyQuest", quest.stat)
+                            end)
+                            if ok and type(response) == "table" and response.status == "Success" then
+                                questAttemptAfter[quest.stat] = now + 3
+                            elseif not ok then
+                                warnOnce("Auto Claim Quests: " .. tostring(response))
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function nativeCardSellSettings()
+    if not (statsReady() and remote) then return nil end
+    local display = statDisplay()
+    if not display then return nil end
+    local flags = {}
+    for _, rarity in ipairs(CARD_SELL_RARITIES) do
+        local flag = display:FindFirstChild("Setting_AutoSell" .. rarity)
+        if not flag or not flag:IsA("BoolValue") then return nil end
+        flags[rarity] = flag
+    end
+    return flags
+end
+
+local function hasChosenCardRarity()
+    for _, rarity in ipairs(CARD_SELL_RARITIES) do
+        if S.cardSellRarities[rarity] then return true end
+    end
+    return false
+end
+
+local function applyNativeCardSell(force)
+    if not S.alive then return end
+    local flags = nativeCardSellSettings()
+    if not flags then return end
+    -- No selected rarities means NO change to the game's auto-sell settings.
+    -- This protects cards until the user makes an explicit selection.
+    local restoring = not S.autoSellCards and next(S.nativeAutoSellBefore) ~= nil
+    if not restoring and (not S.autoSellCards or not hasChosenCardRarity()) then return end
+
+    if S.autoSellCards and next(S.nativeAutoSellBefore) == nil then
+        for _, rarity in ipairs(CARD_SELL_RARITIES) do
+            S.nativeAutoSellBefore[rarity] = flags[rarity].Value == true
+        end
+        savePreferences()
+    end
+
+    local allAligned = true
+    for _, rarity in ipairs(CARD_SELL_RARITIES) do
+        local desired
+        if restoring then
+            desired = S.nativeAutoSellBefore[rarity] == true
+        else
+            desired = S.cardSellRarities[rarity] == true
+        end
+        if flags[rarity].Value ~= desired then
+            allAligned = false
+            local name = "Setting_AutoSell" .. rarity
+            local now = os.clock()
+            if force or now - (cardSellLastSent[name] or -math.huge) >= 2.0 then
+                cardSellLastSent[name] = now
+                local ok, err = pcall(function()
+                    remote:FireServer("ChangeSetting", name, desired)
+                end)
+                if not ok then warnOnce("Auto Sell Cards: " .. tostring(err)) end
+            end
+        end
+    end
+    if restoring and allAligned then
+        -- Original game auto-sell choices are back. Stop owning these flags.
+        S.nativeAutoSellBefore = {}
+        savePreferences()
+    end
+end
+
+-- These are deliberately lightweight periodic workers, not per-Heartbeat
+-- remote calls. Completed quests are claimed and native settings reconciled
+-- when the game's replicated player data is ready.
+task.spawn(function()
+    while S.alive do
+        if S.autoClaimQuests and inLobby() then
+            local ok, err = pcall(claimReadyQuests)
+            if not ok then warnOnce("Quest worker: " .. tostring(err)) end
+        end
+        task.wait(0.65)
+    end
+end)
+task.spawn(function()
+    while S.alive do
+        if S.autoSellCards or next(S.nativeAutoSellBefore) ~= nil then
+            local ok, err = pcall(applyNativeCardSell)
+            if not ok then warnOnce("Card sell worker: " .. tostring(err)) end
+        end
+        task.wait(0.9)
+    end
+end)
+
 function S.Unload()
     if not S.alive then return end
+    -- Return the game's own rarity settings to their previous values.
+    -- Keep the baseline persisted if the server has not yet confirmed them,
+    -- so a later execution can finish restoring without deleting cards.
+    S.autoSellCards = false
+    if next(S.nativeAutoSellBefore) ~= nil then
+        pcall(applyNativeCardSell, true)
+    end
+    savePreferences()
     S.alive = false
     S.autoFarm, S.autoAttack, S.autoSkills, S.autoDodge = false, false, false, false
     resetTarget()
@@ -1956,95 +2114,97 @@ function S.Unload()
     if env.HollowMoonAnimeDimensions == S then env.HollowMoonAnimeDimensions = nil end
 end
 
+-- ================================================================
+-- HOLLOWMOONHUB | RAYFIELD GEN2 UI
+-- Native sidebar sections + row/column groups. No custom Instance UI, no
+-- watchers, no unsupported labels/Set() calls or manual coordinate layout.
+-- ================================================================
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
-local window = Rayfield:CreateWindow({name="HollowMoonHub", subtitle="Anime Dimensions", sidebarLayout=true})
+local window = Rayfield:CreateWindow({
+    name = "HollowMoonHub",
+    subtitle = "Anime Dimensions | v23",
+    sidebarLayout = true,
+})
 S.window = window
+window:CreateTag({text = "v23"})
 
--- LOBBY TAB: first in the sidebar, all values remain usable in battle too.
+window:CreateSection({name="AUTOMATION"})
 local lobbyTab = window:CreateTab({name="Lobby"})
-lobbyTab:CreateSection({name="Room Selection"})
 local currentLevel = playerLevel() or 0
--- The settings module can replicate after PlayerGui. Wait briefly so the
--- first dropdown already contains actual maps instead of only "Hardest".
+-- Wait briefly for replicated map metadata without inventing options.
 for _=1,30 do
-    local info = getSettings()
+    local info=getSettings()
     if info and info.MapInfo then break end
     task.wait(0.15)
 end
-local maps = mapOptions()
-local firstMap = (S.mapChoice == "Hardest") and hardestMap(currentLevel) or S.mapChoice
-local mapValue = "Hardest"
-for label, id in pairs(mapLabels) do
-    if id == S.mapChoice then mapValue = label; break end
+local maps=mapOptions()
+local firstMap=(S.mapChoice=="Hardest") and hardestMap(currentLevel) or S.mapChoice
+local mapValue="Hardest"
+for label,id in pairs(mapLabels) do
+    if id==S.mapChoice then mapValue=label; break end
 end
 local diffDrop
 local function refreshDifficulties()
     if not diffDrop then return end
-    local level = playerLevel() or 0
-    local currentId = chooseMap(level)
-    local options = listDifficulties(currentId)
+    local level=playerLevel() or 0
+    local currentId=chooseMap(level)
+    local options=listDifficulties(currentId)
     pcall(function() diffDrop:Refresh(options) end)
-    local valid = false
-    for _, o in ipairs(options) do if o == S.difficultyChoice then valid = true; break end end
-    if not valid then S.difficultyChoice = "Hardest" end
+    local valid=false
+    for _,v in ipairs(options) do
+        if v==S.difficultyChoice then valid=true; break end
+    end
+    if not valid then S.difficultyChoice="Hardest" end
     pcall(function() diffDrop:Set(S.difficultyChoice, true) end)
 end
-local mapDrop = lobbyTab:CreateDropdown({
-    name="Map", flag="AD15_Map", options=maps, value=mapValue,
+
+lobbyTab:CreateSection({name="Dungeon Setup"})
+local roomRow=lobbyTab:CreateGroup({direction="row"})
+local roomCol=roomRow:CreateGroup({direction="column"})
+local startCol=roomRow:CreateGroup({direction="column"})
+roomCol:CreateSection({name="Map & Difficulty"})
+roomCol:CreateDropdown({
+    name="Map",flag="AD15_Map",options=maps,value=mapValue,
     callback=function(value)
-        if type(value) == "table" then value = value[1] end
-        if type(value) ~= "string" then return end
-        S.mapChoice = value == "Hardest" and "Hardest" or (mapLabels[value] or S.mapChoice)
-        S.createdOwnRoom = false
+        if type(value)=="table" then value=value[1] end
+        if type(value)~="string" then return end
+        S.mapChoice=value=="Hardest" and "Hardest" or (mapLabels[value] or S.mapChoice)
+        S.createdOwnRoom=false
         refreshDifficulties()
         savePreferences()
     end,
 })
-diffDrop = lobbyTab:CreateDropdown({
-    name="Difficulty", flag="AD15_Difficulty",
-    options=listDifficulties(firstMap), value=S.difficultyChoice,
+diffDrop=roomCol:CreateDropdown({
+    name="Difficulty",flag="AD15_Difficulty",
+    options=listDifficulties(firstMap),value=S.difficultyChoice,
     callback=function(value)
-        if type(value) == "table" then value = value[1] end
-        if type(value) ~= "string" then return end
-        S.difficultyChoice = value
+        if type(value)=="table" then value=value[1] end
+        if type(value)~="string" then return end
+        S.difficultyChoice=value
         savePreferences()
     end,
 })
-refreshDifficulties()
--- Keep the "Hardest" difficulty list in sync with the user's newly unlocked
--- Dimension when the Level stat replicates or changes; no UI watcher added.
-task.spawn(function()
-    local lastKey, lastLevel = nil, nil
-    while S.alive do
-        local level = playerLevel()
-        if level and (level ~= lastLevel or S.mapChoice ~= lastKey) then
-            lastLevel, lastKey = level, S.mapChoice
-            refreshDifficulties()
-        end
-        task.wait(1.5)
-    end
-end)
-lobbyTab:CreateToggle({
-    name="Hardcore", flag="AD15_Hardcore", value=S.hardcore,
-    callback=function(on) S.hardcore=(on==true); savePreferences() end,
+roomCol:CreateToggle({
+    name="Hardcore",flag="AD15_Hardcore",value=S.hardcore,
+    callback=function(on) S.hardcore=on==true; savePreferences() end,
 })
-lobbyTab:CreateToggle({
-    name="Friends Only", flag="AD15_FriendsOnly", value=S.friendsOnly,
-    callback=function(on) S.friendsOnly=(on==true); savePreferences() end,
+roomCol:CreateToggle({
+    name="Friends Only",flag="AD15_FriendsOnly",value=S.friendsOnly,
+    callback=function(on) S.friendsOnly=on==true; savePreferences() end,
 })
-lobbyTab:CreateSection({name="Start"})
-lobbyTab:CreateSlider({
-    name="Start Delay", flag="AD15_StartDelay", range={1,10}, increment=1,
-    value=S.startDelay, suffix="sec",
+startCol:CreateSection({name="Run Controls"})
+startCol:CreateSlider({
+    name="Start Delay",flag="AD15_StartDelay",range={1,10},increment=1,
+    value=S.startDelay,suffix="sec",
     callback=function(value)
         S.startDelay=math.clamp(math.floor(tonumber(value) or 3),1,10)
         savePreferences()
     end,
 })
-S.autoStartToggle = lobbyTab:CreateToggle({
-    name="Auto Start", flag="AD15_AutoStart", value=S.autoStart,
+S.autoStartToggle=startCol:CreateToggle({
+    name="Auto Start",flag="AD15_AutoStart",value=S.autoStart,
     callback=function(on)
-        S.autoStart=(on==true)
+        S.autoStart=on==true
         S.lobbyGeneration=S.lobbyGeneration+1
         if S.autoStart then
             if S.sessionStopped then S.matchesCompleted=0 end
@@ -2055,24 +2215,15 @@ S.autoStartToggle = lobbyTab:CreateToggle({
         savePreferences()
     end,
 })
-lobbyTab:CreateSection({name="After Match"})
-S.autoRetryToggle = lobbyTab:CreateToggle({
-    name="Auto Retry", flag="AD15_AutoRetry", value=S.autoRetry,
+S.autoRetryToggle=startCol:CreateToggle({
+    name="Auto Retry",flag="AD15_AutoRetry",value=S.autoRetry,
     callback=function(on) S.autoRetry=on==true; savePreferences() end,
 })
-lobbyTab:CreateInput({
-    name="Leave After Matches", flag="AD15_MatchLimit", value=tostring(S.matchesToLeave),
-    placeholder="Number of completed matches", numeric=true, clearOnFocus=false,
-    callback=function(value)
-        local n = tonumber(value)
-        if n then S.matchesToLeave=math.clamp(math.floor(n),1,99999); savePreferences() end
-    end,
-})
-lobbyTab:CreateToggle({
-    name="Auto Leave After X Matches", flag="AD15_AutoLeave", value=S.autoLeaveMatches,
+startCol:CreateToggle({
+    name="Auto Leave After X Matches",flag="AD15_AutoLeave",value=S.autoLeaveMatches,
     callback=function(on)
-        local was = S.autoLeaveMatches
-        S.autoLeaveMatches=(on==true)
+        local was=S.autoLeaveMatches
+        S.autoLeaveMatches=on==true
         if S.autoLeaveMatches and not was then
             S.matchesCompleted=0
             S.sessionStopped=false
@@ -2080,30 +2231,58 @@ lobbyTab:CreateToggle({
         savePreferences()
     end,
 })
-lobbyTab:CreateButton({
+startCol:CreateButton({
     name="Reset Match Count",
     callback=function()
-        S.matchesCompleted=0; S.sessionStopped=false
+        S.matchesCompleted=0
+        S.sessionStopped=false
         savePreferences()
     end,
 })
-
--- ALL COMBAT CONTROLS NOW LIVE UNDER AUTO FARM; NO SEPARATE COMBAT TAB.
-local farmTab = window:CreateTab({name="Auto Farm"})
-farmTab:CreateSection({name="Basic Attack"})
-farmTab:CreateToggle({
-    name="Auto Attack", flag="AD15_AutoAttack", value=S.autoAttack,
-    callback=function(on) S.autoAttack=(on==true); savePreferences() end,
+-- Gen2 inputs are tab-level controls (not supported inside group columns).
+lobbyTab:CreateDivider({spacing=6})
+lobbyTab:CreateSection({name="Match Limit"})
+lobbyTab:CreateInput({
+    name="Leave After Matches",flag="AD15_MatchLimit",value=tostring(S.matchesToLeave),
+    placeholder="Number of completed matches",numeric=true,clearOnFocus=false,
+    callback=function(value)
+        local n=tonumber(value)
+        if n then S.matchesToLeave=math.clamp(math.floor(n),1,99999); savePreferences() end
+    end,
 })
-farmTab:CreateSection({name="Skills"})
-local selectedDefault = {}
-for i=1,4 do if S.selectedSkills[i] then selectedDefault[#selectedDefault+1]="Skill "..i end end
+refreshDifficulties()
+task.spawn(function()
+    local lastKey,lastLevel=nil,nil
+    while S.alive do
+        local level=playerLevel()
+        if level and (level~=lastLevel or S.mapChoice~=lastKey) then
+            lastLevel,lastKey=level,S.mapChoice
+            refreshDifficulties()
+        end
+        task.wait(1.5)
+    end
+end)
+
+local farmTab=window:CreateTab({name="Auto Farm"})
+farmTab:CreateSection({name="Combat & Movement"})
+local farmRow=farmTab:CreateGroup({direction="row"})
+local offenseCol=farmRow:CreateGroup({direction="column"})
+local moveCol=farmRow:CreateGroup({direction="column"})
+offenseCol:CreateSection({name="Offense"})
+offenseCol:CreateToggle({
+    name="Auto Attack",flag="AD15_AutoAttack",value=S.autoAttack,
+    callback=function(on) S.autoAttack=on==true; savePreferences() end,
+})
+local selectedDefault={}
+for i=1,4 do
+    if S.selectedSkills[i] then selectedDefault[#selectedDefault+1]="Skill "..i end
+end
 if S.selectedAssists[1] then selectedDefault[#selectedDefault+1]="E - Assist 1" end
 if S.selectedAssists[2] then selectedDefault[#selectedDefault+1]="R - Assist 2" end
 if S.selectedFruits[1] then selectedDefault[#selectedDefault+1]="Z - Fruit 1" end
-farmTab:CreateDropdown({
-    name="Skills To Use", flag="AD15_SelectedSkills", multiSelect=true,
-    options={"Skill 1", "Skill 2", "Skill 3", "Skill 4", "E - Assist 1", "R - Assist 2", "Z - Fruit 1"},
+offenseCol:CreateDropdown({
+    name="Skills To Use",flag="AD15_SelectedSkills",multiSelect=true,
+    options={"Skill 1","Skill 2","Skill 3","Skill 4","E - Assist 1","R - Assist 2","Z - Fruit 1"},
     value=selectedDefault,
     callback=function(values)
         local chosen={}
@@ -2120,15 +2299,15 @@ farmTab:CreateDropdown({
         savePreferences()
     end,
 })
-farmTab:CreateToggle({
-    name="Auto Skills", flag="AD15_AutoSkills", value=S.autoSkills,
-    callback=function(on) S.autoSkills=(on==true); savePreferences() end,
+offenseCol:CreateToggle({
+    name="Auto Skills",flag="AD15_AutoSkills",value=S.autoSkills,
+    callback=function(on) S.autoSkills=on==true; savePreferences() end,
 })
-farmTab:CreateSection({name="Defense"})
-farmTab:CreateToggle({
-    name="Auto Dodge", flag="AD15_AutoDodge", value=S.autoDodge,
+offenseCol:CreateSection({name="Defense"})
+offenseCol:CreateToggle({
+    name="Auto Dodge",flag="AD15_AutoDodge",value=S.autoDodge,
     callback=function(on)
-        S.autoDodge=(on==true)
+        S.autoDodge=on==true
         if not S.autoDodge then
             S.dodgeGoal,S.dodgeLastClear=nil,nil
             clearHazardTracking()
@@ -2137,10 +2316,10 @@ farmTab:CreateToggle({
         savePreferences()
     end,
 })
-farmTab:CreateSection({name="Movement"})
-farmTab:CreateDropdown({
-    name="Farm Method", flag="AD15_FarmMethod",
-    options={"Teleport","Tween","Legit"}, value=S.farmMethod,
+moveCol:CreateSection({name="Movement"})
+moveCol:CreateDropdown({
+    name="Farm Method",flag="AD15_FarmMethod",
+    options={"Teleport","Tween","Legit"},value=S.farmMethod,
     callback=function(value)
         if type(value)=="table" then value=value[1] end
         if value=="Teleport" or value=="Tween" or value=="Legit" then
@@ -2150,9 +2329,9 @@ farmTab:CreateDropdown({
         end
     end,
 })
-farmTab:CreateDropdown({
-    name="Farm Position", flag="AD15_FarmPosition",
-    options={"Above","Behind","Below"}, value=S.farmPosition,
+moveCol:CreateDropdown({
+    name="Farm Position",flag="AD15_FarmPosition",
+    options={"Above","Behind","Below"},value=S.farmPosition,
     callback=function(value)
         if type(value)=="table" then value=value[1] end
         if value=="Above" or value=="Behind" or value=="Below" then
@@ -2163,9 +2342,9 @@ farmTab:CreateDropdown({
         end
     end,
 })
-farmTab:CreateSlider({
-    name="Farm Distance", flag="AD15_FarmDistance", range={2,40}, increment=1,
-    value=S.farmDistance, suffix="studs",
+moveCol:CreateSlider({
+    name="Farm Distance",flag="AD15_FarmDistance",range={2,40},increment=1,
+    value=S.farmDistance,suffix="studs",
     callback=function(value)
         if type(value)=="number" then
             S.farmDistance=math.clamp(value,2,40)
@@ -2173,8 +2352,8 @@ farmTab:CreateSlider({
         end
     end,
 })
-farmTab:CreateToggle({
-    name="Auto Farm", flag="AD15_AutoFarm", value=S.autoFarm,
+moveCol:CreateToggle({
+    name="Auto Farm",flag="AD15_AutoFarm",value=S.autoFarm,
     callback=function(on)
         S.autoFarm=on==true
         resetTarget()
@@ -2200,38 +2379,92 @@ farmTab:CreateToggle({
         savePreferences()
     end,
 })
-local settingsTab = window:CreateTab({name="Settings"})
-settingsTab:CreateSection({name="Automation"})
-settingsTab:CreateToggle({
-    name="Anti-AFK", flag="AD16_AntiAFK", value=S.antiAfk,
-    callback=function(on) S.antiAfk=(on==true); savePreferences() end,
-})
-settingsTab:CreateToggle({
-    name="Auto Reconnect", flag="AD16_AutoReconnect", value=S.autoReconnect,
-    callback=function(on)
-        S.autoReconnect=(on==true)
-        if S.autoReconnect then
-            -- Don't treat a prompt already on-screen during enable as a
-            -- legitimate new disconnect; re-arm after a quiet interval.
-            S.reconnectArmedAt=os.clock()+30
+
+window:CreateSection({name="INVENTORY & REWARDS"})
+local playerTab=window:CreateTab({name="Player"})
+playerTab:CreateSection({name="Card Management"})
+local selectedCardRarities={}
+for _,rarity in ipairs(CARD_SELL_RARITIES) do
+    if S.cardSellRarities[rarity]==true then
+        selectedCardRarities[#selectedCardRarities+1]=rarity
+    end
+end
+local cardRow=playerTab:CreateGroup({direction="row"})
+local cardFilterCol=cardRow:CreateGroup({direction="column"})
+local cardActionCol=cardRow:CreateGroup({direction="column"})
+cardFilterCol:CreateSection({name="Rarity Filter"})
+cardFilterCol:CreateDropdown({
+    name="Card Rarities",flag="AD22_CardRarities",multiSelect=true,
+    options=CARD_SELL_RARITIES,value=selectedCardRarities,
+    callback=function(values)
+        local picked={}
+        if type(values)=="table" then
+            for k,v in pairs(values) do
+                if type(v)=="string" then picked[v]=true
+                elseif type(k)=="string" and v==true then picked[k]=true end
+            end
+        elseif type(values)=="string" then picked[values]=true end
+        S.cardSellRarities={}
+        for _,rarity in ipairs(CARD_SELL_RARITIES) do
+            if picked[rarity] then S.cardSellRarities[rarity]=true end
         end
         savePreferences()
     end,
 })
-settingsTab:CreateToggle({
-    name="Auto Execute (GitHub)", flag="AD16_AutoExecute", value=S.autoExecute,
+cardActionCol:CreateSection({name="Automatic Selling"})
+cardActionCol:CreateToggle({
+    name="Auto Sell Cards",flag="AD22_AutoSellCards",value=S.autoSellCards,
     callback=function(on)
-        S.autoExecute=(on==true)
+        S.autoSellCards=on==true
+        if S.autoSellCards and not hasChosenCardRarity() then
+            warnOnce("Select one or more Card Rarities before auto-selling")
+        end
+        savePreferences()
+    end,
+})
+
+local miscTab=window:CreateTab({name="Misc"})
+miscTab:CreateSection({name="Quest Rewards"})
+miscTab:CreateToggle({
+    name="Auto Claim Quests",flag="AD22_AutoClaimQuests",value=S.autoClaimQuests,
+    callback=function(on) S.autoClaimQuests=on==true; savePreferences() end,
+})
+
+window:CreateSection({name="SYSTEM"})
+local settingsTab=window:CreateTab({name="Settings"})
+settingsTab:CreateSection({name="Automation & Recovery"})
+local settingsRow=settingsTab:CreateGroup({direction="row"})
+local protectionCol=settingsRow:CreateGroup({direction="column"})
+local startupCol=settingsRow:CreateGroup({direction="column"})
+protectionCol:CreateSection({name="Session"})
+protectionCol:CreateToggle({
+    name="Anti-AFK",flag="AD16_AntiAFK",value=S.antiAfk,
+    callback=function(on) S.antiAfk=on==true; savePreferences() end,
+})
+protectionCol:CreateToggle({
+    name="Auto Reconnect",flag="AD16_AutoReconnect",value=S.autoReconnect,
+    callback=function(on)
+        S.autoReconnect=on==true
+        if S.autoReconnect then S.reconnectArmedAt=os.clock()+30 end
+        savePreferences()
+    end,
+})
+startupCol:CreateSection({name="Teleport Execution"})
+startupCol:CreateToggle({
+    name="Auto Execute (GitHub)",flag="AD16_AutoExecute",value=S.autoExecute,
+    callback=function(on)
+        S.autoExecute=on==true
         savePreferences()
         if S.autoExecute then
             if not installTeleportBootstrap() and not S.queuedAutoExecute then
-                warnOnce("Auto Execute requires executor queue_on_teleport support or executor Auto Execute configuration")
+                warnOnce("Auto Execute requires queue_on_teleport or executor Auto Execute support")
             end
         end
     end,
 })
-settingsTab:CreateSection({name="Script"})
-settingsTab:CreateButton({name="Unload", callback=function() S.Unload() end})
+settingsTab:CreateDivider({spacing=6})
+settingsTab:CreateSection({name="Script Management"})
+settingsTab:CreateButton({name="Unload HollowMoonHub",callback=function() S.Unload() end})
 
 -- At most every 0.12s, confirm that the combat character remains over a
 -- walkable arena surface. If it drops well BELOW the last known arena floor,
@@ -2373,7 +2606,7 @@ end
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV21
+local priorBoot = env.HollowMoonADStartupV23
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -2384,7 +2617,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV21 = boot
+env.HollowMoonADStartupV23 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -2450,7 +2683,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV21 ~= boot then return end
+    if env.HollowMoonADStartupV23 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -2467,13 +2700,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v21] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v23] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v21] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v23] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -2481,16 +2714,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v21_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v23_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v21] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v23] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v21] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v23] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
