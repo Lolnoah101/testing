@@ -1,10 +1,10 @@
--- HMH_ANIME_DIMENSIONS_V19
--- HollowMoonHub | Anime Dimensions v19 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V20
+-- HollowMoonHub | Anime Dimensions v20 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
--- HMH_ANIME_DIMENSIONS_V19
--- HollowMoonHub | Anime Dimensions v19 | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V20
+-- HollowMoonHub | Anime Dimensions v20 | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -63,6 +63,7 @@ local S = {
     farmDistance = 4,
     selectedSkills = { [1] = true, [2] = true, [3] = true, [4] = true },
     selectedAssists = { [1] = true, [2] = true },
+    selectedFruits = { [1] = true }, -- Z: equipped fruit skill 1
     target = nil,
     targetConnections = {},
     noTargetSince = nil,
@@ -130,14 +131,14 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v19_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v20_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
     "matchesCompleted", "sessionStopped",
     "autoAttack", "autoSkills", "autoFarm", "autoDodge",
     "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "autoExecute",
-    "farmMethod", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists",
+    "farmMethod", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
 }
 local function savePreferences()
     if type(writefile) ~= "function" then return false end
@@ -177,7 +178,7 @@ end
 S.reconnectArmedAt = os.clock() + 45
 S.lastReconnectEpoch = math.max(0, tonumber(S.lastReconnectEpoch) or 0)
 
--- The outer v19 loader waits for StatsLoaded, required modules and a stable
+-- The outer v20 loader waits for StatsLoaded, required modules and a stable
 -- character BEFORE this core runs. This second check protects later respawns.
 local function statsReady()
     local gui = player:FindFirstChildOfClass("PlayerGui")
@@ -190,7 +191,7 @@ end
 -- GitHub must host THIS Anime Dimensions script. The supplied raw URL currently
 -- hosts an AOT script, so validate the exact project marker before executing.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V19"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V20"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -202,7 +203,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v19 main entry adds a second gate for
+        -- until player stats load; the v20 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -218,7 +219,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v19] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v20] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -236,20 +237,20 @@ local function installTeleportBootstrap()
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         local ok, code = pcall(function() return game:HttpGet(url) end)
         if not ok or type(code) ~= "string" then
-            warn("[HollowMoonHub AD v19] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v20] GitHub Auto Execute fetch failed")
             return
         end
-        if not string.find(code:sub(1, 2400), "HMH_ANIME_DIMENSIONS_V19", 1, true) then
-            warn("[HollowMoonHub AD v19] Wrong/outdated GitHub script. Not executing")
+        if not string.find(code:sub(1, 2400), "HMH_ANIME_DIMENSIONS_V20", 1, true) then
+            warn("[HollowMoonHub AD v20] Wrong/outdated GitHub script. Not executing")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v19] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v20] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v19] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v20] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -1709,6 +1710,27 @@ local function assistVisible(num)
     return assistVisibleCache[num] == true
 end
 
+-- Fruit skill Z is not Character Skill 5: the game's ClientSkillModule
+-- binds Z to useFruitSkill(1), using UseFruitSkill on MainRemoteEvent.
+-- Only cast while the equipped fruit's first ability is available.
+local fruitVisibleCache, fruitVisibleAt = false, -math.huge
+local function fruitSkillVisible()
+    local now = os.clock()
+    if now - fruitVisibleAt < 0.2 then return fruitVisibleCache end
+    fruitVisibleAt = now
+    fruitVisibleCache = false
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    local modules = gui and gui:FindFirstChild("Modules")
+    local module = modules and modules:FindFirstChild("ClientDirectory")
+    if not module then return false end
+    local ok, clientDir = pcall(require, module)
+    if not ok or type(clientDir) ~= "table" then return false end
+    local frame = clientDir.UniversalCenterUIFrame
+    local slot = frame and frame:FindFirstChild("SkillFruit1")
+    fruitVisibleCache = slot ~= nil and slot.Visible == true
+    return fruitVisibleCache
+end
+
 local function fireSkills(root, target, now)
     if not remote or not validTarget(target) then return end
     if effectiveDistance(target, root.Position) > SKILL_RANGE then return end
@@ -1718,38 +1740,36 @@ local function fireSkills(root, target, now)
         if ok and busy == true then return end
     end
     local charInfo = characterData()
-    -- Check EVERY selected ability on every Heartbeat, in a stable order.
-    -- No cursor, round-robin interval, or global cooldown that would cause
-    -- a ready skill to wait on another skill's next turn.
-    for action = 1, 6 do
-        local isAssist = action >= 5
+    -- Check every chosen ability on each Heartbeat. No shared skill rotation.
+    -- Character skills 1-4, E/R assists, and Z (equipped fruit skill 1).
+    for action = 1, 7 do
+        local isAssist = action == 5 or action == 6
+        local isFruit = action == 7
         local assistNum = action - 4
-        local key = isAssist and ("Assist"..assistNum) or action
-        local chosen = isAssist and S.selectedAssists[assistNum] or S.selectedSkills[action]
+        local key = isFruit and "Fruit1" or (isAssist and ("Assist"..assistNum) or action)
+        local chosen = isFruit and S.selectedFruits[1]
+            or (isAssist and S.selectedAssists[assistNum] or S.selectedSkills[action])
         local def
-        if isAssist then
+        local available = true
+        if isFruit then
+            available = fruitSkillVisible()
+        elseif isAssist then
             def = assistSkillDefinition(assistNum)
+            available = def ~= nil or assistVisible(assistNum)
         else
             def = charInfo and charInfo.Skills and charInfo.Skills[action]
         end
-        if chosen and (not isAssist or def or assistVisible(assistNum))
-            and skillReady(client, key, now, def, isAssist) then
-            -- No automatic cursor movement or per-cast rotation. Farming owns facing.
-            local aimedCF = root.CFrame
-            local command = isAssist and "UseAssistSkill" or "UseSkill"
-            local number = isAssist and assistNum or action
+        if chosen and available and skillReady(client, key, now, def, isAssist) then
+            local command = isFruit and "UseFruitSkill" or (isAssist and "UseAssistSkill" or "UseSkill")
+            local number = isFruit and 1 or (isAssist and assistNum or action)
             local ok, err = pcall(remote.FireServer, remote, command,
-                { hrpCFrame = aimedCF }, number)
+                { hrpCFrame = root.CFrame }, number)
             if not ok then
                 warnOnce(err)
             else
                 S.lastSkills[key] = now
                 S.cooldownSeen[key] = false
-                -- Each ability has its own timer; the next ready ability
-                -- is tried on the very next Heartbeat.
-                -- Cast one on this frame so rapid simultaneous remote calls
-                -- don't overwrite one another's character facing. The next
-                -- selected ready ability is checked again NEXT Heartbeat.
+                -- One cast per frame; all independent ready checks resume next frame.
                 return
             end
         end
@@ -2063,9 +2083,10 @@ local selectedDefault = {}
 for i=1,4 do if S.selectedSkills[i] then selectedDefault[#selectedDefault+1]="Skill "..i end end
 if S.selectedAssists[1] then selectedDefault[#selectedDefault+1]="E - Assist 1" end
 if S.selectedAssists[2] then selectedDefault[#selectedDefault+1]="R - Assist 2" end
+if S.selectedFruits[1] then selectedDefault[#selectedDefault+1]="Z - Fruit 1" end
 farmTab:CreateDropdown({
     name="Skills To Use", flag="AD15_SelectedSkills", multiSelect=true,
-    options={"Skill 1", "Skill 2", "Skill 3", "Skill 4", "E - Assist 1", "R - Assist 2"},
+    options={"Skill 1", "Skill 2", "Skill 3", "Skill 4", "E - Assist 1", "R - Assist 2", "Z - Fruit 1"},
     value=selectedDefault,
     callback=function(values)
         local chosen={}
@@ -2078,6 +2099,7 @@ farmTab:CreateDropdown({
         for i=1,4 do S.selectedSkills[i]=chosen["Skill "..i]==true end
         S.selectedAssists[1]=chosen["E - Assist 1"]==true
         S.selectedAssists[2]=chosen["R - Assist 2"]==true
+        S.selectedFruits[1]=chosen["Z - Fruit 1"]==true
         savePreferences()
     end,
 })
@@ -2326,7 +2348,6 @@ end)
 if inLobby() and S.autoStart and not S.sessionStopped then
     task.defer(autoStartWorker)
 end
-
 ]====]
 
 -- Readiness gate OUTSIDE the core. An executor may run us immediately on
@@ -2335,7 +2356,7 @@ end
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV19
+local priorBoot = env.HollowMoonADStartupV20
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -2346,7 +2367,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV19 = boot
+env.HollowMoonADStartupV20 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -2412,7 +2433,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV19 ~= boot then return end
+    if env.HollowMoonADStartupV20 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -2429,13 +2450,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v19] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v20] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v19] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v20] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -2443,16 +2464,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v19_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v20_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v19] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v20] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v19] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v20] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
