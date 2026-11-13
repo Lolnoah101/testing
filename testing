@@ -1,11 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V26
--- HollowMoonHub | Anime Dimensions v26 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V29
+-- HollowMoonHub | Anime Dimensions v29 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V26
--- HollowMoonHub | Anime Dimensions v26 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V29
+-- HollowMoonHub | Anime Dimensions v29 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -44,6 +44,11 @@ local S = {
     speedWeek = "",
     speedOriginalCharacter = "",
     speedRestorePending = false,
+    savedLoadout = { main = "", assist1 = "", assist2 = "" },
+    lastLoadoutRepairAt = -math.huge,
+    loadoutRestoreAttempts = 0,
+    bossRepairAttempts = 0,
+    bossRepairPauseUntil = 0,
     speedPendingCharacter = "",
     autoDailyRaid = false,
     dailyLastRequestedDate = "",
@@ -172,14 +177,14 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v26_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v29_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
     "matchesCompleted", "sessionStopped",
     "autoJoinRaid", "raidMapChoice", "raidDifficultyChoice", "raidFriendsOnly",
     "autoSpeedRaid", "speedCharacterChoice", "speedAutoLeave", "speedUsed", "speedWeek",
-    "speedOriginalCharacter", "speedRestorePending", "speedPendingCharacter",
+    "speedOriginalCharacter", "speedRestorePending", "speedPendingCharacter", "savedLoadout",
     "autoDailyRaid", "dailyLastRequestedDate", "autoBossRush", "bossAutoRetry", "bossAutoLeave",
     "autoExtreme", "extremeDifficulty", "autoTimeChallenge", "modePriority", "modeIntent", "modeRequestAt",
     "modeFromPlace", "modeWasInBattle", "raidUnavailableUntil",
@@ -243,7 +248,7 @@ end
 S.reconnectArmedAt = os.clock() + 45
 S.lastReconnectEpoch = math.max(0, tonumber(S.lastReconnectEpoch) or 0)
 
--- The outer v26 loader waits for StatsLoaded, required modules and a stable
+-- The outer v29 loader waits for StatsLoaded, required modules and a stable
 -- character BEFORE this core runs. This second check protects later respawns.
 local function statsReady()
     local gui = player:FindFirstChildOfClass("PlayerGui")
@@ -256,7 +261,7 @@ end
 -- GitHub must host a complete Anime Dimensions script. Accept older/newer
 -- version headers, but never execute an unrelated game script.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V26"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V29"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -268,7 +273,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v26 main entry adds a second gate for
+        -- until player stats load; the v29 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -284,7 +289,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v26] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v29] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -301,14 +306,14 @@ local function installTeleportBootstrap()
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         -- Bust cached copies of the raw file after updating it in GitHub.
-        local freshURL = url .. "?hmh_ad_v26=" .. tostring(os.time())
+        local freshURL = url .. "?hmh_ad_v29=" .. tostring(os.time())
         local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
         if not ok or type(code) ~= "string" or #code == 0 then
             -- Some executors reject the optional no-cache parameter/query string.
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v26] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v29] GitHub Auto Execute fetch failed")
             return
         end
         -- Accept ANY complete HollowMoonHub Anime Dimensions version.
@@ -322,17 +327,17 @@ local function installTeleportBootstrap()
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v26] GitHub returned a different script: "
+            warn("[HollowMoonHub AD v29] GitHub returned a different script: "
                 .. firstLine:sub(1, 140) .. ". Not executing; check branch/file/raw URL.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v26] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v29] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v26] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v29] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -683,7 +688,7 @@ end
 
 
 -- ================================================================
--- v26: RAID / SPEED RAID / DAILY / BOSS RUSH / EXTREME / TIME
+-- v29: RAID / SPEED RAID / DAILY / BOSS RUSH / EXTREME / TIME
 -- One arbiter owns special-mode teleport requests. Per-mode cooldowns and
 -- server-side validation remain authoritative. No simultaneous queues.
 -- ================================================================
@@ -870,23 +875,49 @@ local function raidMapOptions()
     end
     return opts,mappings
 end
+-- The config's `order` is a *menu position*, not raid strength.  For
+-- example, Titan Raid is order 2 (Lv50), while Divine Guardian Raid is
+-- order -1000 (Lv100).  "Hardest" must compare the difficulty that the
+-- player can actually enter, not the UI display order.
+S.bestUnlockedRaidRequirement = function(info, level)
+    if type(info) ~= "table" or type(info.difficulties) ~= "table" then return nil end
+    local bestReq, bestDifficultyOrder = nil, -math.huge
+    for name, difficulty in pairs(info.difficulties) do
+        if type(difficulty) == "table" then
+            local req = tonumber(difficulty.levelReq)
+            local difficultyOrder = tonumber(difficulty.order) or 0
+            if req and req <= level
+                and (S.raidDifficultyChoice == "Hardest" or S.raidDifficultyChoice == name)
+                and (not bestReq or req > bestReq
+                    or (req == bestReq and difficultyOrder > bestDifficultyOrder)) then
+                bestReq, bestDifficultyOrder = req, difficultyOrder
+            end
+        end
+    end
+    return bestReq, bestDifficultyOrder
+end
 local function chooseRaid(level)
     local settings=getSettings()
     local maps=settings and settings.MapInfo or {}
     if S.raidMapChoice~="Hardest" then
         local entry=maps[S.raidMapChoice]
-        if raidMapAvailable(S.raidMapChoice,entry) and mapLevel(entry)<=level then
+        if raidMapAvailable(S.raidMapChoice,entry)
+            and S.bestUnlockedRaidRequirement(entry,level) then
             return S.raidMapChoice
         end
         return nil
     end
-    local best,bestRank,bestLv=nil,-math.huge,-math.huge
+    local best,bestLevel,bestDifficultyOrder,bestMapOrder=nil,-math.huge,-math.huge,-math.huge
     for id,info in pairs(maps) do
-        if raidMapAvailable(id,info) and mapLevel(info)<=level then
-            local rank=tonumber(info.order) or 0
-            local lvl=mapLevel(info)
-            if rank>bestRank or (rank==bestRank and lvl>bestLv) then
-                best,bestRank,bestLv=id,rank,lvl
+        if raidMapAvailable(id,info) then
+            local req, difficultyOrder = S.bestUnlockedRaidRequirement(info,level)
+            local mapOrder = tonumber(info.order) or 0
+            if req and (req>bestLevel
+                or (req==bestLevel and difficultyOrder>bestDifficultyOrder)
+                or (req==bestLevel and difficultyOrder==bestDifficultyOrder
+                    and mapOrder>bestMapOrder)) then
+                best,bestLevel,bestDifficultyOrder,bestMapOrder=
+                    id,req,difficultyOrder,mapOrder
             end
         end
     end
@@ -959,32 +990,116 @@ local function modeRequest(action,argument,mode)
     savePreferences()
     return true
 end
-local function saveOriginalSpeedCharacter()
-    if S.speedRestorePending and S.speedOriginalCharacter~="" then return end
-    local equipped=stat("CharacterName")
-    if type(equipped)=="string" and equipped~="" then
-        S.speedOriginalCharacter=equipped
-        S.speedRestorePending=true
+-- Keep a complete, last-known-good character setup.  Speed Raid changes the
+-- active character on entry, which can cause the game to clear an assist slot.
+-- We never overwrite a healthy backup with partially-loaded / empty stats.
+local function isEquippedName(name)
+    return type(name)=="string" and name~="" and name~="None" and name~="nil"
+end
+local function rememberEquippedLoadout()
+    if not regularLobby() or not statsReady() or S.speedRestorePending then return end
+    local main, a1, a2 = stat("CharacterName"), stat("AssistCharacterName1"), stat("AssistCharacterName2")
+    if not (isEquippedName(main) and isEquippedName(a1) and isEquippedName(a2)) then return end
+    -- An assist cannot be the active main character or the other assist.
+    if main==a1 or main==a2 or a1==a2 then return end
+    local old=S.savedLoadout or {}
+    if old.main~=main or old.assist1~=a1 or old.assist2~=a2 then
+        S.savedLoadout={main=main,assist1=a1,assist2=a2}
         savePreferences()
     end
 end
+local function saveOriginalSpeedCharacter()
+    rememberEquippedLoadout() -- snapshot BEFORE Speed Raid switches characters
+    if S.speedRestorePending and isEquippedName(S.speedOriginalCharacter) then return end
+    local main=stat("CharacterName")
+    if isEquippedName(main) then
+        S.speedOriginalCharacter=main
+        S.speedRestorePending=true
+        S.loadoutRestoreAttempts=0
+        savePreferences()
+    end
+end
+
+-- Server returns may precede replicated stat changes. Never clear pending just
+-- because InvokeServer succeeded; confirm each slot via the actual stats.
+local function equipSavedSlot(name, slot)
+    if not mainFunction or not isEquippedName(name) then return false end
+    local ok,res=pcall(function()
+        if slot==0 then return mainFunction:InvokeServer("EquipCharacter",name) end
+        return mainFunction:InvokeServer("EquipCharacterAssist",name,slot)
+    end)
+    if not ok or type(res)=="table" and res.status=="Fail" then
+        warnOnce("Loadout restore: "..tostring(ok and res and res.message or res))
+        return false
+    end
+    return true -- request made; next tick must verify the replicated slot
+end
 local function restoreSpeedCharacter()
-    if not S.speedRestorePending or not regularLobby() then return end
-    local original=S.speedOriginalCharacter
-    if type(original)~="string" or original=="" then return end
-    local current=stat("CharacterName")
-    if current==original then
+    if not S.speedRestorePending or not regularLobby() or not statsReady() then return end
+    if os.clock()-S.lastLoadoutRepairAt<1.2 then return end
+    local saved=type(S.savedLoadout)=="table" and S.savedLoadout or {}
+    local wantedMain=isEquippedName(S.speedOriginalCharacter) and S.speedOriginalCharacter or saved.main
+    local currentMain=stat("CharacterName")
+    if currentMain==nil then return end -- player data not fully replicated yet
+    local missingSlot, wantedName=nil,nil
+    if isEquippedName(wantedMain) and currentMain~=wantedMain then
+        missingSlot,wantedName=0,wantedMain
+    else
+        local currentA1,currentA2=stat("AssistCharacterName1"),stat("AssistCharacterName2")
+        if currentA1==nil or currentA2==nil then return end
+        if isEquippedName(saved.assist1) and currentA1~=saved.assist1 then
+            missingSlot,wantedName=1,saved.assist1
+        elseif isEquippedName(saved.assist2) and currentA2~=saved.assist2 then
+            missingSlot,wantedName=2,saved.assist2
+        end
+    end
+    if missingSlot==nil then
         S.speedRestorePending=false
         S.speedOriginalCharacter=""
+        S.speedPendingCharacter=""
+        S.loadoutRestoreAttempts=0
         savePreferences()
         return
     end
-    local response=invokeRoom("EquipCharacter",original)
-    if response and response.status~="Fail" then
+    S.lastLoadoutRepairAt=os.clock()
+    S.loadoutRestoreAttempts=(S.loadoutRestoreAttempts or 0)+1
+    equipSavedSlot(wantedName,missingSlot)
+    if S.loadoutRestoreAttempts>=12 then
+        -- Fail open for the rest of the scheduler so a bad/removed character
+        -- cannot stall every other mode indefinitely.
+        warnOnce("Could not fully restore Speed Raid loadout; check owned characters/assist slots")
         S.speedRestorePending=false
         S.speedOriginalCharacter=""
+        S.loadoutRestoreAttempts=0
         savePreferences()
     end
+end
+-- When a Speed Raid has cleared an assist and Boss Rush is selected, restore
+-- the recorded slot before trying to enter. No guessing if no valid backup.
+local function repairMissingBossRushAssists()
+    if not regularLobby() or not statsReady() then return false end
+    local saved=type(S.savedLoadout)=="table" and S.savedLoadout or {}
+    local a1,a2=stat("AssistCharacterName1"),stat("AssistCharacterName2")
+    if a1==nil or a2==nil then return false end
+    local missingSlot,wantedName=nil,nil
+    if not isEquippedName(a1) and isEquippedName(saved.assist1) then
+        missingSlot,wantedName=1,saved.assist1
+    elseif not isEquippedName(a2) and isEquippedName(saved.assist2) then
+        missingSlot,wantedName=2,saved.assist2
+    end
+    if not missingSlot then return false end
+    if os.clock() < S.bossRepairPauseUntil then return false end
+    if os.clock()-S.lastLoadoutRepairAt<1.2 then return true end
+    S.lastLoadoutRepairAt=os.clock()
+    S.bossRepairAttempts=(S.bossRepairAttempts or 0)+1
+    equipSavedSlot(wantedName,missingSlot)
+    if S.bossRepairAttempts>=8 then
+        S.bossRepairAttempts=0
+        S.bossRepairPauseUntil=os.clock()+60
+        warnOnce("Boss Rush: saved assist restore failed repeatedly; pausing 60 seconds")
+        return false -- let lower-priority modes run instead of blocking
+    end
+    return true -- allow replicated stats to update before any teleport
 end
 local function stopSpeedAutomation(reason)
     S.autoSpeedRaid=false
@@ -1043,6 +1158,17 @@ local function bossRushAvailable()
     local free = tonumber(stat("BossRushFreeEntry"))
     if passes == nil or free == nil then return true end
     return passes > 0 or free > 0
+end
+-- Boss Rush requires two equipped assist characters as well as entry access.
+-- Return nil when replicated data is unavailable: the server remains authoritative.
+local function bossRushAssistsReady()
+    local first = stat("AssistCharacterName1")
+    local second = stat("AssistCharacterName2")
+    if first == nil or second == nil then return nil end
+    local function equipped(value)
+        return type(value) == "string" and value ~= "" and value ~= "None" and value ~= "nil"
+    end
+    return equipped(first) and equipped(second)
 end
 local function extremeDifficulty()
     local cfg=getSettings()
@@ -1147,7 +1273,7 @@ local function specialLobbyTick()
         return
     end
     -- Avoid competing with a room that was already created by Auto Start.
-    if S.lobbyBusy or S.createdOwnRoom or S.speedRestorePending and regularLobby() then return end
+    if S.lobbyBusy or S.createdOwnRoom or (S.speedRestorePending and regularLobby()) then return end
     S.specialBusy=true
     task.spawn(function()
         local launched=false
@@ -1190,9 +1316,25 @@ local function specialLobbyTick()
             for _, mode in ipairs(ordered) do
                 if launched then break end
                 if mode=="BossRush" and S.autoBossRush then
-                    -- The native Boss Rush UI requires level 15.
+                    -- The server requires Assist 1 and Assist 2 to be equipped.
+                    -- Don't request a doomed entry or block lower-priority modes.
                     if (playerLevel() or 0)>=15 and bossRushAvailable() then
-                        launched=modeRequest("TeleportToBossRush",nil,"BossRush")
+                        local assistState = bossRushAssistsReady()
+                        if assistState == false then
+                            if repairMissingBossRushAssists() then
+                                -- Hold this priority slot while a saved assist is
+                                -- being re-equipped, rather than starting another mode.
+                                break
+                            end
+                            if not S.bossAssistWaitingNotified then
+                                warnOnce("Boss Rush waiting: equip Assist 1 and Assist 2 (no saved loadout)")
+                                S.bossAssistWaitingNotified = true
+                            end
+                        else
+                            S.bossAssistWaitingNotified = false
+                            -- Unknown (nil) stats: let the server validate once.
+                            launched=modeRequest("TeleportToBossRush",nil,"BossRush")
+                        end
                     end
                 elseif mode=="DailyRaid" and S.autoDailyRaid then
                     launched=requestDailyRaid()
@@ -1354,11 +1496,10 @@ local function effectiveDistance(t, fromPosition)
     -- Some giant rigs have a small central root but very large nearby torsos.
     -- Allow the skill attempt when beside that torso; do not use a huge model
     -- bounding box, which can include unrelated attachments and decorations.
-    for _, name in ipairs({"LowerTorso", "Torso", "UpperTorso"}) do
+    for _, name in ipairs({"LowerTorso", "Torso", "UpperTorso", "Head", "Hitbox", "HitBox"}) do
         local body = t.model:FindFirstChild(name, true)
         if body and body:IsA("BasePart") and body ~= t.root then
             d = math.min(d, (closestBoxPoint(body, fromPosition) - fromPosition).Magnitude)
-            break
         end
     end
     return d
@@ -1496,6 +1637,12 @@ local function extremeModeActive()
     local mode=tostring(Workspace:GetAttribute("GameMode") or ""):lower()
     return mode:find("extreme",1,true)~=nil or S.modeIntent=="ExtremeDimension"
 end
+S.bossBarActive = function()
+    local gui=player:FindFirstChildOfClass("PlayerGui")
+    local battle=gui and gui:FindFirstChild("BattleCenterUIFrame",true)
+    local frame=battle and battle:FindFirstChild("BossHealthFrame")
+    return frame and frame:IsA("GuiObject") and frame.Visible==true or false
+end
 local function bossScore(target)
     if not target or not target.model then return 0 end
     local model=target.model
@@ -1506,7 +1653,8 @@ local function bossScore(target)
     local name=model.Name:lower()
     if name:find("portal",1,true) or name:find("minion",1,true) then return -10 end
     if name:find("boss",1,true) or name:find("guardian",1,true)
-        or name:find("final",1,true) then return 80 end
+        or name:find("final",1,true) or name:find("vampire king",1,true)
+        or name:find("pumpkin king",1,true) then return 80 end
     -- Some boss rigs have no explicit marker. Prefer substantially larger
     -- combat roots over portal adds, never mere decorative parts.
     local size=target.root.Size
@@ -1521,16 +1669,16 @@ local function findTarget(root)
         return nil
     end
     local current = S.target
-    local extreme=extremeModeActive()
+    local prioritizeBoss=extremeModeActive() or S.bossBarActive()
     local highestBoss=0
-    if extreme then
+    if prioritizeBoss then
         for _,entry in pairs(S.indexedTargets) do
             local candidate=entry.target
             if validTarget(candidate) then highestBoss=math.max(highestBoss,bossScore(candidate)) end
         end
     end
     if validTarget(current) and current.model:IsDescendantOf(folder)
-        and (not extreme or bossScore(current)>=highestBoss) then
+        and (not prioritizeBoss or bossScore(current)>=highestBoss) then
         return current
     end
     if current then setTarget(nil) end
@@ -1549,7 +1697,7 @@ local function findTarget(root)
             local d = (t.root.Position - root.Position).Magnitude
             -- Prefer the actual combat Humanoid when the map also contains a
             -- decorative/nested humanoid. Within a class, select nearest.
-            local score=extreme and bossScore(t) or t.priority
+            local score=prioritizeBoss and bossScore(t) or t.priority
             if d < MAX_TARGET_DISTANCE and (not best or score>bestPriority
                 or (score==bestPriority and d < bestDistance)) then
                 best,bestDistance,bestPriority=t,d,score
@@ -1798,6 +1946,65 @@ local function groundSupportAt(position)
         ignores[#ignores + 1] = hit.Instance
     end
     return nil
+end
+
+-- A boss rig can put its HumanoidRootPart below the map even while its
+-- visible torso is above ground. Sample the arena surface from well ABOVE
+-- the requested destination, not from beneath the terrain. The result is
+-- cached briefly so smooth follow remains fast on every Heartbeat.
+S.combatFloorCache = { at=-math.huge, x=0, z=0, y=nil, model=nil }
+S.combatArenaFloorAt = function(position, target)
+    local now = os.clock()
+    local cached = S.combatFloorCache
+    if target and cached.model == target.model and now - cached.at < 0.16
+        and math.abs(cached.x-position.X)<7 and math.abs(cached.z-position.Z)<7 then
+        return cached.y
+    end
+    local excludes = {}
+    if player.Character then excludes[#excludes+1]=player.Character end
+    local folders=Workspace:FindFirstChild("Folders")
+    if folders then
+        for _,folderName in ipairs({"Monsters","Debris"}) do
+            local folder=folders:FindFirstChild(folderName)
+            if folder then excludes[#excludes+1]=folder end
+        end
+    end
+    local originY=math.max(position.Y+90,
+        (S.lastSupportedFloorY or -1e8)+75,
+        (S.groundBackup and S.groundBackup.Y or -1e8)+75)
+    local source=Vector3.new(position.X, originY, position.Z)
+    local params=RaycastParams.new()
+    params.FilterType=Enum.RaycastFilterType.Exclude
+    params.IgnoreWater=true
+    local floorY=nil
+    for _=1,10 do
+        params.FilterDescendantsInstances=excludes
+        local hit=Workspace:Raycast(source, Vector3.new(0,-260,0),params)
+        if not hit then break end
+        if hit.Normal.Y>=0.56 and hit.Instance.CanCollide
+            and hit.Position.Y>Workspace.FallenPartsDestroyHeight+20
+            and hit.Position.Y<=position.Y+65 then
+            floorY=hit.Position.Y
+            break
+        end
+        excludes[#excludes+1]=hit.Instance
+    end
+    cached.at,cached.x,cached.z,cached.y,cached.model=
+        now,position.X,position.Z,floorY,target and target.model or nil
+    return floorY
+end
+
+-- Keep the avatar ABOVE the actual map surface even when the enemy root is
+-- below it. Preserve Above/Below/Behind rotations; only correct the height.
+S.clampFarmPoseToArena = function(pose, target, root)
+    if not pose or not target or S.farmMethod=="Legit" then return pose end
+    local goal=pose.Position
+    local floorY=S.combatArenaFloorAt(goal,target)
+    if floorY and goal.Y < floorY + 3.5 then
+        local raised=Vector3.new(goal.X,floorY+3.5,goal.Z)
+        return CFrame.new(raised)*pose.Rotation
+    end
+    return pose
 end
 
 local function supportedEscapePoint(point)
@@ -2183,7 +2390,8 @@ desiredFarmPose = function(root, target)
         lookAt = Vector3.new(focus.X, position.Y, focus.Z)
         up = Vector3.yAxis
     end
-    return CFrame.lookAt(position, lookAt, up)
+    local pose=CFrame.lookAt(position, lookAt, up)
+    return S.clampFarmPoseToArena(pose, target, root)
 end
 
 local function moveLegit(humanoid, root, target, now)
@@ -2296,6 +2504,9 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         S.lastClipCheck = now
     end
     local goalPose = dodgeOverride or desiredFarmPose(root, target)
+    if target then
+        goalPose=S.clampFarmPoseToArena(goalPose,target,root)
+    end
     -- A target or escape point beneath the current arena must not drag the
     -- character through the floor. Use the last safe flight position instead.
     local floorAnchor = S.lastSupportedFloorY
@@ -2843,11 +3054,11 @@ local function buildUI()
     local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
     local window = Rayfield:CreateWindow({
         name = "HollowMoonHub",
-        subtitle = "Anime Dimensions | v26",
+        subtitle = "Anime Dimensions | v29",
         sidebarLayout = true,
     })
     S.window = window
-    window:CreateTag({text = "v26"})
+    window:CreateTag({text = "v29"})
 
     window:CreateSection({name="AUTOMATION"})
 
@@ -3524,6 +3735,8 @@ task.spawn(function()
         if regularLobby() then
             local restoreOk,restoreErr=pcall(restoreSpeedCharacter)
             if not restoreOk then warnOnce(restoreErr) end
+            local savedOk,savedErr=pcall(rememberEquippedLoadout)
+            if not savedOk then warnOnce(savedErr) end
         end
         local ok,err=pcall(specialLobbyTick)
         if not ok then warnOnce(err) end
@@ -3544,7 +3757,7 @@ end
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV26
+local priorBoot = env.HollowMoonADStartupV29
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -3555,7 +3768,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV26 = boot
+env.HollowMoonADStartupV29 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -3621,7 +3834,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV26 ~= boot then return end
+    if env.HollowMoonADStartupV29 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -3638,13 +3851,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v26] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v29] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v26] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v29] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -3652,16 +3865,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v26_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v29_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v26] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v29] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v26] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v29] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
