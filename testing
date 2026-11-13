@@ -1,11 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V29
--- HollowMoonHub | Anime Dimensions v29 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V32
+-- HollowMoonHub | Anime Dimensions v32 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V29
--- HollowMoonHub | Anime Dimensions v29 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V32
+-- HollowMoonHub | Anime Dimensions v32 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -27,6 +27,7 @@ local S = {
     alive = true,
     -- Lobby / results workflow (persisted when the executor supports files)
     mapChoice = "Hardest", -- internal map name or "Hardest"
+    v30MapReviewed = false, -- one-time migration of stale Halloween map selection
     difficultyChoice = "Hardest",
     hardcore = false,
     friendsOnly = true,
@@ -170,6 +171,8 @@ local S = {
     lastSupportedFloorY = nil,
     lastSupportCheck = -math.huge,
     lastSafetyRecovery = -math.huge,
+    lastScriptPosition = nil, -- position last written by farm; detect game-side arena teleports
+    lastSpatialRebase = -math.huge,
 }
 env.HollowMoonAnimeDimensions = S
 
@@ -177,9 +180,9 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v29_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v32_core.lua"
 local PERSIST_KEYS = {
-    "mapChoice", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
+    "mapChoice", "v30MapReviewed", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
     "matchesCompleted", "sessionStopped",
     "autoJoinRaid", "raidMapChoice", "raidDifficultyChoice", "raidFriendsOnly",
@@ -224,6 +227,16 @@ local function loadPreferences()
     end
 end
 loadPreferences()
+-- A one-time reset for old state files which explicitly saved the Halloween
+-- event while the UI was later set back to "Hardest". Halloween remains
+-- selectable manually after the migration; it is never an automatic pick.
+if not S.v30MapReviewed then
+    S.v30MapReviewed = true
+    if S.mapChoice == "Halloween Dimension" then
+        S.mapChoice = "Hardest"
+    end
+    savePreferences()
+end
 -- A completed cross-place run must clear its active mode on return, even if
 -- the lobby PlaceId matches the one where that run began. This is persisted
 -- so GitHub Auto Execute can recover the result after a new Roblox place loads.
@@ -248,7 +261,7 @@ end
 S.reconnectArmedAt = os.clock() + 45
 S.lastReconnectEpoch = math.max(0, tonumber(S.lastReconnectEpoch) or 0)
 
--- The outer v29 loader waits for StatsLoaded, required modules and a stable
+-- The outer v30 loader waits for StatsLoaded, required modules and a stable
 -- character BEFORE this core runs. This second check protects later respawns.
 local function statsReady()
     local gui = player:FindFirstChildOfClass("PlayerGui")
@@ -261,7 +274,7 @@ end
 -- GitHub must host a complete Anime Dimensions script. Accept older/newer
 -- version headers, but never execute an unrelated game script.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V29"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V32"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -273,7 +286,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v29 main entry adds a second gate for
+        -- until player stats load; the v30 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -289,7 +302,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v29] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v32] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -306,14 +319,14 @@ local function installTeleportBootstrap()
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         -- Bust cached copies of the raw file after updating it in GitHub.
-        local freshURL = url .. "?hmh_ad_v29=" .. tostring(os.time())
+        local freshURL = url .. "?hmh_ad_v30=" .. tostring(os.time())
         local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
         if not ok or type(code) ~= "string" or #code == 0 then
             -- Some executors reject the optional no-cache parameter/query string.
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v29] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v32] GitHub Auto Execute fetch failed")
             return
         end
         -- Accept ANY complete HollowMoonHub Anime Dimensions version.
@@ -327,17 +340,17 @@ local function installTeleportBootstrap()
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v29] GitHub returned a different script: "
+            warn("[HollowMoonHub AD v32] GitHub returned a different script: "
                 .. firstLine:sub(1, 140) .. ". Not executing; check branch/file/raw URL.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v29] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v32] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v29] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v32] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -353,6 +366,11 @@ local lastSettingsCheck = -math.huge
 local SCAN_PERIOD = 0 -- target validity / selection checked every Heartbeat
 local COMBAT_PERIOD = 0 -- skill cooldown readiness checked every Heartbeat
 local MAX_TARGET_DISTANCE = 10000 -- discovery, not a claim of infinite server attack range
+-- Do not chase enemies in distant arenas/through map portals; the game itself
+-- must relocate the player between rooms. Oversized bosses can still be used
+-- when a large visible body part is physically close to the character.
+S.localFarmRange = 220
+S.localBossPriorityRange = 140
 local SKILL_RANGE = 25
 -- The native cooldown result remains authoritative. This faster retry guard
 -- applies only when direct remote use never starts a client-side timer.
@@ -457,21 +475,46 @@ local function mapOptions()
     end
     return options
 end
+-- Current regular progression Dimensions from the scanned MapInfo catalog.
+-- Seasonal maps such as Halloween must NEVER be selected by "Hardest".
+-- Manual selection from the dropdown is still supported.
+local REGULAR_DIMENSIONS = {
+    ["Titan Dimension"] = 1, ["Demon Dimension"] = 2,
+    ["Curse Dimension"] = 3, ["Villain Dimension"] = 4,
+    ["Sword Dimension"] = 5, ["Ghoul Dimension"] = 6,
+    ["Fate Dimension"] = 7, ["Slime Dimension"] = 8,
+    ["Devil Dimension"] = 9, ["Pirate Dimension"] = 10,
+    ["Alien Dimension"] = 11, ["Level Dimension"] = 12,
+    ["Death Dimension"] = 13,
+}
+local function bestUnlockedDimensionRequirement(info, level)
+    if type(info) ~= "table" or type(info.difficulties) ~= "table" then return nil end
+    local best = nil
+    for name, difficulty in pairs(info.difficulties) do
+        if type(difficulty) == "table" and
+            (S.difficultyChoice == "Hardest" or S.difficultyChoice == name) then
+            local required = tonumber(difficulty.levelReq)
+            if required and required <= level and (not best or required > best) then
+                best = required
+            end
+        end
+    end
+    return best
+end
 local function hardestMap(level)
     local settings = getSettings()
     local maps = settings and settings.MapInfo
-    if type(maps) ~= "table" then return nil end
-    local choice, bestOrder, bestLevel = nil, -math.huge, -math.huge
+    if type(maps) ~= "table" or type(level) ~= "number" then return nil end
+    local choice, bestLevel, bestProgressionOrder = nil, -math.huge, -math.huge
     for key, info in pairs(maps) do
-        -- Hardest deliberately means regular, unlocked progression Dimension;
-        -- not an event, raid, challenge or an Infinite/Boss Rush mode.
-        local order = tonumber(info.order)
-        if isActiveMap(info) and info.isEvent ~= true and info.isRaid ~= true
-            and info.isInfinite ~= true and info.keyRequired ~= true
-            and type(key) == "string" and string.find(key, "Dimension", 1, true)
-            and order and order > 0 and mapLevel(info) <= level then
-            if order > bestOrder or (order == bestOrder and mapLevel(info) > bestLevel) then
-                choice, bestOrder, bestLevel = key, order, mapLevel(info)
+        local progressionOrder = REGULAR_DIMENSIONS[key]
+        if progressionOrder and isActiveMap(info)
+            and info.isEvent ~= true and info.isRaid ~= true
+            and info.isInfinite ~= true and info.keyRequired ~= true then
+            local unlocked = bestUnlockedDimensionRequirement(info, level)
+            if unlocked and (unlocked > bestLevel or
+                (unlocked == bestLevel and progressionOrder > bestProgressionOrder)) then
+                choice, bestLevel, bestProgressionOrder = key, unlocked, progressionOrder
             end
         end
     end
@@ -522,7 +565,10 @@ local function buildRoomData()
     local level = playerLevel()
     if not level then return nil, "Player level not loaded" end
     local mapId = chooseMap(level)
-    if not mapId then return nil, "No eligible map for this lobby and selection" end
+    if not mapId then return nil, "No eligible regular Dimension for these level/difficulty settings" end
+    if S.mapChoice == "Hardest" and not REGULAR_DIMENSIONS[mapId] then
+        return nil, "Hardest selection refused an event or non-progression map"
+    end
     local settings = getSettings()
     local info = settings and settings.MapInfo and settings.MapInfo[mapId]
     local difficulty = chooseDifficulty(mapId, level)
@@ -688,7 +734,7 @@ end
 
 
 -- ================================================================
--- v29: RAID / SPEED RAID / DAILY / BOSS RUSH / EXTREME / TIME
+-- v30: RAID / SPEED RAID / DAILY / BOSS RUSH / EXTREME / TIME
 -- One arbiter owns special-mode teleport requests. Per-mode cooldowns and
 -- server-side validation remain authoritative. No simultaneous queues.
 -- ================================================================
@@ -1661,6 +1707,19 @@ local function bossScore(target)
     if math.max(size.X,size.Y,size.Z)>=14 then return 25 end
     return 0
 end
+S.targetInCurrentArea = function(t, root)
+    if not validTarget(t) then return false end
+    local dist = (t.root.Position - root.Position).Magnitude
+    if dist <= S.localFarmRange then return true end
+    -- A very large boss may have its actual root far below its visible torso.
+    return dist <= S.localFarmRange + 90
+        and effectiveDistance(t, root.Position) <= 45
+end
+S.bossWithinCurrentArea = function(t, root)
+    if not S.targetInCurrentArea(t,root) then return false end
+    return (t.root.Position - root.Position).Magnitude <= S.localBossPriorityRange
+        or effectiveDistance(t,root.Position) <= 40
+end
 local function findTarget(root)
     bindMonsterIndex()
     local folder = S.monsterFolder
@@ -1670,19 +1729,25 @@ local function findTarget(root)
     end
     local current = S.target
     local prioritizeBoss=extremeModeActive() or S.bossBarActive()
-    local highestBoss=0
+    local highestBoss = 0
     if prioritizeBoss then
         for _,entry in pairs(S.indexedTargets) do
             local candidate=entry.target
-            if validTarget(candidate) then highestBoss=math.max(highestBoss,bossScore(candidate)) end
+            if validTarget(candidate) and candidate.model:IsDescendantOf(folder)
+                and S.bossWithinCurrentArea(candidate,root) then
+                highestBoss=math.max(highestBoss,bossScore(candidate))
+            end
         end
     end
-    if validTarget(current) and current.model:IsDescendantOf(folder)
-        and (not prioritizeBoss or bossScore(current)>=highestBoss) then
+    if current and S.targetInCurrentArea(current,root) and current.model:IsDescendantOf(folder)
+        and (not prioritizeBoss or
+            (highestBoss > 0 and S.bossWithinCurrentArea(current,root)
+                and bossScore(current) >= highestBoss) or
+            (highestBoss <= 0 and
+                (current.root.Position-root.Position).Magnitude < S.localBossPriorityRange)) then
         return current
     end
-    if current then setTarget(nil) end
-    -- Pending rigs are checked immediately, not on a 0.07s scan timer.
+    -- Pending rigs are checked immediately on the next Heartbeat.
     for hum in pairs(S.pendingHumanoids) do
         if hum.Parent and hum.Health > 0 then
             trackHumanoid(hum)
@@ -1690,23 +1755,39 @@ local function findTarget(root)
             S.pendingHumanoids[hum] = nil
         end
     end
-    local best, bestDistance, bestPriority = nil, MAX_TARGET_DISTANCE, -1
+    local localBest, localDistance, localPriority = nil, math.huge, -math.huge
+    local fallbackBest, fallbackDistance = nil, math.huge
     for hum, entry in pairs(S.indexedTargets) do
         local t = entry.target
         if validTarget(t) and t.model:IsDescendantOf(folder) then
-            local d = (t.root.Position - root.Position).Magnitude
-            -- Prefer the actual combat Humanoid when the map also contains a
-            -- decorative/nested humanoid. Within a class, select nearest.
-            local score=prioritizeBoss and bossScore(t) or t.priority
-            if d < MAX_TARGET_DISTANCE and (not best or score>bestPriority
-                or (score==bestPriority and d < bestDistance)) then
-                best,bestDistance,bestPriority=t,d,score
+            local d = (t.root.Position-root.Position).Magnitude
+            if S.targetInCurrentArea(t,root) then
+                local score = prioritizeBoss and S.bossWithinCurrentArea(t,root)
+                    and bossScore(t) or t.priority
+                if not localBest or score > localPriority
+                    or (score == localPriority and d < localDistance) then
+                    localBest, localDistance, localPriority = t,d,score
+                end
+            elseif d < fallbackDistance then
+                -- No arbitrary height or 220-stud lockout: if the avatar was
+                -- sent onto a roof, choose the nearest living enemy anywhere.
+                fallbackBest, fallbackDistance = t,d
             end
         else
             removeIndexedHumanoid(hum)
         end
     end
-    if best then setTarget(best) end
+    local best = localBest
+    if not best then
+        -- Preserve the existing living target during long-distance travel;
+        -- a newly spawned nearby enemy still overrides it immediately.
+        if current and validTarget(current) and current.model:IsDescendantOf(folder) then
+            best = current
+        else
+            best = fallbackBest
+        end
+    end
+    if S.target ~= best then setTarget(best) end
     return best
 end
 
@@ -1933,7 +2014,9 @@ local function groundSupportAt(position)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.IgnoreWater = true
-    local startPoint = position + Vector3.new(0, 12, 0)
+    -- Starting above the avatar can accidentally intersect a low cave roof.
+    -- Probe from the avatar's own elevation, and only down toward the floor.
+    local startPoint = position + Vector3.new(0, 2, 0)
     local direction = Vector3.new(0, -460, 0)
     for _ = 1, 8 do
         params.FilterDescendantsInstances = ignores
@@ -1948,73 +2031,13 @@ local function groundSupportAt(position)
     return nil
 end
 
--- A boss rig can put its HumanoidRootPart below the map even while its
--- visible torso is above ground. Sample the arena surface from well ABOVE
--- the requested destination, not from beneath the terrain. The result is
--- cached briefly so smooth follow remains fast on every Heartbeat.
-S.combatFloorCache = { at=-math.huge, x=0, z=0, y=nil, model=nil }
-S.combatArenaFloorAt = function(position, target)
-    local now = os.clock()
-    local cached = S.combatFloorCache
-    if target and cached.model == target.model and now - cached.at < 0.16
-        and math.abs(cached.x-position.X)<7 and math.abs(cached.z-position.Z)<7 then
-        return cached.y
-    end
-    local excludes = {}
-    if player.Character then excludes[#excludes+1]=player.Character end
-    local folders=Workspace:FindFirstChild("Folders")
-    if folders then
-        for _,folderName in ipairs({"Monsters","Debris"}) do
-            local folder=folders:FindFirstChild(folderName)
-            if folder then excludes[#excludes+1]=folder end
-        end
-    end
-    local originY=math.max(position.Y+90,
-        (S.lastSupportedFloorY or -1e8)+75,
-        (S.groundBackup and S.groundBackup.Y or -1e8)+75)
-    local source=Vector3.new(position.X, originY, position.Z)
-    local params=RaycastParams.new()
-    params.FilterType=Enum.RaycastFilterType.Exclude
-    params.IgnoreWater=true
-    local floorY=nil
-    for _=1,10 do
-        params.FilterDescendantsInstances=excludes
-        local hit=Workspace:Raycast(source, Vector3.new(0,-260,0),params)
-        if not hit then break end
-        if hit.Normal.Y>=0.56 and hit.Instance.CanCollide
-            and hit.Position.Y>Workspace.FallenPartsDestroyHeight+20
-            and hit.Position.Y<=position.Y+65 then
-            floorY=hit.Position.Y
-            break
-        end
-        excludes[#excludes+1]=hit.Instance
-    end
-    cached.at,cached.x,cached.z,cached.y,cached.model=
-        now,position.X,position.Z,floorY,target and target.model or nil
-    return floorY
-end
-
--- Keep the avatar ABOVE the actual map surface even when the enemy root is
--- below it. Preserve Above/Below/Behind rotations; only correct the height.
-S.clampFarmPoseToArena = function(pose, target, root)
-    if not pose or not target or S.farmMethod=="Legit" then return pose end
-    local goal=pose.Position
-    local floorY=S.combatArenaFloorAt(goal,target)
-    if floorY and goal.Y < floorY + 3.5 then
-        local raised=Vector3.new(goal.X,floorY+3.5,goal.Z)
-        return CFrame.new(raised)*pose.Rotation
-    end
-    return pose
-end
+-- Farm destinations are based on the enemy, never on a remembered arena
+-- floor or roof height. No arena-height clamp interferes with Auto Farm.
 
 local function supportedEscapePoint(point)
-    local floorY = groundSupportAt(point)
-    if not floorY then return false end
-    -- Avoid landing on unrelated floors located far below the current arena.
-    local floorAnchor = S.lastSupportedFloorY
-        or (S.groundBackup and S.groundBackup.Y)
-    if floorAnchor and floorY < floorAnchor - 30 then return false end
-    return true
+    -- Dodge still requires real support beneath an escape destination, but
+    -- it must not prohibit moving between different arena elevations.
+    return groundSupportAt(point) ~= nil
 end
 
 local function chooseSafeDodgePoint(fromPos, zones, nearPos)
@@ -2338,6 +2361,7 @@ releaseMovement = function(resetFacing)
     S.pathGeneration = S.pathGeneration + 1
     S.pathPending = false
     S.smoothPose = nil
+    S.lastScriptPosition = nil
     S.lastClipCheck = -HUGE
 end
 
@@ -2390,8 +2414,7 @@ desiredFarmPose = function(root, target)
         lookAt = Vector3.new(focus.X, position.Y, focus.Z)
         up = Vector3.yAxis
     end
-    local pose=CFrame.lookAt(position, lookAt, up)
-    return S.clampFarmPoseToArena(pose, target, root)
+    return CFrame.lookAt(position, lookAt, up)
 end
 
 local function moveLegit(humanoid, root, target, now)
@@ -2477,6 +2500,7 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
     end
 
     if S.farmMethod == "Legit" then
+        S.lastScriptPosition = nil
         rememberGround(root, humanoid, character)
         if next(S.oldCollisions) then
             for p, original in pairs(S.oldCollisions) do
@@ -2504,16 +2528,18 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         S.lastClipCheck = now
     end
     local goalPose = dodgeOverride or desiredFarmPose(root, target)
-    if target then
-        goalPose=S.clampFarmPoseToArena(goalPose,target,root)
-    end
-    -- A target or escape point beneath the current arena must not drag the
-    -- character through the floor. Use the last safe flight position instead.
-    local floorAnchor = S.lastSupportedFloorY
-    if floorAnchor and goalPose.Position.Y < floorAnchor - 22 then
-        local goalFloorY = groundSupportAt(goalPose.Position)
-        if not goalFloorY or goalFloorY < floorAnchor - 30 then
-            goalPose = S.lastSupportedPose or root.CFrame
+    -- If the avatar is stranded far above/outside the active fight, directly
+    -- rejoin the selected enemy rather than staying on an old floor reference.
+    -- Normal Tween distances remain smooth; dodge movement retains priority.
+    if target and not dodgeOverride and S.farmMethod == "Tween" then
+        local offset = goalPose.Position - root.Position
+        if math.abs(offset.Y) >= 90 or offset.Magnitude >= 400 then
+            root.CFrame = goalPose
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            S.smoothPose = goalPose
+            S.lastScriptPosition = root.Position
+            return
         end
     end
     if S.farmMethod == "Teleport" then
@@ -2549,6 +2575,7 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         root.AssemblyAngularVelocity = Vector3.zero
         S.smoothPose = root.CFrame
     end
+    S.lastScriptPosition = root.Position
 end
 
 local function holdFarmPose(root, humanoid)
@@ -2569,6 +2596,7 @@ local function holdFarmPose(root, humanoid)
     root.CFrame = pose
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
+    S.lastScriptPosition = root.Position
 end
 
 local function fireBasic(root, data, now)
@@ -3054,11 +3082,11 @@ local function buildUI()
     local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
     local window = Rayfield:CreateWindow({
         name = "HollowMoonHub",
-        subtitle = "Anime Dimensions | v29",
+        subtitle = "Anime Dimensions | v30",
         sidebarLayout = true,
     })
     S.window = window
-    window:CreateTag({text = "v29"})
+    window:CreateTag({text = "v30"})
 
     window:CreateSection({name="AUTOMATION"})
 
@@ -3470,18 +3498,14 @@ local function buildUI()
             callback=function(on)
                 S.autoFarm=on==true
                 resetTarget()
+                S.lastScriptPosition=nil
                 if S.autoFarm then
                     S.poseHeading=nil
-                    S.lastSupportedPose=nil
-                    S.lastSupportedFloorY=nil
-                    S.lastSupportCheck=-HUGE
                     local char,hum,root=getCharacter()
                     if char and hum and root then
+                        -- Ground backup is used only on user-requested STOP.
                         rememberGround(root,hum,char)
                         stablePoseHeading(root)
-                        S.lastSupportedPose=root.CFrame
-                        local groundY=groundSupportAt(root.Position)
-                        if groundY then S.lastSupportedFloorY=groundY end
                     end
                 else
                     releaseMovement()
@@ -3598,51 +3622,32 @@ local function buildUI()
 end
 buildUI()
 
--- At most every 0.12s, confirm that the combat character remains over a
--- walkable arena surface. If it drops well BELOW the last known arena floor,
--- recover while the farm still owns noclip/flight instead of falling into void.
--- We deliberately don't reject ordinary Above/Below positions near the floor.
-local function arenaSafetyTick(root, now)
-    if not S.autoFarm or S.farmMethod == "Legit" then return end
-    if now - S.lastSupportCheck < 0.12 then return end
-    S.lastSupportCheck = now
-    local floorY = groundSupportAt(root.Position)
-    local baseline = S.lastSupportedFloorY
-        or (S.groundBackup and S.groundBackup.Y - 3.5)
-    local droppedUnderArena = baseline and root.Position.Y < baseline - 22
-    local unrelatedLowerFloor = floorY and baseline and floorY < baseline - 30
-
-    if droppedUnderArena and (not floorY or unrelatedLowerFloor) then
-        if now - S.lastSafetyRecovery >= 0.65 then
-            S.lastSafetyRecovery = now
-            local pose = S.lastSupportedPose
-            if not pose and S.groundBackup then
-                pose = CFrame.new(S.groundBackup) * root.CFrame.Rotation
-            end
-            if pose then
-                root.CFrame = pose
-                root.AssemblyLinearVelocity = Vector3.zero
-                root.AssemblyAngularVelocity = Vector3.zero
-                S.smoothPose = pose
-                S.dodgeGoal = nil
-                S.dodgeHoldUntil = -HUGE
-                S.dodgeLastClear = nil
-                S.dodgeResumeUntil = now + REENGAGE_BOOST_TIME
-                -- Re-evaluate target from the recovered location immediately.
-                setTarget(nil)
-                S.lastTargetScan = -HUGE
-            end
-        end
-        return
-    end
-
-    if floorY and not unrelatedLowerFloor
-        and root.Position.Y >= floorY - 5
-        and root.Position.Y <= floorY + 180 then
-        S.lastSupportedPose = root.CFrame
-        S.lastSupportedFloorY = floorY
+-- Recover from game-side arena/portal teleports. Our flight controller writes
+-- a position each Heartbeat; a large discrepancy means Roblox has moved us
+-- externally (not an intended Tween step). Rebase spatial memory immediately,
+-- just like a successful respawn does, without forcing the player to die.
+S.rebaseSpatialState = function(root, now)
+    S.lastSpatialRebase=now
+    S.lastScriptPosition=nil
+    S.smoothPose=nil
+    S.poseHeading=nil
+    S.dodgeGoal=nil
+    S.dodgeLastClear=nil
+    S.dodgeHoldUntil=-HUGE
+    S.dodgeResumeUntil=now
+    resetTarget()
+end
+S.detectExternalArenaTeleport = function(root, now)
+    if not S.autoFarm or S.farmMethod=="Legit" then return end
+    local previous=S.lastScriptPosition
+    if previous and (root.Position-previous).Magnitude > 45
+        and now-S.lastSpatialRebase > 0.65 then
+        S.rebaseSpatialState(root,now)
     end
 end
+
+-- No roof/floor-height recovery tick while Auto Farm is active. A live
+-- enemy always wins over remembered elevations and obsolete safety poses.
 
 -- One Heartbeat controls the timeline. Combat is checked first so a busy
 -- hazard scan, grounded pathfinder, or pose update cannot postpone ready skills.
@@ -3663,8 +3668,9 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
     local _, humanoid, root = getCharacter()
     if not root then return end
     if S.autoFarm then
-        local safe, errorMessage = pcall(arenaSafetyTick, root, now)
-        if not safe then warnOnce(errorMessage) end
+        -- Rebase stale state after genuine game teleports, without blocking
+        -- the next target or moving back to a previously saved arena floor.
+        S.detectExternalArenaTeleport(root, now)
     end
     local showingResults = resultScreenVisible(now)
     local target = nil
@@ -3723,6 +3729,8 @@ S.connections[#S.connections+1] = player.CharacterAdded:Connect(function()
     S.lastSupportedFloorY = nil
     S.lastSupportCheck = -HUGE
     S.lastSafetyRecovery = -HUGE
+    S.lastScriptPosition = nil
+    S.lastSpatialRebase = -HUGE
     S.dodgeGoal, S.dodgeLastClear = nil, nil
     S.poseHeading = nil
     clearHazardTracking()
@@ -3757,7 +3765,7 @@ end
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV29
+local priorBoot = env.HollowMoonADStartupV32
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -3768,7 +3776,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV29 = boot
+env.HollowMoonADStartupV32 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -3834,7 +3842,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV29 ~= boot then return end
+    if env.HollowMoonADStartupV32 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -3851,13 +3859,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v29] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v32] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v29] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v32] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -3865,16 +3873,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v29_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v32_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v29] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v32] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v29] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v32] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
