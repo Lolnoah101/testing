@@ -1,10 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V23
--- HollowMoonHub | Anime Dimensions v23 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V26
+-- HollowMoonHub | Anime Dimensions v26 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
--- HMH_ANIME_DIMENSIONS_V23
--- HollowMoonHub | Anime Dimensions v23 | Startup Readiness Gate
+
+-- HMH_ANIME_DIMENSIONS_V26
+-- HollowMoonHub | Anime Dimensions v26 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -31,6 +32,42 @@ local S = {
     friendsOnly = true,
     startDelay = 3,
     autoStart = false,
+    -- Special modes are scheduled by one lobby arbiter, not six competing loops.
+    autoJoinRaid = false,
+    raidMapChoice = "Hardest",
+    raidDifficultyChoice = "Hardest",
+    raidFriendsOnly = false,
+    autoSpeedRaid = false,
+    speedCharacterChoice = "Auto — Next Unused",
+    speedAutoLeave = true,
+    speedUsed = {},
+    speedWeek = "",
+    speedOriginalCharacter = "",
+    speedRestorePending = false,
+    speedPendingCharacter = "",
+    autoDailyRaid = false,
+    dailyLastRequestedDate = "",
+    autoBossRush = false,
+    bossAutoRetry = false,
+    bossAutoLeave = true,
+    autoExtreme = false,
+    extremeDifficulty = "Hardest",
+    autoTimeChallenge = false,
+    -- Lower rank = higher priority. Every mode is independently enabled above.
+    -- Default Boss Rush first so owned tickets are not starved by other modes.
+    modePriority = {
+        BossRush = 1, DailyRaid = 2, SpeedRaid = 3, Raid = 4,
+        ExtremeDimension = 5, TimeChallenge = 6, Dimensions = 7,
+    },
+    modeIntent = "",
+    modeRequestAt = 0,
+    modeFromPlace = 0,
+    modeWasInBattle = false,
+    raidUnavailableUntil = 0,
+    lastRaidRotationAt = 0,
+    specialBusy = false,
+    specialSelected = false,
+    specialResultHandled = false,
     autoRetry = false,
     autoLeaveMatches = false,
     matchesToLeave = 10,
@@ -135,11 +172,17 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v23_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v26_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
     "matchesCompleted", "sessionStopped",
+    "autoJoinRaid", "raidMapChoice", "raidDifficultyChoice", "raidFriendsOnly",
+    "autoSpeedRaid", "speedCharacterChoice", "speedAutoLeave", "speedUsed", "speedWeek",
+    "speedOriginalCharacter", "speedRestorePending", "speedPendingCharacter",
+    "autoDailyRaid", "dailyLastRequestedDate", "autoBossRush", "bossAutoRetry", "bossAutoLeave",
+    "autoExtreme", "extremeDifficulty", "autoTimeChallenge", "modePriority", "modeIntent", "modeRequestAt",
+    "modeFromPlace", "modeWasInBattle", "raidUnavailableUntil",
     "autoAttack", "autoSkills", "autoFarm", "autoDodge",
     "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "autoExecute",
     "autoClaimQuests", "autoSellCards", "cardSellRarities", "nativeAutoSellBefore",
@@ -167,8 +210,25 @@ local function loadPreferences()
     S.startDelay = math.clamp(math.floor(tonumber(S.startDelay) or 3), 1, 10)
     S.matchesToLeave = math.clamp(math.floor(tonumber(S.matchesToLeave) or 10), 1, 99999)
     S.matchesCompleted = math.max(0, math.floor(tonumber(S.matchesCompleted) or 0))
+    -- Persisted settings from old versions may be missing rank keys.
+    local fallback = {BossRush=1,DailyRaid=2,SpeedRaid=3,Raid=4,
+        ExtremeDimension=5,TimeChallenge=6,Dimensions=7}
+    if type(S.modePriority) ~= "table" then S.modePriority = {} end
+    for key, rank in pairs(fallback) do
+        S.modePriority[key] = math.clamp(math.floor(tonumber(S.modePriority[key]) or rank),1,7)
+    end
 end
 loadPreferences()
+-- A completed cross-place run must clear its active mode on return, even if
+-- the lobby PlaceId matches the one where that run began. This is persisted
+-- so GitHub Auto Execute can recover the result after a new Roblox place loads.
+if game.PlaceId == 6990129309 and S.modeIntent ~= "" then
+    if S.modeIntent == "SpeedRaid" and S.speedPendingCharacter ~= "" then
+        S.speedUsed[S.speedPendingCharacter] = true
+    end
+    S.modeWasInBattle = true
+    savePreferences()
+end
 
 -- v18 migration: previous Auto Reconnect was too broad and could chain
 -- teleports while starting a dungeon. Default it OFF once on upgrade.
@@ -183,7 +243,7 @@ end
 S.reconnectArmedAt = os.clock() + 45
 S.lastReconnectEpoch = math.max(0, tonumber(S.lastReconnectEpoch) or 0)
 
--- The outer v23 loader waits for StatsLoaded, required modules and a stable
+-- The outer v26 loader waits for StatsLoaded, required modules and a stable
 -- character BEFORE this core runs. This second check protects later respawns.
 local function statsReady()
     local gui = player:FindFirstChildOfClass("PlayerGui")
@@ -196,7 +256,7 @@ end
 -- GitHub must host a complete Anime Dimensions script. Accept older/newer
 -- version headers, but never execute an unrelated game script.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V23"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V26"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -208,7 +268,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v23 main entry adds a second gate for
+        -- until player stats load; the v26 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -224,7 +284,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v23] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v26] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -241,14 +301,14 @@ local function installTeleportBootstrap()
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         -- Bust cached copies of the raw file after updating it in GitHub.
-        local freshURL = url .. "?hmh_ad_v23=" .. tostring(os.time())
+        local freshURL = url .. "?hmh_ad_v26=" .. tostring(os.time())
         local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
         if not ok or type(code) ~= "string" or #code == 0 then
             -- Some executors reject the optional no-cache parameter/query string.
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v23] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v26] GitHub Auto Execute fetch failed")
             return
         end
         -- Accept ANY complete HollowMoonHub Anime Dimensions version.
@@ -262,17 +322,17 @@ local function installTeleportBootstrap()
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v23] GitHub returned a different script: "
+            warn("[HollowMoonHub AD v26] GitHub returned a different script: "
                 .. firstLine:sub(1, 140) .. ". Not executing; check branch/file/raw URL.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v23] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v26] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v23] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v26] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -362,8 +422,7 @@ end
 local function isActiveMap(info)
     if type(info) ~= "table" or info.excludeFromList == true then return false end
     if info.endTime and (tonumber(info.endTime) or 0) < Workspace:GetServerTimeNow() then return false end
-    local raidLobby = game.PlaceId == 7338881230
-    if raidLobby then return info.isRaid == true and info.isShadowRaid ~= true end
+    -- Dimensions and Raids now have separate pickers; never mix them.
     return info.isRaid ~= true
 end
 local mapLabels, sortedMaps = {}, {}
@@ -492,6 +551,8 @@ local function invokeRoom(action, value)
     return result, nil
 end
 local function autoStartWorker()
+    if game.PlaceId == 7338881230 then return end -- raid lobby is raid-only
+    if S.specialSelected or S.specialBusy then return end
     if S.lobbyBusy or not S.alive or not inLobby() or not S.autoStart or S.sessionStopped then return end
     S.lobbyBusy = true
     S.lobbyGeneration = S.lobbyGeneration + 1
@@ -562,6 +623,38 @@ local function resultsWorkflowTick(now, visible)
     S.resultsHiddenSince = nil
     if S.resultsHandled then return end
     S.resultsHandled = true
+    local gameMode = tostring(Workspace:GetAttribute("GameMode") or "")
+    if gameMode == "ShadowRaid" or S.modeIntent == "SpeedRaid" then
+        if S.speedAutoLeave and remote then
+            task.delay(0.35, function()
+                if S.alive and game.PlaceId == 6990129309 then
+                    remote:FireServer("LeaveDungeon")
+                end
+            end)
+        end
+        return -- Never retry a weekly-used Speed Raid character.
+    end
+    if S.modeIntent == "DailyRaid" then
+        if remote then task.delay(0.35, function()
+            if S.alive and game.PlaceId == 6990129309 then remote:FireServer("LeaveDungeon") end
+        end) end
+        return -- Rewards can only be earned once daily; no automatic retry.
+    end
+    if S.modeIntent == "BossRush" then
+        if remote then
+            local action = S.bossAutoLeave and "LeaveDungeon"
+                or S.bossAutoRetry and "RetryDungeon" or nil
+            if action then task.delay(0.35,function()
+                if S.alive and game.PlaceId == 6990129309 then remote:FireServer(action) end
+            end) end
+        end
+        return -- Do not apply general match counter to Boss Rush.
+    end
+    if S.modeIntent=="Raid" or S.modeIntent=="RaidQueue" then
+        -- Raids have their own result handler and should never also fire the
+        -- normal Dimensions retry/leave action.
+        return
+    end
     if not (S.autoRetry or S.autoLeaveMatches) then return end
     S.matchesCompleted = S.matchesCompleted + 1
     savePreferences()
@@ -584,6 +677,600 @@ local function resultsWorkflowTick(now, visible)
         if not (result and result:IsA("GuiObject") and result.Visible) then return end
         if remote then
             remote:FireServer(shouldLeave and "LeaveDungeon" or "RetryDungeon")
+        end
+    end)
+end
+
+
+-- ================================================================
+-- v26: RAID / SPEED RAID / DAILY / BOSS RUSH / EXTREME / TIME
+-- One arbiter owns special-mode teleport requests. Per-mode cooldowns and
+-- server-side validation remain authoritative. No simultaneous queues.
+-- ================================================================
+local RAID_LOBBY = 7338881230
+-- The native UIModule marks a raid as OPEN only for the first 600 seconds
+-- of each server-time hour (time-left-in-hour > 3000). Its rotation list
+-- is NOT a raid-open indicator. Keep the main-lobby teleport inactive until
+-- the real open window, and allow a few seconds for the hourly UI/server
+-- rollover plus a buffer before the window closes.
+-- Store this on S so it adds no main-chunk local register.
+S.raidWindowOpen = function()
+    local ok, serverTime = pcall(Workspace.GetServerTimeNow, Workspace)
+    if not ok or type(serverTime) ~= "number" or serverTime <= 0 then
+        return false -- fail closed when server time isn't available
+    end
+    local secondsIntoHour = math.floor(serverTime) % 3600
+    return secondsIntoHour >= 5 and secondsIntoHour < 570
+end
+local MAIN_LOBBIES = { [6938803436]=true, [7274690025]=true, [6616269295]=true }
+local function regularLobby() return MAIN_LOBBIES[game.PlaceId] == true end
+local function specialEnabled()
+    return S.autoJoinRaid or S.autoSpeedRaid or S.autoDailyRaid
+        or S.autoBossRush or S.autoExtreme or S.autoTimeChallenge
+end
+S.specialSelected = specialEnabled()
+local function todayUTC() return os.date("!%Y-%m-%d") end
+local function weekUTC() return os.date("!%Y-%W") end
+local function stat(name)
+    local display = ReplicatedStorage:FindFirstChild(player.Name .. "StatDisplay")
+    local object = display and display:FindFirstChild(name)
+    if object and object:IsA("ValueBase") then return object.Value end
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    local modules = gui and gui:FindFirstChild("Modules")
+    local inst = modules and modules:FindFirstChild("LocalStatsModule")
+    if inst then
+        local ok,m=pcall(require,inst)
+        if ok and type(m)=="table" and type(m.returnStat)=="function" then
+            local success,v=pcall(m.returnStat,player,name)
+            if success then return v end
+        end
+    end
+    return nil
+end
+local function getCharacterModule()
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    local mod = gui and gui:FindFirstChild("Modules") and gui.Modules:FindFirstChild("CharacterModule")
+    if not mod then return nil end
+    local ok,m=pcall(require,mod)
+    if ok and type(m)=="table" then return m end
+end
+local function collectedCharacters()
+    local module = getCharacterModule()
+    if not (module and type(module.returnCharacterCollectedTable)=="function") then return nil end
+    -- Nonblocking, because the game's character collection could still be initializing.
+    local ok, owned=pcall(module.returnCharacterCollectedTable,false)
+    if not ok or type(owned)~="table" or not next(owned) then return nil end
+    return owned
+end
+local function speedCharacterOptions()
+    local options={"Auto — Next Unused"}
+    local owned=collectedCharacters() or {}
+    local settings=getSettings()
+    local chars=settings and settings.CharacterSettings or {}
+    local sorted={}
+    for name, v in pairs(owned) do
+        if v and chars[name] then sorted[#sorted+1]=name end
+    end
+    table.sort(sorted,function(a,b)
+        local av=tonumber(chars[a].collectionRankValue) or 0
+        local bv=tonumber(chars[b].collectionRankValue) or 0
+        return av==bv and a<b or av>bv
+    end)
+    for _,name in ipairs(sorted) do options[#options+1]=name end
+    return options
+end
+local function refreshWeeklySpeedUsed()
+    local w=weekUTC()
+    if S.speedWeek ~= w then
+        S.speedWeek=w
+        S.speedUsed={}
+        savePreferences()
+    end
+end
+local function hasUsedSpeedCharacter(name)
+    if S.speedUsed[name] then return true end
+    local gui=player:FindFirstChildOfClass("PlayerGui")
+    local slot=gui and gui:FindFirstChild("SpeedRaidCharacterInventoryScrollingFrame", true)
+    slot=slot and slot:FindFirstChild(name)
+    local picture=slot and slot:FindFirstChild("CharacterImage")
+    return picture and picture:IsA("ImageLabel") and picture.ImageTransparency >= .8 or false
+end
+local function selectSpeedCharacter()
+    local owned=collectedCharacters()
+    if not owned then return nil,"Characters not loaded" end
+    local settings=getSettings()
+    local cfg=settings and settings.CharacterSettings or {}
+    refreshWeeklySpeedUsed()
+    if S.speedCharacterChoice ~= "Auto — Next Unused" then
+        local name=S.speedCharacterChoice
+        if not owned[name] or not cfg[name] then return nil,"Selected character is not owned" end
+        if hasUsedSpeedCharacter(name) then return nil,"Selected character already used this week" end
+        return name
+    end
+    local ranked={}
+    for name in pairs(owned) do
+        if cfg[name] and not hasUsedSpeedCharacter(name) then
+            ranked[#ranked+1]=name
+        end
+    end
+    table.sort(ranked,function(a,b)
+        local av=tonumber(cfg[a].collectionRankValue) or 0
+        local bv=tonumber(cfg[b].collectionRankValue) or 0
+        return av==bv and a<b or av>bv
+    end)
+    if #ranked==0 then return nil,"All owned Speed Raid characters have been used this week" end
+    return ranked[1]
+end
+local function speedReady()
+    local previous=stat("ShadowRaidTimer")
+    if type(previous)~="number" then return false end
+    local settings=getSettings()
+    local duration=settings and settings.GameSettings and settings.GameSettings.ShadowRaidTimer or 1800
+    -- Server time data, when available, is more reliable than local UTC.
+    local now=os.time()
+    local gui=player:FindFirstChildOfClass("PlayerGui")
+    local modules=gui and gui:FindFirstChild("Modules")
+    local inst=modules and modules:FindFirstChild("ClientDataModule")
+    if inst then
+        local ok,m=pcall(require,inst)
+        if ok and type(m)=="table" and type(m.returnData)=="function" then
+            local success,value=pcall(m.returnData,"ostime")
+            if success and type(value)=="number" and value>0 then now=value end
+        end
+    end
+    return now-previous >= duration
+end
+
+local rotationCache, rotationExpires = nil, 0
+local function raidRotation()
+    if os.clock()<rotationExpires then return rotationCache end
+    rotationExpires=os.clock()+45
+    local response=invokeRoom("GetRotationRaidsInfo")
+    if type(response)~="table" then rotationCache={};return rotationCache end
+    rotationCache={}
+    for _,row in pairs(response) do
+        if type(row)=="table" and type(row.mapName)=="string"
+            and (tonumber(row.expiration) or 0)>0 then
+            rotationCache[row.mapName]=true
+        end
+    end
+    return rotationCache
+end
+local function raidMapAvailable(id, info)
+    if type(info)~="table" or info.isRaid~=true or info.isShadowRaid==true
+        or type(info.difficulties)~="table" then return false end
+    local now=Workspace:GetServerTimeNow()
+    if info.endTime and tonumber(info.endTime) and tonumber(info.endTime)<=now then
+        return raidRotation()[id]==true
+    end
+    if info.excludeFromList then return raidRotation()[id]==true end
+    return true
+end
+local function raidMapOptions()
+    local opts={"Hardest"}
+    local mappings={}
+    local settings=getSettings()
+    local maps=settings and settings.MapInfo or {}
+    local entries={}
+    for id,info in pairs(maps) do
+        if type(info)=="table" and info.isRaid and not info.isShadowRaid then
+            entries[#entries+1]={id=id,info=info,lvl=mapLevel(info)}
+        end
+    end
+    table.sort(entries,function(a,b)
+        local aa=tonumber(a.info.order) or 0
+        local bb=tonumber(b.info.order) or 0
+        return aa==bb and a.id<b.id or aa<bb
+    end)
+    for _,v in ipairs(entries) do
+        local label=tostring(v.info.displayName or v.id).." (Lv "..tostring(v.lvl)..")"
+        if mappings[label] then label=label.." — "..v.id end
+        mappings[label]=v.id
+        opts[#opts+1]=label
+    end
+    return opts,mappings
+end
+local function chooseRaid(level)
+    local settings=getSettings()
+    local maps=settings and settings.MapInfo or {}
+    if S.raidMapChoice~="Hardest" then
+        local entry=maps[S.raidMapChoice]
+        if raidMapAvailable(S.raidMapChoice,entry) and mapLevel(entry)<=level then
+            return S.raidMapChoice
+        end
+        return nil
+    end
+    local best,bestRank,bestLv=nil,-math.huge,-math.huge
+    for id,info in pairs(maps) do
+        if raidMapAvailable(id,info) and mapLevel(info)<=level then
+            local rank=tonumber(info.order) or 0
+            local lvl=mapLevel(info)
+            if rank>bestRank or (rank==bestRank and lvl>bestLv) then
+                best,bestRank,bestLv=id,rank,lvl
+            end
+        end
+    end
+    return best
+end
+local function raidDifficulties(id)
+    local opts={"Hardest"}
+    local settings=getSettings()
+    local info=settings and settings.MapInfo and settings.MapInfo[id]
+    local arr={}
+    if info and type(info.difficulties)=="table" then
+        for name,cfg in pairs(info.difficulties) do
+            arr[#arr+1]={name=name,order=tonumber(cfg.order) or 0}
+        end
+    end
+    table.sort(arr,function(a,b) return a.order<b.order end)
+    for _,row in ipairs(arr) do opts[#opts+1]=row.name end
+    return opts
+end
+local function chooseRaidDifficulty(id,level)
+    local settings=getSettings()
+    local info=settings and settings.MapInfo and settings.MapInfo[id]
+    if not (info and type(info.difficulties)=="table") then return nil end
+    if S.raidDifficultyChoice~="Hardest" then
+        local d=info.difficulties[S.raidDifficultyChoice]
+        if d and level >= (tonumber(d.levelReq) or math.huge) then
+            return S.raidDifficultyChoice
+        end
+        return nil
+    end
+    local best,bestLv,bestOrder=nil,-math.huge,-math.huge
+    for name,d in pairs(info.difficulties) do
+        local lv=tonumber(d.levelReq) or math.huge
+        local order=tonumber(d.order) or 0
+        if lv<=level and (lv>bestLv or (lv==bestLv and order>bestOrder)) then
+            best,bestLv,bestOrder=name,lv,order
+        end
+    end
+    return best
+end
+
+local specialFailureUntil={}
+local function modeRequest(action,argument,mode)
+    if not S.alive or not statsReady() then return false end
+    if os.clock() < (specialFailureUntil[mode] or 0) then return false end
+    -- Certain native teleport calls return nil even on success.
+    -- An explicit Fail is a rejection; nil is treated as pending, never
+    -- repeatedly called inside the teleport window.
+    if not mainFunction then return false end
+    local ok,res=pcall(function()
+        if argument==nil then return mainFunction:InvokeServer(action) end
+        return mainFunction:InvokeServer(action,argument)
+    end)
+    if not ok or type(res)=="table" and res.status=="Fail" then
+        warnOnce(mode..": "..tostring(ok and res and res.message or res))
+        specialFailureUntil[mode]=os.clock()+45
+        return false, tostring(ok and res and res.message or res)
+    end
+    -- Boss Rush is unusual: unlike some teleport remotes, its native UI
+    -- explicitly indexes response.status. A nil response is not confirmed
+    -- entry and must not reserve the scheduler for 45 seconds.
+    if mode=="BossRush" and type(res)~="table" then
+        specialFailureUntil.BossRush=os.clock()+45
+        warnOnce("Boss Rush did not return an entry response")
+        return false, "No Boss Rush entry response"
+    end
+    S.modeIntent=mode
+    S.modeFromPlace=game.PlaceId
+    S.modeRequestAt=os.time()
+    savePreferences()
+    return true
+end
+local function saveOriginalSpeedCharacter()
+    if S.speedRestorePending and S.speedOriginalCharacter~="" then return end
+    local equipped=stat("CharacterName")
+    if type(equipped)=="string" and equipped~="" then
+        S.speedOriginalCharacter=equipped
+        S.speedRestorePending=true
+        savePreferences()
+    end
+end
+local function restoreSpeedCharacter()
+    if not S.speedRestorePending or not regularLobby() then return end
+    local original=S.speedOriginalCharacter
+    if type(original)~="string" or original=="" then return end
+    local current=stat("CharacterName")
+    if current==original then
+        S.speedRestorePending=false
+        S.speedOriginalCharacter=""
+        savePreferences()
+        return
+    end
+    local response=invokeRoom("EquipCharacter",original)
+    if response and response.status~="Fail" then
+        S.speedRestorePending=false
+        S.speedOriginalCharacter=""
+        savePreferences()
+    end
+end
+local function stopSpeedAutomation(reason)
+    S.autoSpeedRaid=false
+    S.speedPendingCharacter=""
+    savePreferences()
+    if S.speedRaidToggle then pcall(function() S.speedRaidToggle:Set(false,true) end) end
+    warnOnce("Speed Raid stopped: "..tostring(reason))
+end
+local function requestSpeedRaid()
+    if not speedReady() then return false end
+    local character,why=selectSpeedCharacter()
+    if not character then
+        if why and why~="Characters not loaded" then stopSpeedAutomation(why) end
+        return false
+    end
+    saveOriginalSpeedCharacter()
+    S.speedPendingCharacter=character
+    savePreferences()
+    local ok,reason=modeRequest("TeleportToShadowRaid",character,"SpeedRaid")
+    if ok then
+        -- Only mark this character used after the battle place actually loads.
+        -- A failed/dropped teleport must not exhaust a valid character.
+        return true
+    end
+    if type(reason)=="string" then
+        local msg=string.lower(reason)
+        if msg:find("already",1,true) or msg:find("used",1,true)
+            or msg:find("once a week",1,true) then
+            S.speedUsed[character]=true
+            specialFailureUntil.SpeedRaid=os.clock()+1 -- try next unused character
+            if S.speedCharacterChoice~="Auto — Next Unused" then
+                stopSpeedAutomation("Chosen character has been used this week")
+            end
+        end
+    end
+    S.speedPendingCharacter=""
+    savePreferences()
+    return false
+end
+local function requestDailyRaid()
+    if (playerLevel() or 0)<30 or stat("DailyRaidAttempt")~=false then return false end
+    if S.dailyLastRequestedDate==todayUTC() then return false end
+    local ok=modeRequest("TeleportToRaidChallenge",nil,"DailyRaid")
+    if ok then
+        S.dailyLastRequestedDate=todayUTC()
+        savePreferences()
+    end
+    return ok
+end
+local function bossRushAvailable()
+    -- The game's Boss Rush button calls TeleportToBossRush directly and
+    -- displays the server's rejection. A missing replicated ticket stat is
+    -- NOT proof that the user has no tickets. Do not silently skip in that
+    -- case: make one guarded native request and let the server decide.
+    local passes = tonumber(stat("BossRushEntryPass"))
+    local free = tonumber(stat("BossRushFreeEntry"))
+    if passes == nil or free == nil then return true end
+    return passes > 0 or free > 0
+end
+local function extremeDifficulty()
+    local cfg=getSettings()
+    local d=cfg and cfg.ExtremeDimensionSettings and cfg.ExtremeDimensionSettings.difficulties
+    if type(d)~="table" then return nil end
+    if S.extremeDifficulty~="Hardest" then return d[S.extremeDifficulty] and S.extremeDifficulty or nil end
+    for _,name in ipairs({"Extreme","Nightmare","Normal","Easy"}) do
+        if d[name] then return name end
+    end
+end
+local function scheduleRaidInLobby()
+    -- Do not create rooms before the hourly raid has actually opened.
+    if not S.raidWindowOpen() then return false end
+    local level=playerLevel() or 0
+    local id=chooseRaid(level)
+    if not id then return false end
+    local diff=chooseRaidDifficulty(id,level)
+    if not diff then return false end
+    local settings=getSettings()
+    local info=settings and settings.MapInfo[id]
+    local minPlayers=tonumber(info and info.minimumPlayersToStart) or 1
+    if minPlayers>1 and not S.raidFriendsOnly then
+        -- Server-managed Group Finder queue, not an undersized private party.
+        return false -- Multi-player queues are handled by queueRaid in the arbiter
+    end
+    local result=invokeRoom("CreateRoom",{
+        MapName=id,Difficulty=diff,FriendsOnly=S.raidFriendsOnly,Hardcore=false
+    })
+    if not result or result.status~="Success" then return false end
+    S.modeIntent="Raid"
+    S.modeFromPlace=game.PlaceId
+    S.modeRequestAt=os.time()
+    S.createdOwnRoom=true
+    savePreferences()
+    if minPlayers>1 then
+        -- A Friends Only party cannot be auto-started without enough players.
+        -- Leave the room open; do not repeatedly create rooms or spam TeleportPlayers.
+        warnOnce("Raid room created: waiting for "..tostring(minPlayers).." players")
+        return true
+    end
+    task.wait(math.clamp(tonumber(S.startDelay) or 3,1,10))
+    if not (S.alive and S.autoJoinRaid and game.PlaceId==RAID_LOBBY
+        and S.raidWindowOpen()) then return false end
+    local start=invokeRoom("TeleportPlayers")
+    if start and start.status=="Success" then
+        S.roomStartRequested=true
+        return true
+    end
+    -- Do not create a second room while this party is still owned.
+    warnOnce("Raid party created but start failed: check minimum players")
+    return true
+end
+
+-- QueuePlayer uses three positional arguments; modeRequest handles a single
+-- value only. Keep this exactly in sync with RoomModule's captured call.
+local function queueRaid(id,difficulty)
+    if not S.raidWindowOpen() or not mainFunction then return false end
+    local ok,response=pcall(function()
+        return mainFunction:InvokeServer("QueuePlayer",id,difficulty,false)
+    end)
+    if not ok or type(response)~="table" or response.status=="Fail" then
+        warnOnce("Raid matchmaking failed: "..tostring(ok and response and response.message or response))
+        S.raidUnavailableUntil=os.time()+60
+        savePreferences()
+        return false
+    end
+    S.modeIntent="RaidQueue"
+    S.modeFromPlace=game.PlaceId
+    S.modeRequestAt=os.time()
+    S.lobbyBusy=true -- queue is active until place transition / manual cancellation
+    savePreferences()
+    return true
+end
+
+-- Special requests are made at most once per session window; the server and
+-- the normal Roblox teleport handler control when the destination loads.
+local lastSpecialCheck=0
+local function specialLobbyTick()
+    if not (S.alive and inLobby() and statsReady()) then return end
+    if S.specialBusy then return end
+    local now=os.clock()
+    if now-lastSpecialCheck<2 then return end
+    lastSpecialCheck=now
+    local epoch=os.time()
+    -- Returning from a battle must clear the previous mode even when the
+    -- destination is the SAME lobby PlaceId that originally queued it.
+    if S.modeWasInBattle then
+        S.modeWasInBattle=false
+        S.modeIntent="";S.modeRequestAt=0;S.modeFromPlace=game.PlaceId
+        savePreferences()
+    elseif S.modeIntent~="" and game.PlaceId~=(tonumber(S.modeFromPlace) or 0) then
+        S.modeIntent="";S.modeRequestAt=0;S.modeFromPlace=game.PlaceId
+        savePreferences()
+    end
+    if S.modeIntent~="" and epoch-(tonumber(S.modeRequestAt) or 0)<45 then return end
+    if S.modeIntent~="" and epoch-(tonumber(S.modeRequestAt) or 0)>=45 then
+        -- Await another eligibility check instead of hammering the same remote.
+        S.modeIntent="";savePreferences()
+    end
+    if not specialEnabled() then
+        S.specialSelected=false
+        return
+    end
+    -- Avoid competing with a room that was already created by Auto Start.
+    if S.lobbyBusy or S.createdOwnRoom or S.speedRestorePending and regularLobby() then return end
+    S.specialBusy=true
+    task.spawn(function()
+        local launched=false
+        if game.PlaceId==RAID_LOBBY then
+            if S.autoJoinRaid and S.raidWindowOpen() then
+                local level=playerLevel() or 0
+                local id=chooseRaid(level)
+                local diff=id and chooseRaidDifficulty(id,level)
+                if id and diff then
+                    local info=getSettings().MapInfo[id]
+                    if (tonumber(info.minimumPlayersToStart) or 1)>1
+                        and not S.raidFriendsOnly and info.canBeQueued then
+                        launched=queueRaid(id,diff)
+                    else
+                        launched=scheduleRaidInLobby()
+                    end
+                end
+            end
+            if not launched and (S.autoSpeedRaid or S.autoDailyRaid or S.autoBossRush
+                or S.autoExtreme or S.autoTimeChallenge or S.autoStart) then
+                S.raidUnavailableUntil=os.time()+120
+                savePreferences()
+                -- Return to regular lobby only when there's other work to do.
+                launched=modeRequest("TeleportToLobbyWithSave",nil,"ReturnLobby")
+            end
+        elseif regularLobby() then
+            -- Mode priority: 1 is highest. Ties use the original order.
+            -- Every check is non-blocking. A locked/closed/exhausted mode
+            -- yields immediately to the next enabled mode in this tick.
+            local ordered={"BossRush","DailyRaid","SpeedRaid","Raid",
+                "ExtremeDimension","TimeChallenge","Dimensions"}
+            local defaultOrder={}
+            for i, name in ipairs(ordered) do defaultOrder[name]=i end
+            table.sort(ordered,function(a,b)
+                local ar=math.clamp(tonumber(S.modePriority[a]) or defaultOrder[a],1,7)
+                local br=math.clamp(tonumber(S.modePriority[b]) or defaultOrder[b],1,7)
+                if ar==br then return defaultOrder[a]<defaultOrder[b] end
+                return ar<br
+            end)
+            for _, mode in ipairs(ordered) do
+                if launched then break end
+                if mode=="BossRush" and S.autoBossRush then
+                    -- The native Boss Rush UI requires level 15.
+                    if (playerLevel() or 0)>=15 and bossRushAvailable() then
+                        launched=modeRequest("TeleportToBossRush",nil,"BossRush")
+                    end
+                elseif mode=="DailyRaid" and S.autoDailyRaid then
+                    launched=requestDailyRaid()
+                elseif mode=="SpeedRaid" and S.autoSpeedRaid then
+                    launched=requestSpeedRaid()
+                elseif mode=="Raid" and S.autoJoinRaid
+                    and S.raidWindowOpen()
+                    and epoch >= (tonumber(S.raidUnavailableUntil) or 0) then
+                    if chooseRaid(playerLevel() or 0) then
+                        launched=modeRequest("TeleportToRaidLobby",nil,"EnterRaidLobby")
+                    end
+                elseif mode=="ExtremeDimension" and S.autoExtreme then
+                    local cfg=getSettings()
+                    local req=cfg and cfg.ExtremeDimensionSettings
+                        and cfg.ExtremeDimensionSettings.levelReq or math.huge
+                    local diff=extremeDifficulty()
+                    if diff and (playerLevel() or 0)>=req then
+                        launched=modeRequest("TeleportToExtremeDimension",diff,"ExtremeDimension")
+                    end
+                elseif mode=="TimeChallenge" and S.autoTimeChallenge
+                    and (playerLevel() or 0)>=5 then
+                    launched=modeRequest("TeleportToTimeChallenge",nil,"TimeChallenge")
+                elseif mode=="Dimensions" and S.autoStart and not S.sessionStopped then
+                    -- Defer until specialBusy has been released below.
+                    -- The regular CreateRoom worker has its own busy guard.
+                    S.specialSelected=false
+                    launched="Dimensions"
+                    task.delay(0.2,function()
+                        if S.alive and inLobby() and S.autoStart and not S.sessionStopped
+                            and not S.specialBusy then autoStartWorker() end
+                    end)
+                end
+            end
+        end
+        S.specialBusy=false
+        if launched then S.specialSelected=(launched~="Dimensions") end
+    end)
+end
+
+-- Screen-based result completion handling for modes that do not use the
+-- ordinary ResultUI (e.g. a RaidResultUI in some raids).
+local function specialResultTick()
+    if game.PlaceId~=6990129309 then return end
+    local gui=player:FindFirstChildOfClass("PlayerGui")
+    local result=gui and (gui:FindFirstChild("ResultUI",true) or gui:FindFirstChild("RaidResultUI",true))
+    local raidResult=gui and gui:FindFirstChild("RaidResultUI",true)
+    local shown=(result and result:IsA("GuiObject") and result.Visible)
+        or (raidResult and raidResult:IsA("GuiObject") and raidResult.Visible)
+    if not shown then S.specialResultHandled=false;return end
+    if S.specialResultHandled then return end
+    local mode=tostring(Workspace:GetAttribute("GameMode") or "")
+    local intent=S.modeIntent
+    local shouldLeave=(mode=="ShadowRaid" and S.speedAutoLeave)
+        or (intent=="SpeedRaid" and S.speedAutoLeave)
+        or intent=="DailyRaid" or (intent=="BossRush" and S.bossAutoLeave)
+        or intent=="Raid" or intent=="RaidQueue"
+    local retryButton=gui and gui:FindFirstChild("RetryDungeonButton",true)
+    local shouldRetry=(intent=="BossRush" and S.bossAutoRetry and not S.bossAutoLeave
+        and retryButton and retryButton.Visible==true)
+    if not (shouldLeave or shouldRetry) then return end
+    S.specialResultHandled=true
+    task.delay(0.4,function()
+        if not S.alive or game.PlaceId~=6990129309 then return end
+        local r=gui and gui:FindFirstChild("ResultUI",true)
+        local rr=gui and gui:FindFirstChild("RaidResultUI",true)
+        if not ((r and r.Visible) or (rr and rr.Visible)) then return end
+        if remote then remote:FireServer(shouldLeave and "LeaveDungeon" or "RetryDungeon") end
+    end)
+end
+
+-- Observe weekly used-character notifications without hooking game methods.
+-- On missed initial events the native inventory UI remains the fallback.
+if remote then
+    S.connections[#S.connections+1]=remote.OnClientEvent:Connect(function(command,used)
+        if command=="SendSpeedRaidCharactersToClient" and type(used)=="table" then
+            refreshWeeklySpeedUsed()
+            for name,v in pairs(used) do if v then S.speedUsed[name]=true end end
+            savePreferences()
         end
     end)
 end
@@ -805,6 +1492,27 @@ local function bindMonsterIndex()
     end)
 end
 
+local function extremeModeActive()
+    local mode=tostring(Workspace:GetAttribute("GameMode") or ""):lower()
+    return mode:find("extreme",1,true)~=nil or S.modeIntent=="ExtremeDimension"
+end
+local function bossScore(target)
+    if not target or not target.model then return 0 end
+    local model=target.model
+    if model:GetAttribute("IsBoss")==true or model:GetAttribute("Boss")==true
+        or target.hum:GetAttribute("IsBoss")==true then return 100 end
+    local flag=model:FindFirstChild("IsBoss") or model:FindFirstChild("Boss")
+    if flag and flag:IsA("BoolValue") and flag.Value then return 100 end
+    local name=model.Name:lower()
+    if name:find("portal",1,true) or name:find("minion",1,true) then return -10 end
+    if name:find("boss",1,true) or name:find("guardian",1,true)
+        or name:find("final",1,true) then return 80 end
+    -- Some boss rigs have no explicit marker. Prefer substantially larger
+    -- combat roots over portal adds, never mere decorative parts.
+    local size=target.root.Size
+    if math.max(size.X,size.Y,size.Z)>=14 then return 25 end
+    return 0
+end
 local function findTarget(root)
     bindMonsterIndex()
     local folder = S.monsterFolder
@@ -813,7 +1521,16 @@ local function findTarget(root)
         return nil
     end
     local current = S.target
-    if validTarget(current) and current.model:IsDescendantOf(folder) then
+    local extreme=extremeModeActive()
+    local highestBoss=0
+    if extreme then
+        for _,entry in pairs(S.indexedTargets) do
+            local candidate=entry.target
+            if validTarget(candidate) then highestBoss=math.max(highestBoss,bossScore(candidate)) end
+        end
+    end
+    if validTarget(current) and current.model:IsDescendantOf(folder)
+        and (not extreme or bossScore(current)>=highestBoss) then
         return current
     end
     if current then setTarget(nil) end
@@ -832,9 +1549,10 @@ local function findTarget(root)
             local d = (t.root.Position - root.Position).Magnitude
             -- Prefer the actual combat Humanoid when the map also contains a
             -- decorative/nested humanoid. Within a class, select nearest.
-            if d < MAX_TARGET_DISTANCE and
-                (not best or d + (t.priority == 0 and 5 or 0) < bestDistance) then
-                best, bestDistance, bestPriority = t, d + (t.priority == 0 and 5 or 0), t.priority
+            local score=extreme and bossScore(t) or t.priority
+            if d < MAX_TARGET_DISTANCE and (not best or score>bestPriority
+                or (score==bestPriority and d < bestDistance)) then
+                best,bestDistance,bestPriority=t,d,score
             end
         else
             removeIndexedHumanoid(hum)
@@ -2119,352 +2837,555 @@ end
 -- Native sidebar sections + row/column groups. No custom Instance UI, no
 -- watchers, no unsupported labels/Set() calls or manual coordinate layout.
 -- ================================================================
-local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
-local window = Rayfield:CreateWindow({
-    name = "HollowMoonHub",
-    subtitle = "Anime Dimensions | v23",
-    sidebarLayout = true,
-})
-S.window = window
-window:CreateTag({text = "v23"})
+-- Build UI in isolated functions to respect Luau's 200-register limit.
+-- All callbacks continue to capture the original state and helper functions.
+local function buildUI()
+    local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+    local window = Rayfield:CreateWindow({
+        name = "HollowMoonHub",
+        subtitle = "Anime Dimensions | v26",
+        sidebarLayout = true,
+    })
+    S.window = window
+    window:CreateTag({text = "v26"})
 
-window:CreateSection({name="AUTOMATION"})
-local lobbyTab = window:CreateTab({name="Lobby"})
-local currentLevel = playerLevel() or 0
--- Wait briefly for replicated map metadata without inventing options.
-for _=1,30 do
-    local info=getSettings()
-    if info and info.MapInfo then break end
-    task.wait(0.15)
-end
-local maps=mapOptions()
-local firstMap=(S.mapChoice=="Hardest") and hardestMap(currentLevel) or S.mapChoice
-local mapValue="Hardest"
-for label,id in pairs(mapLabels) do
-    if id==S.mapChoice then mapValue=label; break end
-end
-local diffDrop
-local function refreshDifficulties()
-    if not diffDrop then return end
-    local level=playerLevel() or 0
-    local currentId=chooseMap(level)
-    local options=listDifficulties(currentId)
-    pcall(function() diffDrop:Refresh(options) end)
-    local valid=false
-    for _,v in ipairs(options) do
-        if v==S.difficultyChoice then valid=true; break end
-    end
-    if not valid then S.difficultyChoice="Hardest" end
-    pcall(function() diffDrop:Set(S.difficultyChoice, true) end)
-end
+    window:CreateSection({name="AUTOMATION"})
 
-lobbyTab:CreateSection({name="Dungeon Setup"})
-local roomRow=lobbyTab:CreateGroup({direction="row"})
-local roomCol=roomRow:CreateGroup({direction="column"})
-local startCol=roomRow:CreateGroup({direction="column"})
-roomCol:CreateSection({name="Map & Difficulty"})
-roomCol:CreateDropdown({
-    name="Map",flag="AD15_Map",options=maps,value=mapValue,
-    callback=function(value)
-        if type(value)=="table" then value=value[1] end
-        if type(value)~="string" then return end
-        S.mapChoice=value=="Hardest" and "Hardest" or (mapLabels[value] or S.mapChoice)
-        S.createdOwnRoom=false
+    local function buildLobbyTab()
+        local lobbyTab = window:CreateTab({name="Lobby"})
+        local currentLevel = playerLevel() or 0
+        -- Wait briefly for replicated map metadata without inventing options.
+        for _=1,30 do
+            local info=getSettings()
+            if info and info.MapInfo then break end
+            task.wait(0.15)
+        end
+        local maps=mapOptions()
+        local firstMap=(S.mapChoice=="Hardest") and hardestMap(currentLevel) or S.mapChoice
+        local mapValue="Hardest"
+        for label,id in pairs(mapLabels) do
+            if id==S.mapChoice then mapValue=label; break end
+        end
+        local diffDrop
+        local function refreshDifficulties()
+            if not diffDrop then return end
+            local level=playerLevel() or 0
+            local currentId=chooseMap(level)
+            local options=listDifficulties(currentId)
+            pcall(function() diffDrop:Refresh(options) end)
+            local valid=false
+            for _,v in ipairs(options) do
+                if v==S.difficultyChoice then valid=true; break end
+            end
+            if not valid then S.difficultyChoice="Hardest" end
+            pcall(function() diffDrop:Set(S.difficultyChoice, true) end)
+        end
+
+        lobbyTab:CreateSection({name="Dungeon Setup"})
+        local roomRow=lobbyTab:CreateGroup({direction="row"})
+        local roomCol=roomRow:CreateGroup({direction="column"})
+        local startCol=roomRow:CreateGroup({direction="column"})
+        roomCol:CreateSection({name="Map & Difficulty"})
+        roomCol:CreateDropdown({
+            name="Map",flag="AD15_Map",options=maps,value=mapValue,
+            callback=function(value)
+                if type(value)=="table" then value=value[1] end
+                if type(value)~="string" then return end
+                S.mapChoice=value=="Hardest" and "Hardest" or (mapLabels[value] or S.mapChoice)
+                S.createdOwnRoom=false
+                refreshDifficulties()
+                savePreferences()
+            end,
+        })
+        diffDrop=roomCol:CreateDropdown({
+            name="Difficulty",flag="AD15_Difficulty",
+            options=listDifficulties(firstMap),value=S.difficultyChoice,
+            callback=function(value)
+                if type(value)=="table" then value=value[1] end
+                if type(value)~="string" then return end
+                S.difficultyChoice=value
+                savePreferences()
+            end,
+        })
+        roomCol:CreateToggle({
+            name="Hardcore",flag="AD15_Hardcore",value=S.hardcore,
+            callback=function(on) S.hardcore=on==true; savePreferences() end,
+        })
+        roomCol:CreateToggle({
+            name="Friends Only",flag="AD15_FriendsOnly",value=S.friendsOnly,
+            callback=function(on) S.friendsOnly=on==true; savePreferences() end,
+        })
+        startCol:CreateSection({name="Run Controls"})
+        startCol:CreateSlider({
+            name="Start Delay",flag="AD15_StartDelay",range={1,10},increment=1,
+            value=S.startDelay,suffix="sec",
+            callback=function(value)
+                S.startDelay=math.clamp(math.floor(tonumber(value) or 3),1,10)
+                savePreferences()
+            end,
+        })
+        S.autoStartToggle=startCol:CreateToggle({
+            name="Auto Start",flag="AD15_AutoStart",value=S.autoStart,
+            callback=function(on)
+                S.autoStart=on==true
+                S.lobbyGeneration=S.lobbyGeneration+1
+                if S.autoStart then
+                    if S.sessionStopped then S.matchesCompleted=0 end
+                    S.sessionStopped=false
+                    S.createdOwnRoom=false
+                    task.defer(autoStartWorker)
+                else S.lobbyBusy=false end
+                savePreferences()
+            end,
+        })
+        S.autoRetryToggle=startCol:CreateToggle({
+            name="Auto Retry",flag="AD15_AutoRetry",value=S.autoRetry,
+            callback=function(on) S.autoRetry=on==true; savePreferences() end,
+        })
+        startCol:CreateToggle({
+            name="Auto Leave After X Matches",flag="AD15_AutoLeave",value=S.autoLeaveMatches,
+            callback=function(on)
+                local was=S.autoLeaveMatches
+                S.autoLeaveMatches=on==true
+                if S.autoLeaveMatches and not was then
+                    S.matchesCompleted=0
+                    S.sessionStopped=false
+                end
+                savePreferences()
+            end,
+        })
+        startCol:CreateButton({
+            name="Reset Match Count",
+            callback=function()
+                S.matchesCompleted=0
+                S.sessionStopped=false
+                savePreferences()
+            end,
+        })
+        -- Gen2 inputs are tab-level controls (not supported inside group columns).
+        lobbyTab:CreateDivider({spacing=6})
+        lobbyTab:CreateSection({name="Match Limit"})
+        lobbyTab:CreateInput({
+            name="Leave After Matches",flag="AD15_MatchLimit",value=tostring(S.matchesToLeave),
+            placeholder="Number of completed matches",numeric=true,clearOnFocus=false,
+            callback=function(value)
+                local n=tonumber(value)
+                if n then S.matchesToLeave=math.clamp(math.floor(n),1,99999); savePreferences() end
+            end,
+        })
         refreshDifficulties()
-        savePreferences()
-    end,
-})
-diffDrop=roomCol:CreateDropdown({
-    name="Difficulty",flag="AD15_Difficulty",
-    options=listDifficulties(firstMap),value=S.difficultyChoice,
-    callback=function(value)
-        if type(value)=="table" then value=value[1] end
-        if type(value)~="string" then return end
-        S.difficultyChoice=value
-        savePreferences()
-    end,
-})
-roomCol:CreateToggle({
-    name="Hardcore",flag="AD15_Hardcore",value=S.hardcore,
-    callback=function(on) S.hardcore=on==true; savePreferences() end,
-})
-roomCol:CreateToggle({
-    name="Friends Only",flag="AD15_FriendsOnly",value=S.friendsOnly,
-    callback=function(on) S.friendsOnly=on==true; savePreferences() end,
-})
-startCol:CreateSection({name="Run Controls"})
-startCol:CreateSlider({
-    name="Start Delay",flag="AD15_StartDelay",range={1,10},increment=1,
-    value=S.startDelay,suffix="sec",
-    callback=function(value)
-        S.startDelay=math.clamp(math.floor(tonumber(value) or 3),1,10)
-        savePreferences()
-    end,
-})
-S.autoStartToggle=startCol:CreateToggle({
-    name="Auto Start",flag="AD15_AutoStart",value=S.autoStart,
-    callback=function(on)
-        S.autoStart=on==true
-        S.lobbyGeneration=S.lobbyGeneration+1
-        if S.autoStart then
-            if S.sessionStopped then S.matchesCompleted=0 end
-            S.sessionStopped=false
-            S.createdOwnRoom=false
-            task.defer(autoStartWorker)
-        else S.lobbyBusy=false end
-        savePreferences()
-    end,
-})
-S.autoRetryToggle=startCol:CreateToggle({
-    name="Auto Retry",flag="AD15_AutoRetry",value=S.autoRetry,
-    callback=function(on) S.autoRetry=on==true; savePreferences() end,
-})
-startCol:CreateToggle({
-    name="Auto Leave After X Matches",flag="AD15_AutoLeave",value=S.autoLeaveMatches,
-    callback=function(on)
-        local was=S.autoLeaveMatches
-        S.autoLeaveMatches=on==true
-        if S.autoLeaveMatches and not was then
-            S.matchesCompleted=0
-            S.sessionStopped=false
-        end
-        savePreferences()
-    end,
-})
-startCol:CreateButton({
-    name="Reset Match Count",
-    callback=function()
-        S.matchesCompleted=0
-        S.sessionStopped=false
-        savePreferences()
-    end,
-})
--- Gen2 inputs are tab-level controls (not supported inside group columns).
-lobbyTab:CreateDivider({spacing=6})
-lobbyTab:CreateSection({name="Match Limit"})
-lobbyTab:CreateInput({
-    name="Leave After Matches",flag="AD15_MatchLimit",value=tostring(S.matchesToLeave),
-    placeholder="Number of completed matches",numeric=true,clearOnFocus=false,
-    callback=function(value)
-        local n=tonumber(value)
-        if n then S.matchesToLeave=math.clamp(math.floor(n),1,99999); savePreferences() end
-    end,
-})
-refreshDifficulties()
-task.spawn(function()
-    local lastKey,lastLevel=nil,nil
-    while S.alive do
-        local level=playerLevel()
-        if level and (level~=lastLevel or S.mapChoice~=lastKey) then
-            lastLevel,lastKey=level,S.mapChoice
-            refreshDifficulties()
-        end
-        task.wait(1.5)
-    end
-end)
+        task.spawn(function()
+            local lastKey,lastLevel=nil,nil
+            while S.alive do
+                local level=playerLevel()
+                if level and (level~=lastLevel or S.mapChoice~=lastKey) then
+                    lastLevel,lastKey=level,S.mapChoice
+                    refreshDifficulties()
+                end
+                task.wait(1.5)
+            end
+        end)
 
-local farmTab=window:CreateTab({name="Auto Farm"})
-farmTab:CreateSection({name="Combat & Movement"})
-local farmRow=farmTab:CreateGroup({direction="row"})
-local offenseCol=farmRow:CreateGroup({direction="column"})
-local moveCol=farmRow:CreateGroup({direction="column"})
-offenseCol:CreateSection({name="Offense"})
-offenseCol:CreateToggle({
-    name="Auto Attack",flag="AD15_AutoAttack",value=S.autoAttack,
-    callback=function(on) S.autoAttack=on==true; savePreferences() end,
-})
-local selectedDefault={}
-for i=1,4 do
-    if S.selectedSkills[i] then selectedDefault[#selectedDefault+1]="Skill "..i end
-end
-if S.selectedAssists[1] then selectedDefault[#selectedDefault+1]="E - Assist 1" end
-if S.selectedAssists[2] then selectedDefault[#selectedDefault+1]="R - Assist 2" end
-if S.selectedFruits[1] then selectedDefault[#selectedDefault+1]="Z - Fruit 1" end
-offenseCol:CreateDropdown({
-    name="Skills To Use",flag="AD15_SelectedSkills",multiSelect=true,
-    options={"Skill 1","Skill 2","Skill 3","Skill 4","E - Assist 1","R - Assist 2","Z - Fruit 1"},
-    value=selectedDefault,
-    callback=function(values)
-        local chosen={}
-        if type(values)=="table" then
-            for k,v in pairs(values) do
-                if type(v)=="string" then chosen[v]=true
-                elseif type(k)=="string" and v==true then chosen[k]=true end
-            end
-        elseif type(values)=="string" then chosen[values]=true end
-        for i=1,4 do S.selectedSkills[i]=chosen["Skill "..i]==true end
-        S.selectedAssists[1]=chosen["E - Assist 1"]==true
-        S.selectedAssists[2]=chosen["R - Assist 2"]==true
-        S.selectedFruits[1]=chosen["Z - Fruit 1"]==true
-        savePreferences()
-    end,
-})
-offenseCol:CreateToggle({
-    name="Auto Skills",flag="AD15_AutoSkills",value=S.autoSkills,
-    callback=function(on) S.autoSkills=on==true; savePreferences() end,
-})
-offenseCol:CreateSection({name="Defense"})
-offenseCol:CreateToggle({
-    name="Auto Dodge",flag="AD15_AutoDodge",value=S.autoDodge,
-    callback=function(on)
-        S.autoDodge=on==true
-        if not S.autoDodge then
-            S.dodgeGoal,S.dodgeLastClear=nil,nil
-            clearHazardTracking()
-            S.lastHazardBind=-HUGE
-        end
-        savePreferences()
-    end,
-})
-moveCol:CreateSection({name="Movement"})
-moveCol:CreateDropdown({
-    name="Farm Method",flag="AD15_FarmMethod",
-    options={"Teleport","Tween","Legit"},value=S.farmMethod,
-    callback=function(value)
-        if type(value)=="table" then value=value[1] end
-        if value=="Teleport" or value=="Tween" or value=="Legit" then
-            if S.autoFarm then releaseMovement(value=="Legit") end
-            S.farmMethod=value
-            savePreferences()
-        end
-    end,
-})
-moveCol:CreateDropdown({
-    name="Farm Position",flag="AD15_FarmPosition",
-    options={"Above","Behind","Below"},value=S.farmPosition,
-    callback=function(value)
-        if type(value)=="table" then value=value[1] end
-        if value=="Above" or value=="Behind" or value=="Below" then
-            S.farmPosition=value
-            S.smoothPose=nil
-            S.poseHeading=nil
-            savePreferences()
-        end
-    end,
-})
-moveCol:CreateSlider({
-    name="Farm Distance",flag="AD15_FarmDistance",range={2,40},increment=1,
-    value=S.farmDistance,suffix="studs",
-    callback=function(value)
-        if type(value)=="number" then
-            S.farmDistance=math.clamp(value,2,40)
-            savePreferences()
-        end
-    end,
-})
-moveCol:CreateToggle({
-    name="Auto Farm",flag="AD15_AutoFarm",value=S.autoFarm,
-    callback=function(on)
-        S.autoFarm=on==true
-        resetTarget()
-        if S.autoFarm then
-            S.poseHeading=nil
-            S.lastSupportedPose=nil
-            S.lastSupportedFloorY=nil
-            S.lastSupportCheck=-HUGE
-            local char,hum,root=getCharacter()
-            if char and hum and root then
-                rememberGround(root,hum,char)
-                stablePoseHeading(root)
-                S.lastSupportedPose=root.CFrame
-                local groundY=groundSupportAt(root.Position)
-                if groundY then S.lastSupportedFloorY=groundY end
-            end
-        else
-            releaseMovement()
-            S.poseHeading=nil
-            S.dodgeGoal=nil
-            S.dodgeHoldUntil=-HUGE
-        end
-        savePreferences()
-    end,
-})
 
-window:CreateSection({name="INVENTORY & REWARDS"})
-local playerTab=window:CreateTab({name="Player"})
-playerTab:CreateSection({name="Card Management"})
-local selectedCardRarities={}
-for _,rarity in ipairs(CARD_SELL_RARITIES) do
-    if S.cardSellRarities[rarity]==true then
-        selectedCardRarities[#selectedCardRarities+1]=rarity
+        -- ================================================================
+        -- SPECIAL MODES | Lobby tab, native Rayfield Gen 2 layout
+        -- ================================================================
+        local raidOptions, raidLabels=raidMapOptions()
+        local raidCurrent="Hardest"
+        for label,id in pairs(raidLabels) do
+            if id==S.raidMapChoice then raidCurrent=label;break end
+        end
+        local raidDiffDrop
+        local function raidRefreshDifficulty()
+            if not raidDiffDrop then return end
+            local id=chooseRaid(playerLevel() or 0)
+            local options=raidDifficulties(id)
+            pcall(function() raidDiffDrop:Refresh(options) end)
+            local valid=false
+            for _,v in ipairs(options) do if v==S.raidDifficultyChoice then valid=true end end
+            if not valid then S.raidDifficultyChoice="Hardest" end
+            pcall(function() raidDiffDrop:Set(S.raidDifficultyChoice,true) end)
+        end
+        lobbyTab:CreateDivider({spacing=6})
+        lobbyTab:CreateSection({name="RAIDS"})
+        local raidRow=lobbyTab:CreateGroup({direction="row"})
+        local raidPick=raidRow:CreateGroup({direction="column"})
+        local raidAction=raidRow:CreateGroup({direction="column"})
+        raidPick:CreateSection({name="Raid Selection"})
+        raidPick:CreateDropdown({
+            name="Raid Map",flag="AD24_RaidMap",options=raidOptions,value=raidCurrent,
+            callback=function(v)
+                if type(v)=="table" then v=v[1] end
+                if type(v)~="string" then return end
+                S.raidMapChoice=v=="Hardest" and "Hardest" or (raidLabels[v] or S.raidMapChoice)
+                S.raidDifficultyChoice="Hardest"
+                savePreferences();raidRefreshDifficulty()
+            end,
+        })
+        raidDiffDrop=raidPick:CreateDropdown({
+            name="Raid Difficulty",flag="AD24_RaidDifficulty",value=S.raidDifficultyChoice,
+            options=raidDifficulties(chooseRaid(playerLevel() or 0)),
+            callback=function(v)
+                if type(v)=="table" then v=v[1] end
+                if type(v)=="string" then S.raidDifficultyChoice=v;savePreferences() end
+            end,
+        })
+        raidAction:CreateSection({name="Raid Automation"})
+        raidAction:CreateToggle({
+            name="Friends Only (Raid)",flag="AD24_RaidFriendsOnly",value=S.raidFriendsOnly,
+            callback=function(on) S.raidFriendsOnly=on==true;savePreferences() end,
+        })
+        raidAction:CreateToggle({
+            name="Auto Join Raid",flag="AD24_AutoJoinRaid",value=S.autoJoinRaid,
+            callback=function(on)
+                S.autoJoinRaid=on==true
+                S.specialSelected=specialEnabled()
+                S.modeIntent="";S.modeRequestAt=0
+                savePreferences()
+            end,
+        })
+        raidRefreshDifficulty()
+
+        lobbyTab:CreateDivider({spacing=6})
+        lobbyTab:CreateSection({name="SPEED RAID"})
+        local speedRow=lobbyTab:CreateGroup({direction="row"})
+        local speedPick=speedRow:CreateGroup({direction="column"})
+        local speedAction=speedRow:CreateGroup({direction="column"})
+        speedPick:CreateSection({name="Weekly Character"})
+        local speedChoiceDrop=speedPick:CreateDropdown({
+            name="Speed Raid Character",flag="AD24_SpeedCharacter",options=speedCharacterOptions(),
+            value=S.speedCharacterChoice,
+            callback=function(v)
+                if type(v)=="table" then v=v[1] end
+                if type(v)=="string" then S.speedCharacterChoice=v;savePreferences() end
+            end,
+        })
+        speedPick:CreateButton({name="Refresh Owned Characters",callback=function()
+            pcall(function() speedChoiceDrop:Refresh(speedCharacterOptions()) end)
+        end})
+        speedAction:CreateSection({name="Speed Raid Workflow"})
+        S.speedRaidToggle=speedAction:CreateToggle({
+            name="Auto Start Speed Raid",flag="AD24_AutoSpeedRaid",value=S.autoSpeedRaid,
+            callback=function(on)
+                S.autoSpeedRaid=on==true;S.specialSelected=specialEnabled()
+                S.modeIntent="";S.modeRequestAt=0;savePreferences()
+            end,
+        })
+        speedAction:CreateToggle({
+            name="Auto Leave Speed Raid",flag="AD24_SpeedAutoLeave",value=S.speedAutoLeave,
+            callback=function(on) S.speedAutoLeave=on==true;savePreferences() end,
+        })
+
+        lobbyTab:CreateDivider({spacing=6})
+        lobbyTab:CreateSection({name="DAILY RAID CHALLENGE & BOSS RUSH"})
+        local specialRow=lobbyTab:CreateGroup({direction="row"})
+        local dailyCol=specialRow:CreateGroup({direction="column"})
+        local bossCol=specialRow:CreateGroup({direction="column"})
+        dailyCol:CreateSection({name="Once-Daily Challenge"})
+        dailyCol:CreateToggle({
+            name="Auto Start Daily Raid Challenge",flag="AD24_AutoDailyRaid",value=S.autoDailyRaid,
+            callback=function(on)
+                S.autoDailyRaid=on==true;S.specialSelected=specialEnabled()
+                S.modeIntent="";S.modeRequestAt=0;savePreferences()
+            end,
+        })
+        bossCol:CreateSection({name="Boss Rush"})
+        bossCol:CreateToggle({
+            name="Auto Start Boss Rush",flag="AD24_AutoBossRush",value=S.autoBossRush,
+            callback=function(on)
+                S.autoBossRush=on==true;S.specialSelected=specialEnabled()
+                S.modeIntent="";S.modeRequestAt=0;savePreferences()
+            end,
+        })
+        bossCol:CreateToggle({
+            name="Auto Retry Boss Rush",flag="AD24_BossRetry",value=S.bossAutoRetry,
+            callback=function(on) S.bossAutoRetry=on==true;savePreferences() end,
+        })
+        bossCol:CreateToggle({
+            name="Auto Leave Boss Rush",flag="AD24_BossLeave",value=S.bossAutoLeave,
+            callback=function(on) S.bossAutoLeave=on==true;savePreferences() end,
+        })
+
+        lobbyTab:CreateDivider({spacing=6})
+        lobbyTab:CreateSection({name="EXTREME DIMENSION & TIME CHALLENGE"})
+        local challengeRow=lobbyTab:CreateGroup({direction="row"})
+        local extremeCol=challengeRow:CreateGroup({direction="column"})
+        local timeCol=challengeRow:CreateGroup({direction="column"})
+        extremeCol:CreateSection({name="Extreme Dimension"})
+        extremeCol:CreateDropdown({
+            name="Extreme Difficulty",flag="AD24_ExtremeDifficulty",
+            options={"Hardest","Easy","Normal","Nightmare","Extreme"},
+            value=S.extremeDifficulty,
+            callback=function(v)
+                if type(v)=="table" then v=v[1] end
+                if type(v)=="string" then S.extremeDifficulty=v;savePreferences() end
+            end,
+        })
+        extremeCol:CreateToggle({
+            name="Auto Start Extreme Dimension",flag="AD24_AutoExtreme",value=S.autoExtreme,
+            callback=function(on)
+                S.autoExtreme=on==true;S.specialSelected=specialEnabled()
+                S.modeIntent="";S.modeRequestAt=0;savePreferences()
+            end,
+        })
+        timeCol:CreateSection({name="Time Challenge"})
+        timeCol:CreateToggle({
+            name="Auto Start Time Challenge",flag="AD24_AutoTimeChallenge",value=S.autoTimeChallenge,
+            callback=function(on)
+                S.autoTimeChallenge=on==true;S.specialSelected=specialEnabled()
+                S.modeIntent="";S.modeRequestAt=0;savePreferences()
+            end,
+        })
+
+        lobbyTab:CreateDivider({spacing=6})
+        lobbyTab:CreateSection({name="MODE PRIORITY (1 = HIGHEST, 7 = LOWEST)"})
+        local priorityRow=lobbyTab:CreateGroup({direction="row"})
+        local priorityLeft=priorityRow:CreateGroup({direction="column"})
+        local priorityRight=priorityRow:CreateGroup({direction="column"})
+        local function addPrioritySlider(parent,label,key)
+            parent:CreateSlider({
+                name=label, flag="AD26_Priority_"..key, range={1,7},
+                increment=1, value=S.modePriority[key],
+                callback=function(v)
+                    S.modePriority[key]=math.clamp(math.floor(tonumber(v) or 7),1,7)
+                    savePreferences()
+                end,
+            })
+        end
+        priorityLeft:CreateSection({name="Raids and Boss Rush"})
+        addPrioritySlider(priorityLeft,"Boss Rush","BossRush")
+        addPrioritySlider(priorityLeft,"Daily Raid","DailyRaid")
+        addPrioritySlider(priorityLeft,"Speed Raid","SpeedRaid")
+        addPrioritySlider(priorityLeft,"Regular Raid","Raid")
+        priorityRight:CreateSection({name="Other Modes"})
+        addPrioritySlider(priorityRight,"Extreme Dimension","ExtremeDimension")
+        addPrioritySlider(priorityRight,"Time Challenge","TimeChallenge")
+        addPrioritySlider(priorityRight,"Dimensions","Dimensions")
+
     end
-end
-local cardRow=playerTab:CreateGroup({direction="row"})
-local cardFilterCol=cardRow:CreateGroup({direction="column"})
-local cardActionCol=cardRow:CreateGroup({direction="column"})
-cardFilterCol:CreateSection({name="Rarity Filter"})
-cardFilterCol:CreateDropdown({
-    name="Card Rarities",flag="AD22_CardRarities",multiSelect=true,
-    options=CARD_SELL_RARITIES,value=selectedCardRarities,
-    callback=function(values)
-        local picked={}
-        if type(values)=="table" then
-            for k,v in pairs(values) do
-                if type(v)=="string" then picked[v]=true
-                elseif type(k)=="string" and v==true then picked[k]=true end
-            end
-        elseif type(values)=="string" then picked[values]=true end
-        S.cardSellRarities={}
+
+    local function buildFarmTab()
+        local farmTab=window:CreateTab({name="Auto Farm"})
+        farmTab:CreateSection({name="Combat & Movement"})
+        local farmRow=farmTab:CreateGroup({direction="row"})
+        local offenseCol=farmRow:CreateGroup({direction="column"})
+        local moveCol=farmRow:CreateGroup({direction="column"})
+        offenseCol:CreateSection({name="Offense"})
+        offenseCol:CreateToggle({
+            name="Auto Attack",flag="AD15_AutoAttack",value=S.autoAttack,
+            callback=function(on) S.autoAttack=on==true; savePreferences() end,
+        })
+        local selectedDefault={}
+        for i=1,4 do
+            if S.selectedSkills[i] then selectedDefault[#selectedDefault+1]="Skill "..i end
+        end
+        if S.selectedAssists[1] then selectedDefault[#selectedDefault+1]="E - Assist 1" end
+        if S.selectedAssists[2] then selectedDefault[#selectedDefault+1]="R - Assist 2" end
+        if S.selectedFruits[1] then selectedDefault[#selectedDefault+1]="Z - Fruit 1" end
+        offenseCol:CreateDropdown({
+            name="Skills To Use",flag="AD15_SelectedSkills",multiSelect=true,
+            options={"Skill 1","Skill 2","Skill 3","Skill 4","E - Assist 1","R - Assist 2","Z - Fruit 1"},
+            value=selectedDefault,
+            callback=function(values)
+                local chosen={}
+                if type(values)=="table" then
+                    for k,v in pairs(values) do
+                        if type(v)=="string" then chosen[v]=true
+                        elseif type(k)=="string" and v==true then chosen[k]=true end
+                    end
+                elseif type(values)=="string" then chosen[values]=true end
+                for i=1,4 do S.selectedSkills[i]=chosen["Skill "..i]==true end
+                S.selectedAssists[1]=chosen["E - Assist 1"]==true
+                S.selectedAssists[2]=chosen["R - Assist 2"]==true
+                S.selectedFruits[1]=chosen["Z - Fruit 1"]==true
+                savePreferences()
+            end,
+        })
+        offenseCol:CreateToggle({
+            name="Auto Skills",flag="AD15_AutoSkills",value=S.autoSkills,
+            callback=function(on) S.autoSkills=on==true; savePreferences() end,
+        })
+        offenseCol:CreateSection({name="Defense"})
+        offenseCol:CreateToggle({
+            name="Auto Dodge",flag="AD15_AutoDodge",value=S.autoDodge,
+            callback=function(on)
+                S.autoDodge=on==true
+                if not S.autoDodge then
+                    S.dodgeGoal,S.dodgeLastClear=nil,nil
+                    clearHazardTracking()
+                    S.lastHazardBind=-HUGE
+                end
+                savePreferences()
+            end,
+        })
+        moveCol:CreateSection({name="Movement"})
+        moveCol:CreateDropdown({
+            name="Farm Method",flag="AD15_FarmMethod",
+            options={"Teleport","Tween","Legit"},value=S.farmMethod,
+            callback=function(value)
+                if type(value)=="table" then value=value[1] end
+                if value=="Teleport" or value=="Tween" or value=="Legit" then
+                    if S.autoFarm then releaseMovement(value=="Legit") end
+                    S.farmMethod=value
+                    savePreferences()
+                end
+            end,
+        })
+        moveCol:CreateDropdown({
+            name="Farm Position",flag="AD15_FarmPosition",
+            options={"Above","Behind","Below"},value=S.farmPosition,
+            callback=function(value)
+                if type(value)=="table" then value=value[1] end
+                if value=="Above" or value=="Behind" or value=="Below" then
+                    S.farmPosition=value
+                    S.smoothPose=nil
+                    S.poseHeading=nil
+                    savePreferences()
+                end
+            end,
+        })
+        moveCol:CreateSlider({
+            name="Farm Distance",flag="AD15_FarmDistance",range={2,40},increment=1,
+            value=S.farmDistance,suffix="studs",
+            callback=function(value)
+                if type(value)=="number" then
+                    S.farmDistance=math.clamp(value,2,40)
+                    savePreferences()
+                end
+            end,
+        })
+        moveCol:CreateToggle({
+            name="Auto Farm",flag="AD15_AutoFarm",value=S.autoFarm,
+            callback=function(on)
+                S.autoFarm=on==true
+                resetTarget()
+                if S.autoFarm then
+                    S.poseHeading=nil
+                    S.lastSupportedPose=nil
+                    S.lastSupportedFloorY=nil
+                    S.lastSupportCheck=-HUGE
+                    local char,hum,root=getCharacter()
+                    if char and hum and root then
+                        rememberGround(root,hum,char)
+                        stablePoseHeading(root)
+                        S.lastSupportedPose=root.CFrame
+                        local groundY=groundSupportAt(root.Position)
+                        if groundY then S.lastSupportedFloorY=groundY end
+                    end
+                else
+                    releaseMovement()
+                    S.poseHeading=nil
+                    S.dodgeGoal=nil
+                    S.dodgeHoldUntil=-HUGE
+                end
+                savePreferences()
+            end,
+        })
+
+    end
+
+    local function buildPlayerTab()
+        window:CreateSection({name="INVENTORY & REWARDS"})
+        local playerTab=window:CreateTab({name="Player"})
+        playerTab:CreateSection({name="Card Management"})
+        local selectedCardRarities={}
         for _,rarity in ipairs(CARD_SELL_RARITIES) do
-            if picked[rarity] then S.cardSellRarities[rarity]=true end
-        end
-        savePreferences()
-    end,
-})
-cardActionCol:CreateSection({name="Automatic Selling"})
-cardActionCol:CreateToggle({
-    name="Auto Sell Cards",flag="AD22_AutoSellCards",value=S.autoSellCards,
-    callback=function(on)
-        S.autoSellCards=on==true
-        if S.autoSellCards and not hasChosenCardRarity() then
-            warnOnce("Select one or more Card Rarities before auto-selling")
-        end
-        savePreferences()
-    end,
-})
-
-local miscTab=window:CreateTab({name="Misc"})
-miscTab:CreateSection({name="Quest Rewards"})
-miscTab:CreateToggle({
-    name="Auto Claim Quests",flag="AD22_AutoClaimQuests",value=S.autoClaimQuests,
-    callback=function(on) S.autoClaimQuests=on==true; savePreferences() end,
-})
-
-window:CreateSection({name="SYSTEM"})
-local settingsTab=window:CreateTab({name="Settings"})
-settingsTab:CreateSection({name="Automation & Recovery"})
-local settingsRow=settingsTab:CreateGroup({direction="row"})
-local protectionCol=settingsRow:CreateGroup({direction="column"})
-local startupCol=settingsRow:CreateGroup({direction="column"})
-protectionCol:CreateSection({name="Session"})
-protectionCol:CreateToggle({
-    name="Anti-AFK",flag="AD16_AntiAFK",value=S.antiAfk,
-    callback=function(on) S.antiAfk=on==true; savePreferences() end,
-})
-protectionCol:CreateToggle({
-    name="Auto Reconnect",flag="AD16_AutoReconnect",value=S.autoReconnect,
-    callback=function(on)
-        S.autoReconnect=on==true
-        if S.autoReconnect then S.reconnectArmedAt=os.clock()+30 end
-        savePreferences()
-    end,
-})
-startupCol:CreateSection({name="Teleport Execution"})
-startupCol:CreateToggle({
-    name="Auto Execute (GitHub)",flag="AD16_AutoExecute",value=S.autoExecute,
-    callback=function(on)
-        S.autoExecute=on==true
-        savePreferences()
-        if S.autoExecute then
-            if not installTeleportBootstrap() and not S.queuedAutoExecute then
-                warnOnce("Auto Execute requires queue_on_teleport or executor Auto Execute support")
+            if S.cardSellRarities[rarity]==true then
+                selectedCardRarities[#selectedCardRarities+1]=rarity
             end
         end
-    end,
-})
-settingsTab:CreateDivider({spacing=6})
-settingsTab:CreateSection({name="Script Management"})
-settingsTab:CreateButton({name="Unload HollowMoonHub",callback=function() S.Unload() end})
+        local cardRow=playerTab:CreateGroup({direction="row"})
+        local cardFilterCol=cardRow:CreateGroup({direction="column"})
+        local cardActionCol=cardRow:CreateGroup({direction="column"})
+        cardFilterCol:CreateSection({name="Rarity Filter"})
+        cardFilterCol:CreateDropdown({
+            name="Card Rarities",flag="AD22_CardRarities",multiSelect=true,
+            options=CARD_SELL_RARITIES,value=selectedCardRarities,
+            callback=function(values)
+                local picked={}
+                if type(values)=="table" then
+                    for k,v in pairs(values) do
+                        if type(v)=="string" then picked[v]=true
+                        elseif type(k)=="string" and v==true then picked[k]=true end
+                    end
+                elseif type(values)=="string" then picked[values]=true end
+                S.cardSellRarities={}
+                for _,rarity in ipairs(CARD_SELL_RARITIES) do
+                    if picked[rarity] then S.cardSellRarities[rarity]=true end
+                end
+                savePreferences()
+            end,
+        })
+        cardActionCol:CreateSection({name="Automatic Selling"})
+        cardActionCol:CreateToggle({
+            name="Auto Sell Cards",flag="AD22_AutoSellCards",value=S.autoSellCards,
+            callback=function(on)
+                S.autoSellCards=on==true
+                if S.autoSellCards and not hasChosenCardRarity() then
+                    warnOnce("Select one or more Card Rarities before auto-selling")
+                end
+                savePreferences()
+            end,
+        })
+
+    end
+
+    local function buildMiscTab()
+        local miscTab=window:CreateTab({name="Misc"})
+        miscTab:CreateSection({name="Quest Rewards"})
+        miscTab:CreateToggle({
+            name="Auto Claim Quests",flag="AD22_AutoClaimQuests",value=S.autoClaimQuests,
+            callback=function(on) S.autoClaimQuests=on==true; savePreferences() end,
+        })
+
+    end
+
+    local function buildSettingsTab()
+        window:CreateSection({name="SYSTEM"})
+        local settingsTab=window:CreateTab({name="Settings"})
+        settingsTab:CreateSection({name="Automation & Recovery"})
+        local settingsRow=settingsTab:CreateGroup({direction="row"})
+        local protectionCol=settingsRow:CreateGroup({direction="column"})
+        local startupCol=settingsRow:CreateGroup({direction="column"})
+        protectionCol:CreateSection({name="Session"})
+        protectionCol:CreateToggle({
+            name="Anti-AFK",flag="AD16_AntiAFK",value=S.antiAfk,
+            callback=function(on) S.antiAfk=on==true; savePreferences() end,
+        })
+        protectionCol:CreateToggle({
+            name="Auto Reconnect",flag="AD16_AutoReconnect",value=S.autoReconnect,
+            callback=function(on)
+                S.autoReconnect=on==true
+                if S.autoReconnect then S.reconnectArmedAt=os.clock()+30 end
+                savePreferences()
+            end,
+        })
+        startupCol:CreateSection({name="Teleport Execution"})
+        startupCol:CreateToggle({
+            name="Auto Execute (GitHub)",flag="AD16_AutoExecute",value=S.autoExecute,
+            callback=function(on)
+                S.autoExecute=on==true
+                savePreferences()
+                if S.autoExecute then
+                    if not installTeleportBootstrap() and not S.queuedAutoExecute then
+                        warnOnce("Auto Execute requires queue_on_teleport or executor Auto Execute support")
+                    end
+                end
+            end,
+        })
+        settingsTab:CreateDivider({spacing=6})
+        settingsTab:CreateSection({name="Script Management"})
+        settingsTab:CreateButton({name="Unload HollowMoonHub",callback=function() S.Unload() end})
+
+    end
+
+    buildLobbyTab()
+    buildFarmTab()
+    buildPlayerTab()
+    buildMiscTab()
+    buildSettingsTab()
+end
+buildUI()
 
 -- At most every 0.12s, confirm that the combat character remains over a
 -- walkable arena surface. If it drops well BELOW the last known arena floor,
@@ -2519,6 +3440,10 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
     if inLobby() then return end
     if not statsReady() then return end
     local now = os.clock()
+    if game.PlaceId == 6990129309 then
+        local ok,err=pcall(specialResultTick)
+        if not ok then warnOnce(err) end
+    end
     if S.autoRetry or S.autoLeaveMatches then
         local results = resultScreenVisible(now)
         resultsWorkflowTick(now, results)
@@ -2593,9 +3518,22 @@ S.connections[#S.connections+1] = player.CharacterAdded:Connect(function()
     S.lastHazardBind = -HUGE
 end)
 
+-- After the UI is available, run exactly one scheduler for all special modes.
+task.spawn(function()
+    while S.alive do
+        if regularLobby() then
+            local restoreOk,restoreErr=pcall(restoreSpeedCharacter)
+            if not restoreOk then warnOnce(restoreErr) end
+        end
+        local ok,err=pcall(specialLobbyTick)
+        if not ok then warnOnce(err) end
+        task.wait(2)
+    end
+end)
+
 -- After the UI is available, resume the auto-create workflow if enabled.
 -- No room-creation calls are sent outside lobby places.
-if inLobby() and S.autoStart and not S.sessionStopped then
+if inLobby() and S.autoStart and not S.sessionStopped and not S.specialSelected then
     task.defer(autoStartWorker)
 end
 ]====]
@@ -2606,7 +3544,7 @@ end
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV23
+local priorBoot = env.HollowMoonADStartupV26
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -2617,7 +3555,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV23 = boot
+env.HollowMoonADStartupV26 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -2683,7 +3621,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV23 ~= boot then return end
+    if env.HollowMoonADStartupV26 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -2700,13 +3638,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v23] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v26] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v23] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v26] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -2714,16 +3652,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v23_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v26_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v23] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v26] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v23] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v26] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
