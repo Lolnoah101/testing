@@ -1,9 +1,10 @@
--- HMH_ANIME_DIMENSIONS_V16
--- HollowMoonHub | Anime Dimensions v16 | Lobby + Auto Farm + Settings
--- Standalone launcher for execution in lobby or battle.
--- Upload THIS full file to the GitHub raw URL to enable authenticated game-matching Auto Execute.
-local CORE = [====[-- HMH_ANIME_DIMENSIONS_V16
--- HollowMoonHub | Anime Dimensions v16 | Settings + Smart Dodge Farm
+-- HMH_ANIME_DIMENSIONS_V19
+-- HollowMoonHub | Anime Dimensions v19 | Startup-safe executable
+-- Runs in lobby and battle. Do not start the main script before player data
+-- and the character's game-specific systems have initialized.
+local CORE = [====[
+-- HMH_ANIME_DIMENSIONS_V19
+-- HollowMoonHub | Anime Dimensions v19 | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -48,6 +49,10 @@ local S = {
     autoDodge = false,
     antiAfk = false,
     autoReconnect = false,
+    reconnectV17Reviewed = false,
+    reconnectV18Reviewed = false,
+    lastReconnectEpoch = 0,
+    reconnectArmedAt = 0,
     autoExecute = false,
     queuedAutoExecute = false,
     lastReconnectAttempt = -math.huge,
@@ -125,13 +130,13 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v16_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v19_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
     "matchesCompleted", "sessionStopped",
     "autoAttack", "autoSkills", "autoFarm", "autoDodge",
-    "antiAfk", "autoReconnect", "autoExecute",
+    "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "autoExecute",
     "farmMethod", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists",
 }
 local function savePreferences()
@@ -159,11 +164,33 @@ local function loadPreferences()
 end
 loadPreferences()
 
+-- v18 migration: previous Auto Reconnect was too broad and could chain
+-- teleports while starting a dungeon. Default it OFF once on upgrade.
+-- The user must explicitly re-enable this stricter, one-attempt behavior.
+if not S.reconnectV18Reviewed then
+    S.reconnectV18Reviewed = true
+    S.autoReconnect = false
+    savePreferences()
+end
+-- Never rejoin while a new place is still loading, even when the user's
+-- persisted preference is ON. Separate session-local arming from state.
+S.reconnectArmedAt = os.clock() + 45
+S.lastReconnectEpoch = math.max(0, tonumber(S.lastReconnectEpoch) or 0)
+
+-- The outer v19 loader waits for StatsLoaded, required modules and a stable
+-- character BEFORE this core runs. This second check protects later respawns.
+local function statsReady()
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    local values = gui and gui:FindFirstChild("LocalValues")
+    local loaded = values and values:FindFirstChild("StatsLoaded")
+    return loaded ~= nil and loaded:IsA("BoolValue") and loaded.Value == true
+end
+
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
 -- GitHub must host THIS Anime Dimensions script. The supplied raw URL currently
 -- hosts an AOT script, so validate the exact project marker before executing.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V16"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V19"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -174,8 +201,27 @@ local function installTeleportBootstrap()
     local queue = getQueueFunction()
     if not queue then return false end
     local snippet = [===[
-        task.wait(0.75)
-        -- Respect the user's toggle even if it was disabled after queuing.
+        -- Queued in the destination place.  Never execute application code
+        -- until player stats load; the v19 main entry adds a second gate for
+        -- modules and character stability.
+        if not game:IsLoaded() then game.Loaded:Wait() end
+        local players = game:GetService("Players")
+        local started = os.clock()
+        local ready = false
+        while os.clock() - started < 150 do
+            local p = players.LocalPlayer
+            local pg = p and p:FindFirstChildOfClass("PlayerGui")
+            local values = pg and pg:FindFirstChild("LocalValues")
+            local flag = values and values:FindFirstChild("StatsLoaded")
+            ready = flag and flag:IsA("BoolValue") and flag.Value == true
+            if ready then break end
+            task.wait(0.25)
+        end
+        if not ready then
+            warn("[HollowMoonHub AD v19] Auto Execute skipped: game data never finished loading; no automation started")
+            return
+        end
+        -- Respect the user's toggle even if it was switched off after queuing.
         if type(readfile) == "function" then
             local okFile, fileText = pcall(readfile, "HollowMoonHub_AD_v15_state.json")
             if okFile and type(fileText) == "string" then
@@ -190,20 +236,20 @@ local function installTeleportBootstrap()
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         local ok, code = pcall(function() return game:HttpGet(url) end)
         if not ok or type(code) ~= "string" then
-            warn("[HollowMoonHub AD] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v19] GitHub Auto Execute fetch failed")
             return
         end
-        if not string.find(code:sub(1, 2000), "HMH_ANIME_DIMENSIONS_V16", 1, true) then
-            warn("[HollowMoonHub AD] GitHub serves a different game script; Anime Dimensions not executed")
+        if not string.find(code:sub(1, 2400), "HMH_ANIME_DIMENSIONS_V19", 1, true) then
+            warn("[HollowMoonHub AD v19] Wrong/outdated GitHub script. Not executing")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD] GitHub code is not valid Luau: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v19] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD] GitHub execution failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v19] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -431,9 +477,17 @@ local function autoStartWorker()
         -- Wait for replicated stats without blocking the interface.
         local started = os.clock()
         while S.alive and S.autoStart and token == S.lobbyGeneration
-            and not playerLevel() and os.clock() - started < 20 do task.wait(0.25) end
+            and (not statsReady() or not playerLevel())
+            and os.clock() - started < 35 do task.wait(0.25) end
         if not (S.alive and S.autoStart and token == S.lobbyGeneration and inLobby()) then
             S.lobbyBusy = false; return
+        end
+        if not statsReady() then
+            -- Stay armed for a future run, but do not create a lobby room
+            -- before Roblox finishes loading all stats.
+            S.lobbyBusy = false
+            warnOnce("Auto Start waiting for loaded player stats")
+            return
         end
         local request, why = buildRoomData()
         if not request then
@@ -1266,6 +1320,10 @@ local function rememberGround(root, humanoid, character)
 end
 
 local function resultScreenVisible(now)
+    if not statsReady() then
+        S.resultVisible = false
+        return false
+    end
     if now - S.lastResultCheck < .12 then return S.resultVisible end
     S.lastResultCheck = now
     local gui = player:FindFirstChildOfClass("PlayerGui")
@@ -1724,51 +1782,123 @@ local idleOk, idleConn = pcall(function() return player.Idled:Connect(function()
 end) end)
 if idleOk and idleConn then S.connections[#S.connections+1] = idleConn end
 
+-- Reconnect only after a persistent, explicit network disconnect (code 277).
+-- Never reconnect due to general ErrorPrompt text, teleport initialization
+-- failures, normal transitions, or while the player is still loading.
+-- One attempt is allowed per 10 minutes ACROSS places/script executions.
+-- On a genuine disconnect, return to the lobby, not a reserved battle instance.
+local MAIN_LOBBY_PLACE_ID = 6938803436
+local RECONNECT_COOLDOWN_SECONDS = 600
 local function attemptReconnect()
-    if not (S.alive and S.autoReconnect) then return end
-    local now = os.clock()
-    if now - S.lastReconnectAttempt < 10 then return end
-    S.lastReconnectAttempt = now
+    if not (S.alive and S.autoReconnect) or S.reconnectTriggered then return end
+    if os.clock() < (S.reconnectArmedAt or math.huge) then return end
+    if not statsReady() then return end
+    if S.lobbyBusy or S.roomStartRequested then return end
+    local epoch = os.time()
+    if epoch - (S.lastReconnectEpoch or 0) < RECONNECT_COOLDOWN_SECONDS then return end
+
+    S.reconnectTriggered = true
+    S.lastReconnectEpoch = epoch
+    S.lastReconnectAttempt = os.clock()
+    -- Prevent a saved Auto Start setting from sending the player straight
+    -- back into another room after recovery, appearing to reconnect forever.
+    S.autoStart = false
+    S.sessionStopped = true
+    savePreferences()  -- Persist cooldown and paused Auto Start before teleport.
     if S.autoExecute then installTeleportBootstrap() end
     task.spawn(function()
         local ok, err = pcall(function()
-            TeleportService:Teleport(game.PlaceId, player)
+            TeleportService:Teleport(MAIN_LOBBY_PLACE_ID, player)
         end)
-        if not ok then warnOnce("Auto Reconnect couldn't initiate a teleport: " .. tostring(err)) end
+        if not ok then
+            -- Do NOT clear reconnectTriggered; a failed one-shot rejoin
+            -- should not result in repeated teleports from the same prompt.
+            warnOnce("Network reconnect could not start: " .. tostring(err))
+        end
     end)
 end
 
--- Some executor sessions survive Roblox's ErrorPrompt, others are terminated;
--- reconnect cannot run if the executor stops executing altogether.
 local function watchDisconnectPrompt()
     local ok, coreGui = pcall(function() return game:GetService("CoreGui") end)
     if not ok or not coreGui then return end
-    local function examine(gui)
-        if gui.Name ~= "ErrorPrompt" then return end
-        task.delay(1.5, function()
-            if S.alive and S.autoReconnect and gui.Parent then
-                attemptReconnect()
+    local hooked, pending = {}, {}
+    local function confirmedNetworkDisconnect(gui)
+        if not gui or not gui.Parent then return false end
+        local node = gui
+        while node and node ~= coreGui do
+            if node:IsA("GuiObject") and not node.Visible then return false end
+            if node:IsA("ScreenGui") and not node.Enabled then return false end
+            node = node.Parent
+        end
+        local words = {}
+        for _, child in ipairs(gui:GetDescendants()) do
+            if (child:IsA("TextLabel") or child:IsA("TextButton")) and child.Visible then
+                words[#words+1] = tostring(child.Text):lower()
             end
-        end)
+        end
+        local msg = table.concat(words, " ")
+        -- Deliberately require code 277. Generic text such as 'disconnected'
+        -- can be shown during an interrupted transition, and 279 is commonly
+        -- a failed JOIN, not a confirmed disconnect from an active server.
+        return msg:find("error code: 277", 1, true) ~= nil
+            or msg:find("error code 277", 1, true) ~= nil
+            or msg:find("error code (277)", 1, true) ~= nil
     end
-    -- RobloxPromptGui/promptOverlay can be created AFTER script startup.
-    -- Listen on CoreGui so late error prompts aren't missed.
-    local bound, promptConn = pcall(function()
+    local function examine(gui)
+        if gui.Name ~= "ErrorPrompt" or hooked[gui] then return end
+        hooked[gui] = true
+        local function check()
+            if pending[gui] then return end
+            pending[gui] = true
+            -- The exact error must persist for five seconds, not a brief
+            -- dialog that appears during ordinary place transitions.
+            task.delay(5, function()
+                pending[gui] = nil
+                if S.alive and S.autoReconnect and confirmedNetworkDisconnect(gui) then
+                    attemptReconnect()
+                end
+            end)
+        end
+        check()
+        local function watchText(child)
+            if child:IsA("TextLabel") or child:IsA("TextButton") then
+                local good, con = pcall(function()
+                    return child:GetPropertyChangedSignal("Text"):Connect(check)
+                end)
+                if good and con then S.connections[#S.connections+1] = con end
+            end
+        end
+        for _, child in ipairs(gui:GetDescendants()) do watchText(child) end
+        if gui:IsA("GuiObject") then
+            local good, con = pcall(function()
+                return gui:GetPropertyChangedSignal("Visible"):Connect(check)
+            end)
+            if good and con then S.connections[#S.connections+1] = con end
+        end
+        local good, con = pcall(function()
+            return gui.DescendantAdded:Connect(function(child)
+                watchText(child)
+                check()
+            end)
+        end)
+        if good and con then S.connections[#S.connections+1] = con end
+    end
+    local good, con = pcall(function()
         return coreGui.DescendantAdded:Connect(examine)
     end)
-    if bound and promptConn then S.connections[#S.connections+1] = promptConn end
+    if good and con then S.connections[#S.connections+1] = con end
     local listed, descendants = pcall(function() return coreGui:GetDescendants() end)
     if listed then
-        for _, gui in ipairs(descendants) do
-            if gui.Name == "ErrorPrompt" then examine(gui) end
-        end
+        for _, item in ipairs(descendants) do examine(item) end
     end
 end
 watchDisconnectPrompt()
 local failedOK, failedConn = pcall(function()
     return TeleportService.TeleportInitFailed:Connect(function(who)
         if who == player and S.alive and S.autoReconnect then
-            task.delay(3, attemptReconnect)
+            -- Do not call Teleport() here. Roblox can report a transient
+            -- room-teleport failure without disconnecting this client.
+            warnOnce("Teleport failed; automatic rejoin suppressed to prevent a loading loop")
         end
     end)
 end)
@@ -2039,7 +2169,15 @@ settingsTab:CreateToggle({
 })
 settingsTab:CreateToggle({
     name="Auto Reconnect", flag="AD16_AutoReconnect", value=S.autoReconnect,
-    callback=function(on) S.autoReconnect=(on==true); savePreferences() end,
+    callback=function(on)
+        S.autoReconnect=(on==true)
+        if S.autoReconnect then
+            -- Don't treat a prompt already on-screen during enable as a
+            -- legitimate new disconnect; re-arm after a quiet interval.
+            S.reconnectArmedAt=os.clock()+30
+        end
+        savePreferences()
+    end,
 })
 settingsTab:CreateToggle({
     name="Auto Execute (GitHub)", flag="AD16_AutoExecute", value=S.autoExecute,
@@ -2107,6 +2245,7 @@ end
 S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
     if not S.alive then return end
     if inLobby() then return end
+    if not statsReady() then return end
     local now = os.clock()
     if S.autoRetry or S.autoLeaveMatches then
         local results = resultScreenVisible(now)
@@ -2187,10 +2326,133 @@ end)
 if inLobby() and S.autoStart and not S.sessionStopped then
     task.defer(autoStartWorker)
 end
+
 ]====]
+
+-- Readiness gate OUTSIDE the core. An executor may run us immediately on
+-- teleport, before PlayerGui.LocalValues and the game modules are available.
+-- This section does not create UI, use remotes, or change the character.
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local env = (type(getgenv) == "function" and getgenv()) or _G
+local priorBoot = env.HollowMoonADStartupV19
+if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
+    if priorBoot.status == "waiting" or priorBoot.status == "starting" then
+        return -- duplicate Auto Execute invocation for the same destination
+    end
+    local running = env.HollowMoonAnimeDimensions
+    if priorBoot.status == "running" and type(running) == "table" and running.alive then
+        return -- avoid running two copies from queued + executor Auto Execute
+    end
+end
+local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
+env.HollowMoonADStartupV19 = boot
+
+local lobbyPlaces = {
+    [6938803436] = true,
+    [6616269295] = true,
+    [7274690025] = true,
+    [7338881230] = true,
+}
+local function isReady()
+    if not game:IsLoaded() then return false, "Roblox place", nil, nil end
+    local player = Players.LocalPlayer
+    if not player then return false, "LocalPlayer", nil, nil end
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return false, "PlayerGui", nil, nil end
+    local values = gui:FindFirstChild("LocalValues")
+    local flag = values and values:FindFirstChild("StatsLoaded")
+    if not flag or not flag:IsA("BoolValue") or not flag.Value then
+        return false, "StatsLoaded", nil, nil
+    end
+    -- ClientLibrary and skill module must be present before our game-specific
+    -- initializers are allowed to run. StatsLoaded alone is not enough.
+    if not gui:FindFirstChild("ClientLibrary") then
+        return false, "ClientLibrary", nil, nil
+    end
+    local modules = gui:FindFirstChild("Modules")
+    if not (modules and modules:FindFirstChild("ClientSkillModule")) then
+        return false, "ClientSkillModule", nil, nil
+    end
+    -- When the game presents its own data-loading overlay, do not race it.
+    local universalGui = gui:FindFirstChild("UniversalGui")
+    if not universalGui then return false, "game UI", nil, nil end
+    local centerGui = universalGui:FindFirstChild("UniversalCenterUIFrame")
+    local loadingNotice = centerGui and centerGui:FindFirstChild("DataLoadingNotice")
+    if loadingNotice and loadingNotice:IsA("GuiObject") and loadingNotice.Visible then
+        return false, "loading overlay", nil, nil
+    end
+    local remoteFolder = RS:FindFirstChild("RemoteEvents")
+    if not (remoteFolder and remoteFolder:FindFirstChild("MainRemoteEvent")) then
+        return false, "combat remote", nil, nil
+    end
+    if lobbyPlaces[game.PlaceId] then
+        local functionFolder = RS:FindFirstChild("RemoteFunctions")
+        if not (functionFolder and functionFolder:FindFirstChild("MainRemoteFunction")) then
+            return false, "lobby remote", nil, nil
+        end
+        local display = RS:FindFirstChild(player.Name .. "StatDisplay")
+        if not (display and display:FindFirstChild("Level")) then
+            return false, "player level", nil, nil
+        end
+    end
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not (char and hum and root and hum.Health > 0) then
+        return false, "character spawn", nil, nil
+    end
+    return true, "ready", char, flag
+end
+
+local untilTime = os.clock() + 180
+local stableSince, lastChar, lastFlag = nil, nil, nil
+local lastReason = "game loading"
+local cleared = false
+local noticeShown = false
+local bootStartedAt = os.clock()
+while os.clock() < untilTime do
+    if env.HollowMoonADStartupV19 ~= boot then return end
+    local ok, reason, char, flag = isReady()
+    lastReason = reason
+    if ok then
+        if char ~= lastChar or flag ~= lastFlag then
+            lastChar, lastFlag = char, flag
+            stableSince = os.clock()
+        end
+        if stableSince and os.clock() - stableSince >= 3 then
+            cleared = true
+            break
+        end
+    else
+        stableSince, lastChar, lastFlag = nil, nil, nil
+    end
+    if not noticeShown and os.clock() - bootStartedAt > 10 then
+        noticeShown = true
+        warn("[HollowMoonHub AD v19] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+    end
+    task.wait(0.2)
+end
+if not cleared then
+    boot.status = "failed"
+    warn("[HollowMoonHub AD v19] Startup cancelled: " .. tostring(lastReason)
+        .. " never became ready. No UI, combat, auto start or reconnect was started.")
+    return
+end
+
+boot.status = "starting"
+-- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v16_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v19_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
-if not fn then error("HollowMoonHub v16 compile failure: " .. tostring(err)) end
-fn()
+if not fn then
+    boot.status = "failed"
+    error("[HollowMoonHub AD v19] Compile failure: " .. tostring(err))
+end
+local ok, runErr = pcall(fn)
+if not ok then
+    boot.status = "failed"
+    error("[HollowMoonHub AD v19] Initialization failure: " .. tostring(runErr))
+end
+boot.status = "running"
