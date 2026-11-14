@@ -1,12 +1,12 @@
--- HMH_ANIME_DIMENSIONS_V52
--- HollowMoonHub | Anime Dimensions v52 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V54
+-- HollowMoonHub | Anime Dimensions v54 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V52
--- HMH_AD_CORE_ADLER32:fe6b8f62
--- HollowMoonHub | Anime Dimensions v52 (v51 dodge + boss priority over summons) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V54
+-- HMH_AD_CORE_ADLER32:1081b92d
+-- HollowMoonHub | Anime Dimensions v54 (boss priority + nearby safe attack positions) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -201,6 +201,16 @@ local S = {
     dodgeGoal = nil,
     dodgeUntil = -math.huge,
     dodgeSafeSince = nil,
+    -- A safe selected farm spot is evaluated independently of the travel path.
+    dodgeFarmClearSince = nil,
+    dodgeFarmClearGeneration = nil,
+    lastDodgeRejoinAt = -math.huge,
+    -- Cache a nearby attackable position while the user's exact farm spot
+    -- is covered by a telegraph. Never turn temporary dodge state into files.
+    nearFarmEscape = nil,
+    nearFarmEscapeGeneration = nil,
+    nearFarmClearSince = nil,
+    lastNearFarmSearchAt = -math.huge,
     lastDodgeDash = -math.huge,
     telegraphFolder = nil,
     hazardParts = {},
@@ -298,7 +308,7 @@ local function savePreferences()
     local wrote = pcall(writefile, STATE_FILE, encoded)
     if not wrote and not S.dataFolderWarningShown then
         S.dataFolderWarningShown = true
-        warn("[HollowMoonHub AD v52] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
+        warn("[HollowMoonHub AD v54] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
     end
     return wrote
 end
@@ -336,7 +346,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v52] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v54] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -349,7 +359,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v52] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v54] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -442,10 +452,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v52 or newer; reject old cached builds that lack
+-- GitHub must host v54 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V52"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V54"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -457,7 +467,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v52 main entry adds a second gate for
+        -- until player stats load; the v54 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -473,7 +483,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v52] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v54] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -497,7 +507,7 @@ local function installTeleportBootstrap()
         -- First try GitHub with a fresh cache key, then the plain URL for
         -- executors that do not accept cache-busting query strings.
         local fetchOK, code = pcall(function()
-            return game:HttpGet(url .. "?hmh_ad_v52=" .. tostring(os.time()), true)
+            return game:HttpGet(url .. "?hmh_ad_v54=" .. tostring(os.time()), true)
         end)
         if not fetchOK or type(code) ~= "string" or #code == 0 then
             fetchOK, code = pcall(function() return game:HttpGet(url) end)
@@ -519,7 +529,7 @@ local function installTeleportBootstrap()
             local header = source:sub(1, 4096):gsub("^%s+", "")
             local firstLine = header:match("^[^\r\n]+") or "<empty>"
             local version = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-            local supported = version ~= nil and version >= 52
+            local supported = version ~= nil and version >= 54
                 and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
                 and header:find("6938803436", 1, true) ~= nil
                 and header:find("6990129309", 1, true) ~= nil
@@ -542,11 +552,11 @@ local function installTeleportBootstrap()
             local validLocal = localOK and acceptedHeader(localCode, true)
             if validLocal then
                 code = localCode
-                warn("[HollowMoonHub AD v52] GitHub returned " .. remoteHeader
-                    .. "; using verified local v52 core. Update the GitHub testing file to v52.")
+                warn("[HollowMoonHub AD v54] GitHub returned " .. remoteHeader
+                    .. "; using verified local v54 core. Update the GitHub testing file to v54.")
             else
-                warn("[HollowMoonHub AD v52] GitHub returned " .. remoteHeader
-                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v52.")
+                warn("[HollowMoonHub AD v54] GitHub returned " .. remoteHeader
+                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v54.")
                 return
             end
         end
@@ -568,17 +578,17 @@ local function installTeleportBootstrap()
             task.wait(0.2)
         end
         if not localReady then
-            warn("[HollowMoonHub AD v52] Auto Execute aborted: character/client library not ready")
+            warn("[HollowMoonHub AD v54] Auto Execute aborted: character/client library not ready")
             return
         end
         task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v52] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v54] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v52] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v54] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -2334,6 +2344,12 @@ local function setTarget(nextTarget)
     S.dodgeGoal = nil
     S.dodgeLastClear = nil
     S.dodgeHoldUntil = -HUGE
+    S.dodgeFarmClearSince = nil
+    S.dodgeFarmClearGeneration = nil
+    S.nearFarmEscape = nil
+    S.nearFarmEscapeGeneration = nil
+    S.nearFarmClearSince = nil
+    S.lastNearFarmSearchAt = -HUGE
     S.safeAlternate = nil
     S.lastHazardRead = -HUGE
     S.waypoints = nil
@@ -2780,6 +2796,12 @@ local function clearHazardTracking()
     S.dodgeGoal = nil
     S.dodgeHoldUntil = -HUGE
     S.dodgeLastClear = nil
+    S.dodgeFarmClearSince = nil
+    S.dodgeFarmClearGeneration = nil
+    S.nearFarmEscape = nil
+    S.nearFarmEscapeGeneration = nil
+    S.nearFarmClearSince = nil
+    S.lastNearFarmSearchAt = -HUGE
     S.dodgeResumeUntil = -HUGE
 end
 
@@ -3047,6 +3069,57 @@ local function pathClearOfDanger(startPos, endPos, zones)
     return true
 end
 
+-- When the exact Behind/Above/Below spot is inside an attack, don't orbit
+-- farther and farther around the player. Find the nearest SAFE substitute
+-- around the requested fighting spot itself, so attacks can keep landing.
+-- A previous safe candidate is sticky: no recalculation/jitter each Heartbeat.
+S.findNearFarmEscape = function(farmGoal, rootPos, zones, now)
+    if not farmGoal or #zones == 0 then return nil end
+    local old = S.nearFarmEscape
+    if old and S.nearFarmEscapeGeneration == S.targetGeneration
+        and (old - farmGoal).Magnitude <= 22
+        and positionDanger(old, zones, 3) == 0 then
+        return old
+    end
+    S.nearFarmEscape = nil
+    S.nearFarmClearSince = nil
+    -- Small periodic search; avoid dozens of raycasts on every Heartbeat.
+    if now - (S.lastNearFarmSearchAt or -HUGE) < 0.18 then return nil end
+    S.lastNearFarmSearchAt = now
+    -- Already close to the intended attack position and safe? Stay where we
+    -- are instead of introducing an extra sideways dodge for no benefit.
+    if (rootPos - farmGoal).Magnitude <= 8
+        and positionDanger(rootPos, zones, 3) == 0 then
+        S.nearFarmEscape = rootPos
+        S.nearFarmEscapeGeneration = S.targetGeneration
+        return rootPos
+    end
+    local candidates = {}
+    for _, radius in ipairs({3, 5, 8, 11, 15, 20}) do
+        for i = 0, 11 do
+            local angle = i * math.pi / 6
+            local point = farmGoal + Vector3.new(
+                math.cos(angle) * radius, 0, math.sin(angle) * radius)
+            if positionDanger(point, zones, 3) == 0 then
+                -- Proximity to the chosen attack pose dominates; current
+                -- location is only a small tiebreaker to reduce travel.
+                local score = radius + math.min((point - rootPos).Magnitude, 100) * 0.025
+                candidates[#candidates+1] = {point = point, score = score}
+            end
+        end
+    end
+    table.sort(candidates, function(a, b) return a.score < b.score end)
+    for i = 1, math.min(#candidates, 12) do
+        local point = candidates[i].point
+        if S.farmMethod == "Legit" or supportedEscapePoint(point) then
+            S.nearFarmEscape = point
+            S.nearFarmEscapeGeneration = S.targetGeneration
+            return point
+        end
+    end
+    return nil
+end
+
 -- During a telegraph, another enemy may have a safe combat position.
 -- Prefer farming that enemy over standing idle outside the danger zone.
 -- Never select a target purely by proximity if its farm pose is in danger.
@@ -3123,11 +3196,28 @@ local function dodgeTick(dt, root, humanoid, target, now)
     local farmGoal = farmPose and farmPose.Position
     local zones = nearbyHazards(root.Position, now, target, farmGoal)
     local hereUnsafe = positionDanger(root.Position, zones, 4) > 0
-    local farmUnsafe = farmGoal and positionDanger(farmGoal, zones, 5) > 0
+    -- Inspect the EXACT user-selected combat spot: Behind 5, Above, Below,
+    -- etc. A red stripe covering the route or the boss's center does not by
+    -- itself make the selected spot unsafe. Only geometry at that spot does.
+    local farmUnsafe = farmGoal and positionDanger(farmGoal, zones, 2) > 0
     local blockedFarmPath = farmGoal and #zones > 0
         and not pathClearOfDanger(root.Position, farmGoal, zones)
-    if blockedFarmPath then farmUnsafe = true end
     local goalUnsafe = S.dodgeGoal and positionDanger(S.dodgeGoal, zones, 5) > 0
+    -- A short two-to-four-frame confirmation prevents a moving telegraph
+    -- from producing rapid escape/reentry flickering. New targets reset it.
+    if farmGoal and not farmUnsafe then
+        S.nearFarmEscape = nil
+        S.nearFarmEscapeGeneration = nil
+        S.nearFarmClearSince = nil
+        if S.dodgeFarmClearGeneration ~= S.targetGeneration
+            or not S.dodgeFarmClearSince then
+            S.dodgeFarmClearGeneration = S.targetGeneration
+            S.dodgeFarmClearSince = now
+        end
+    else
+        S.dodgeFarmClearSince = nil
+        S.dodgeFarmClearGeneration = nil
+    end
 
     -- If our target is in danger, try a different, attackable enemy before
     -- going idle. Do not fly across an active hazard to reach the alternate.
@@ -3142,16 +3232,82 @@ local function dodgeTick(dt, root, humanoid, target, now)
         end
     end
 
-    -- Current living target's combat position is clear: farm immediately,
-    -- even if the previous boss's telegraph animation is still in Debris.
-    -- Do not let an expired dodge goal by itself trigger another dodge.
-    if farmGoal and not hereUnsafe and not farmUnsafe
-        and not blockedFarmPath then
-        if S.dodgeGoal then endDodge(now) end
-        return false
+    -- Prioritize the user's selected Behind/Above/Below position as soon as
+    -- it is clear. The current position or the LINE BETWEEN us and that
+    -- position may still be painted red; they are separate safety questions.
+    if farmGoal and not farmUnsafe and S.dodgeFarmClearSince
+        and now - S.dodgeFarmClearSince >= 0.06 then
+        if not hereUnsafe and not blockedFarmPath then
+            -- Safe normal Tween/Teleport/Legit path: hand movement right back
+            -- to Auto Farm, even when another part of the arena is attacking.
+            if S.dodgeGoal or S.dodgeHoldUntil > now then endDodge(now) end
+            return false
+        end
+        -- The destination is safe but the straight Tween corridor crosses a
+        -- live telegraph. Rejoin the safe selected spot directly ONCE rather
+        -- than fleeing in ever-larger circles or standing idle until impact.
+        -- Keep a distance/cooldown guard to avoid across-map teleports and
+        -- jitter. Legit mode never teleports; its dodge/path rules remain.
+        if S.farmMethod ~= "Legit" and validTarget(target)
+            and S.targetInCurrentArea(target, root)
+            and (farmGoal - root.Position).Magnitude <= 180
+            and now - (S.lastDodgeRejoinAt or -HUGE) >= 0.5 then
+            endDodge(now)
+            root.CFrame = farmPose
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            S.smoothPose = farmPose
+            S.lastScriptPosition = root.Position
+            S.lastDodgeRejoinAt = now
+            S.stallTarget = nil
+            S.stallProbePosition = nil
+            return true -- location already restored; normal farm follows next tick
+        end
     end
 
-    if hereUnsafe or farmUnsafe or goalUnsafe then
+    -- When the selected pose is covered, first seek a tiny safe adjustment
+    -- around THAT pose. In v54, if the player was safe but the farm pose was
+    -- red, Dodge froze at the player's current position, however far away.
+    -- That caused long periods of low boss damage during repeated warnings.
+    if farmUnsafe and farmGoal and S.autoFarm and validTarget(target) then
+        local nearby = S.findNearFarmEscape(farmGoal, root.Position, zones, now)
+        if nearby and positionDanger(nearby, zones, 3) == 0 then
+            S.dodgeGoal = nearby
+            goalUnsafe = false
+            if S.nearFarmClearSince == nil then S.nearFarmClearSince = now end
+            local distance = (nearby - root.Position).Magnitude
+            -- A single deliberate rejoin avoids dragging a Tween through an
+            -- active attack. Don't continually teleport if already nearby.
+            if S.farmMethod ~= "Legit" and distance > 9 and distance <= 180
+                and S.targetInCurrentArea(target, root)
+                and now - S.nearFarmClearSince >= 0.06
+                and now - (S.lastDodgeRejoinAt or -HUGE) >= 0.65 then
+                local pose
+                if S.farmPosition == "Above" or S.farmPosition == "Below" then
+                    pose = CFrame.new(nearby) * farmPose.Rotation
+                else
+                    local focus = target.root.Position
+                    pose = safeLookAt(nearby,
+                        Vector3.new(focus.X, nearby.Y, focus.Z), Vector3.yAxis)
+                end
+                root.CFrame = pose
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+                S.smoothPose = pose
+                S.lastScriptPosition = root.Position
+                S.lastDodgeRejoinAt = now
+                S.stallTarget = nil
+                S.stallProbePosition = nil
+                return true
+            end
+        else
+            S.nearFarmClearSince = nil
+        end
+    else
+        S.nearFarmClearSince = nil
+    end
+
+    if hereUnsafe or farmUnsafe or blockedFarmPath or goalUnsafe then
         S.dodgeLastClear = nil
         local hold = now + DODGE_MIN_HOLD
         for _, zone in ipairs(zones) do
@@ -4163,7 +4319,7 @@ function S.Unload(manual)
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v52 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v54 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -4605,6 +4761,10 @@ local function buildUI()
         S.autoDodge = on == true
         if not S.autoDodge then
             S.dodgeGoal, S.dodgeLastClear = nil, nil
+            S.dodgeFarmClearSince = nil
+            S.dodgeFarmClearGeneration = nil
+            S.nearFarmEscape = nil
+            S.nearFarmClearSince = nil
             clearHazardTracking()
             S.lastHazardBind = -HUGE
         end
@@ -4857,6 +5017,8 @@ S.rebaseSpatialState = function(root, now)
     S.dodgeGoal=nil
     S.dodgeLastClear=nil
     S.dodgeHoldUntil=-HUGE
+    S.nearFarmEscape=nil
+    S.nearFarmClearSince=nil
     S.dodgeResumeUntil=now
     resetTarget()
 end
@@ -5015,16 +5177,22 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
 local priorBoot = env.HollowMoonADStartupV48
-if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
-    if priorBoot.status == "waiting" or priorBoot.status == "starting" then
-        return -- duplicate Auto Execute invocation for the same destination
-    end
-    local running = env.HollowMoonAnimeDimensions
-    if priorBoot.status == "running" and type(running) == "table" and running.alive then
-        return -- avoid running two copies from queued + executor Auto Execute
+local newVersion = 54
+if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId
+    and priorBoot.jobId == game.JobId then
+    -- Two copies of THIS version must not run simultaneously. But allow
+    -- updated code to replace a live older version after readiness checks.
+    if priorBoot.version == newVersion then
+        if priorBoot.status == "waiting" or priorBoot.status == "starting" then
+            return
+        end
+        local running = env.HollowMoonAnimeDimensions
+        if priorBoot.status == "running" and type(running) == "table"
+            and running.alive then return end
     end
 end
-local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
+local boot = { status = "waiting", version = newVersion,
+    placeId = game.PlaceId, jobId = game.JobId }
 env.HollowMoonADStartupV48 = boot
 
 local lobbyPlaces = {
@@ -5108,13 +5276,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v52] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v54] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v52] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v54] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -5124,12 +5292,12 @@ boot.status = "starting"
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v52] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v54] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v52] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v54] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
 -- One stable core cache per game. Create the game folder only if the
@@ -5170,7 +5338,7 @@ if type(writefile) == "function" then
     if overwrite then
         local okWrite = pcall(writefile, cachePath, CORE)
         if not okWrite then
-            warn("[HollowMoonHub AD v52] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
+            warn("[HollowMoonHub AD v54] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
         end
     end
 end
