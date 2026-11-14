@@ -1,11 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V35
--- HollowMoonHub | Anime Dimensions v35 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V37
+-- HollowMoonHub | Anime Dimensions v37 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V35
--- HollowMoonHub | Anime Dimensions v35 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V37
+-- HollowMoonHub | Anime Dimensions v37 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -47,6 +47,12 @@ local S = {
     speedRestorePending = false,
     speedRestoreLobbyEpoch = 0, -- bounded restoration: stale stats cannot freeze mode scheduler
     savedLoadout = { main = "", assist1 = "", assist2 = "" },
+    -- User-defined permanent preset. NEVER take this from a Speed Raid selection.
+    preferredLoadout = { main = "", assist1 = "", assist2 = "" },
+    autoEquipLoadout = false,
+    loadoutEquipAttempts = 0,
+    loadoutRetryAfter = 0,
+    loadoutPriorityHoldUntil = 0,
     lastLoadoutRepairAt = -math.huge,
     loadoutRestoreAttempts = 0,
     bossRepairAttempts = 0,
@@ -190,7 +196,7 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v35_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v37_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "v30MapReviewed", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
@@ -198,6 +204,7 @@ local PERSIST_KEYS = {
     "autoJoinRaid", "raidMapChoice", "raidDifficultyChoice", "raidFriendsOnly",
     "autoSpeedRaid", "speedCharacterChoice", "speedAutoLeave", "speedUsed", "speedWeek",
     "speedOriginalCharacter", "speedRestorePending", "speedRestoreLobbyEpoch", "speedPendingCharacter", "savedLoadout",
+    "preferredLoadout", "autoEquipLoadout",
     "autoDailyRaid", "dailyLastRequestedDate", "autoBossRush", "bossAutoRetry", "bossAutoLeave",
     "autoExtreme", "extremeDifficulty", "autoTimeChallenge", "modePriority", "modeIntent", "modeRequestAt",
     "modeFromPlace", "modeFromJobId", "modeWasInBattle", "raidUnavailableUntil",
@@ -239,12 +246,12 @@ end
 -- Save the user's choices separately from room/results/session bookkeeping.
 -- This file is only written by explicit Auto Start/Auto Retry UI callbacks,
 -- or once on upgrading from older state where no dedicated file exists.
-S.toggleIntentFile = "HollowMoonHub_AD_v35_toggle_intent.json"
+S.toggleIntentFile = "HollowMoonHub_AD_v36_toggle_intent.json" -- stable across script updates
 S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v35] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v37] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -256,7 +263,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v35] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v37] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -274,12 +281,22 @@ S.loadToggleIntent = function()
 end
 loadPreferences()
 if not S.loadToggleIntent() then
-    -- First v35 execution: seed from previously saved v34 user choices.
+    -- First v37 execution: seed from previously saved v34 user choices.
     S.saveToggleIntent()
 end
 if S.sessionStopped and S.autoStart then
-    warn("[HollowMoonHub AD v35] Auto Start is ON, but the previous match limit paused Dimensions. Select Resume Mode Queue in Lobby to continue.")
+    warn("[HollowMoonHub AD v37] Auto Start is ON, but the previous match limit paused Dimensions. Select Resume Mode Queue in Lobby to continue.")
 end
+-- New v37 loadout choices start empty on purpose: an automatic backup from an
+-- older version may already have been overwritten by a temporary Speed Raid
+-- loadout. Users should choose their three permanent slots explicitly once.
+if type(S.preferredLoadout)~="table" then S.preferredLoadout={main="",assist1="",assist2=""} end
+for _,key in ipairs({"main","assist1","assist2"}) do
+    if type(S.preferredLoadout[key])~="string" then S.preferredLoadout[key]="" end
+end
+-- Give Auto Equip a short opportunity to restore after every fresh lobby boot
+-- before a higher-priority mode can queue another teleport.
+S.loadoutPriorityHoldUntil=os.clock()+18
 -- v32 could re-enable previously saved native card auto-sell rarities even
 -- when those rarities were NOT selected in HollowMoonHub. One-time fail-safe:
 -- disable Auto Sell until the user re-confirms their selections in v34.
@@ -335,10 +352,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host a complete Anime Dimensions script. Accept older/newer
--- version headers, but never execute an unrelated game script.
+-- GitHub must host v37 or newer; reject old cached builds that lack
+-- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V35"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V37"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -350,7 +367,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v35 main entry adds a second gate for
+        -- until player stats load; the v37 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -366,7 +383,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v35] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v37] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -383,39 +400,39 @@ local function installTeleportBootstrap()
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         -- Bust cached copies of the raw file after updating it in GitHub.
-        local freshURL = url .. "?hmh_ad_v35=" .. tostring(os.time())
+        local freshURL = url .. "?hmh_ad_v37=" .. tostring(os.time())
         local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
         if not ok or type(code) ~= "string" or #code == 0 then
             -- Some executors reject the optional no-cache parameter/query string.
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v35] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v37] GitHub Auto Execute fetch failed")
             return
         end
-        -- Accept v35 and newer, never silently downgrade to a known version
+        -- Accept v37 and newer, never silently downgrade to a known version
         -- that automatically disabled Auto Start/Retry. Future versions remain
         -- valid; unrelated games such as the old AOT GitHub file are blocked.
         local header = code:sub(1, 4096)
         local firstLine = header:match("^[^\r\n]+") or "<empty>"
         local scriptVersion = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-        local validHeader = scriptVersion ~= nil and scriptVersion >= 35
+        local validHeader = scriptVersion ~= nil and scriptVersion >= 37
         local isAnimeDimensions = validHeader
             and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v35] GitHub script missing, unrelated, or older than v35: "
+            warn("[HollowMoonHub AD v37] GitHub script missing, unrelated, or older than v37: "
                 .. firstLine:sub(1, 140) .. ". Not executing; update the testing file on main.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v35] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v37] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v35] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v37] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -858,20 +875,93 @@ local function stat(name)
     end
     return nil
 end
+-- The native collection is filled by EventHandler's UpdateCollection event.
+-- At UI startup it can still be empty, even AFTER StatsLoaded is true.
+-- Cross-check three CLIENT-AUTHORITATIVE sources without inventing ownership:
+-- (1) the game's collection table, (2) its visible owned-character slots,
+-- (3) the characters actually equipped in replicated equipment stats.
 local function getCharacterModule()
-    local gui = player:FindFirstChildOfClass("PlayerGui")
-    local mod = gui and gui:FindFirstChild("Modules") and gui.Modules:FindFirstChild("CharacterModule")
-    if not mod then return nil end
-    local ok,m=pcall(require,mod)
-    if ok and type(m)=="table" then return m end
+    local gui=player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return nil end
+    -- Prefer the SAME module table the native EventHandler uses.
+    local library=gui:FindFirstChild("ClientLibrary")
+    if library and library:IsA("ModuleScript") then
+        local ok, lib=pcall(require,library)
+        if ok and type(lib)=="table" and type(lib.CharacterModule)=="table" then
+            return lib.CharacterModule
+        end
+    end
+    local folder=gui:FindFirstChild("Modules")
+    local instance=folder and folder:FindFirstChild("CharacterModule")
+    if not instance then return nil end
+    local ok, mod=pcall(require,instance)
+    return ok and type(mod)=="table" and mod or nil
 end
 local function collectedCharacters()
-    local module = getCharacterModule()
-    if not (module and type(module.returnCharacterCollectedTable)=="function") then return nil end
-    -- Nonblocking, because the game's character collection could still be initializing.
-    local ok, owned=pcall(module.returnCharacterCollectedTable,false)
-    if not ok or type(owned)~="table" or not next(owned) then return nil end
-    return owned
+    local settings=getSettings()
+    local valid=settings and settings.CharacterSettings
+    if type(valid)~="table" then return nil,false end
+    local names={}
+    local nativeCount,inventoryCount,equippedCount=0,0,0
+    local module=getCharacterModule()
+    if module and type(module.returnCharacterCollectedTable)=="function" then
+        -- DO NOT call returnCharacterCollectedTable(true) on the UI thread:
+        -- the native function waits indefinitely for UpdateCollection.
+        local ok, collected=pcall(module.returnCharacterCollectedTable,false)
+        if ok and type(collected)=="table" then
+            for key,has in pairs(collected) do
+                if type(key)=="string" and has and valid[key] then
+                    names[key]=true
+                    nativeCount=nativeCount+1
+                end
+            end
+        end
+    end
+    -- The game creates a visible CharacterInventorySlot named with the
+    -- exact character ID for each owned character (NOT costumes or shop rows).
+    local gui=player:FindFirstChildOfClass("PlayerGui")
+    local inventory=gui and gui:FindFirstChild("CharacterInventoryScrollingFrame",true)
+    if inventory then
+        for _,slot in ipairs(inventory:GetChildren()) do
+            if slot:IsA("GuiObject") and slot.Visible and valid[slot.Name]
+                and slot:FindFirstChild("CharacterImage")
+                and slot:FindFirstChild("CharacterClick") then
+                names[slot.Name]=true
+                inventoryCount=inventoryCount+1
+            end
+        end
+    end
+    -- If UpdateCollection has not arrived yet, let the three already
+    -- equipped characters be chosen while the full list is still loading.
+    for _,key in ipairs({"CharacterName","AssistCharacterName1","AssistCharacterName2"}) do
+        local name=stat(key)
+        if type(name)=="string" and name~="" and valid[name] then
+            names[name]=true
+            equippedCount=equippedCount+1
+        end
+    end
+    if not next(names) then return nil,false end
+    -- A native collection or real inventory slots are needed to conclude
+    -- that the ENTIRE owned list has loaded; equipped stats alone are partial.
+    return names,(nativeCount>0 or inventoryCount>0),
+        nativeCount,inventoryCount,equippedCount
+end
+local function ownedLoadoutOptions()
+    local options={"Select Character"}
+    local owned,complete=collectedCharacters()
+    local settings=getSettings()
+    local config=settings and settings.CharacterSettings or {}
+    local names={}
+    for name,has in pairs(owned or {}) do
+        if has and config[name] then names[#names+1]=name end
+    end
+    table.sort(names,function(a,b)
+        local ar=tonumber(config[a].collectionRankValue) or 0
+        local br=tonumber(config[b].collectionRankValue) or 0
+        return ar==br and a<b or ar>br
+    end)
+    for _,name in ipairs(names) do options[#options+1]=name end
+    return options,complete
 end
 local function speedCharacterOptions()
     local options={"Auto — Next Unused"}
@@ -907,8 +997,10 @@ local function hasUsedSpeedCharacter(name)
     return picture and picture:IsA("ImageLabel") and picture.ImageTransparency >= .8 or false
 end
 local function selectSpeedCharacter()
-    local owned=collectedCharacters()
-    if not owned then return nil,"Characters not loaded" end
+    local owned,complete=collectedCharacters()
+    -- Never mark all characters used for the week when ONLY the currently
+    -- equipped slots have loaded; wait for the native full collection.
+    if not owned or not complete then return nil,"Characters not loaded" end
     local settings=getSettings()
     local cfg=settings and settings.CharacterSettings or {}
     refreshWeeklySpeedUsed()
@@ -1127,8 +1219,33 @@ end
 local function isEquippedName(name)
     return type(name)=="string" and name~="" and name~="None" and name~="nil"
 end
+local function preferredLoadoutValid()
+    local p=S.preferredLoadout
+    return type(p)=="table" and isEquippedName(p.main)
+        and isEquippedName(p.assist1) and isEquippedName(p.assist2)
+        and p.main~=p.assist1 and p.main~=p.assist2 and p.assist1~=p.assist2
+end
+local function preferredLoadoutMatches()
+    local p=S.preferredLoadout
+    return preferredLoadoutValid()
+        and stat("CharacterName")==p.main
+        and stat("AssistCharacterName1")==p.assist1
+        and stat("AssistCharacterName2")==p.assist2
+end
 local function rememberEquippedLoadout()
     if not regularLobby() or not statsReady() or S.speedRestorePending then return end
+    -- When a preferred preset exists, it is authoritative. NEVER capture a
+    -- temporary or incorrectly restored main/assist as the new saved backup.
+    if S.autoEquipLoadout and preferredLoadoutValid() then
+        local p=S.preferredLoadout
+        local old=S.savedLoadout or {}
+        if old.main~=p.main or old.assist1~=p.assist1 or old.assist2~=p.assist2 then
+            S.savedLoadout={main=p.main,assist1=p.assist1,assist2=p.assist2}
+            savePreferences()
+        end
+        return
+    end
+    if S.speedPendingCharacter~="" or S.modeIntent=="SpeedRaid" then return end
     local main, a1, a2 = stat("CharacterName"), stat("AssistCharacterName1"), stat("AssistCharacterName2")
     if not (isEquippedName(main) and isEquippedName(a1) and isEquippedName(a2)) then return end
     -- An assist cannot be the active main character or the other assist.
@@ -1140,10 +1257,16 @@ local function rememberEquippedLoadout()
     end
 end
 local function saveOriginalSpeedCharacter()
-    rememberEquippedLoadout() -- snapshot BEFORE Speed Raid switches characters
+    if S.autoEquipLoadout and preferredLoadoutValid() then
+        local p=S.preferredLoadout
+        S.savedLoadout={main=p.main,assist1=p.assist1,assist2=p.assist2}
+    else
+        rememberEquippedLoadout() -- best-effort fallback if no explicit preset
+    end
     if S.speedRestorePending and isEquippedName(S.speedOriginalCharacter) then return end
     S.speedRestoreLobbyEpoch = 0 -- begin timeout only after we reach the lobby
-    local main=stat("CharacterName")
+    local main=(S.autoEquipLoadout and preferredLoadoutValid())
+        and S.preferredLoadout.main or stat("CharacterName")
     if isEquippedName(main) then
         S.speedOriginalCharacter=main
         S.speedRestorePending=true
@@ -1168,6 +1291,13 @@ local function equipSavedSlot(name, slot)
 end
 local function restoreSpeedCharacter()
     if not S.speedRestorePending or not regularLobby() or not statsReady() then return end
+    -- A queued Speed Raid is still in the source lobby until teleport starts.
+    -- NEVER equip the saved main during that window; the temporary selection
+    -- must be allowed to complete. Returning from battle has a different JobId
+    -- or the persisted modeWasInBattle flag, so restoration can then begin.
+    if S.modeIntent=="SpeedRaid" and not S.modeWasInBattle
+        and S.modeFromJobId==game.JobId
+        and os.time()-(tonumber(S.modeRequestAt) or 0)<45 then return end
     -- Some characters do not replicate equip/assist stats after a Speed Raid.
     -- Those nil stats previously caused an unconditional return every 2s,
     -- permanently blocking every other mode. Bound this state across reloads.
@@ -1186,8 +1316,10 @@ local function restoreSpeedCharacter()
         return
     end
     if os.clock()-S.lastLoadoutRepairAt<1.0 then return end
-    local saved=type(S.savedLoadout)=="table" and S.savedLoadout or {}
-    local wantedMain=isEquippedName(S.speedOriginalCharacter) and S.speedOriginalCharacter or saved.main
+    local saved=(S.autoEquipLoadout and preferredLoadoutValid())
+        and S.preferredLoadout or (type(S.savedLoadout)=="table" and S.savedLoadout or {})
+    local wantedMain=(S.autoEquipLoadout and preferredLoadoutValid())
+        and saved.main or (isEquippedName(S.speedOriginalCharacter) and S.speedOriginalCharacter or saved.main)
     local currentMain=stat("CharacterName")
     if currentMain==nil then return end -- player data not fully replicated yet
     local missingSlot, wantedName=nil,nil
@@ -1221,6 +1353,7 @@ local function restoreSpeedCharacter()
         S.speedRestorePending=false
         S.speedRestoreLobbyEpoch=0
         S.speedOriginalCharacter=""
+        S.speedPendingCharacter="" -- stale pending character must not block Auto Equip
         S.loadoutRestoreAttempts=0
         savePreferences()
     end
@@ -1229,7 +1362,8 @@ end
 -- the recorded slot before trying to enter. No guessing if no valid backup.
 local function repairMissingBossRushAssists()
     if not regularLobby() or not statsReady() then return false end
-    local saved=type(S.savedLoadout)=="table" and S.savedLoadout or {}
+    local saved=(S.autoEquipLoadout and preferredLoadoutValid())
+        and S.preferredLoadout or (type(S.savedLoadout)=="table" and S.savedLoadout or {})
     local a1,a2=stat("AssistCharacterName1"),stat("AssistCharacterName2")
     if a1==nil or a2==nil then return false end
     local missingSlot,wantedName=nil,nil
@@ -1252,6 +1386,57 @@ local function repairMissingBossRushAssists()
     end
     return true -- allow replicated stats to update before any teleport
 end
+-- Permanent preset reconciler. This runs in the *regular lobby only*.
+-- It never changes a Speed Raid's chosen temporary character in battle and
+-- never replaces the user's preferred dropdown selections with live stats.
+local function autoEquipPreferredLoadoutTick()
+    if not S.autoEquipLoadout or not regularLobby() or not statsReady() then return end
+    if not preferredLoadoutValid() then
+        warnOnce("Auto Equip Loadout: choose three DIFFERENT owned characters first")
+        return
+    end
+    -- Do not fight the Speed Raid character-selection/teleport transition.
+    if S.speedRestorePending or S.speedPendingCharacter~=""
+        or S.modeIntent=="SpeedRaid" or S.lobbyBusy or S.createdOwnRoom then return end
+    local p=S.preferredLoadout
+    local now=os.clock()
+    if preferredLoadoutMatches() then
+        S.loadoutEquipAttempts=0
+        S.loadoutRetryAfter=0
+        S.loadoutPriorityHoldUntil=0
+        return
+    end
+    if now < (S.loadoutRetryAfter or 0)
+        or now-S.lastLoadoutRepairAt < 1.2 then return end
+    local owned=collectedCharacters()
+    if not owned then return end
+    if not (owned[p.main] and owned[p.assist1] and owned[p.assist2]) then
+        S.loadoutRetryAfter=now+45
+        warnOnce("Auto Equip Loadout: a selected character is no longer in the owned collection")
+        return
+    end
+    local currentMain=stat("CharacterName")
+    local a1=stat("AssistCharacterName1")
+    local a2=stat("AssistCharacterName2")
+    if currentMain==nil or a1==nil or a2==nil then return end
+    local slot,name
+    -- Main first; the game's equip actions can affect existing assist slots.
+    if currentMain~=p.main then slot,name=0,p.main
+    elseif a1~=p.assist1 then slot,name=1,p.assist1
+    elseif a2~=p.assist2 then slot,name=2,p.assist2
+    else return end
+    S.lastLoadoutRepairAt=now
+    local requested=equipSavedSlot(name,slot)
+    S.loadoutEquipAttempts=(S.loadoutEquipAttempts or 0)+1
+    if not requested then warnOnce("Auto Equip Loadout: equip request failed for "..name) end
+    if S.loadoutEquipAttempts>=12 then
+        -- Don't freeze mode priority forever over a server-rejected equip.
+        S.loadoutRetryAfter=now+45
+        S.loadoutEquipAttempts=0
+        warnOnce("Auto Equip Loadout: retrying later; verify the saved characters are available")
+    end
+end
+
 local function stopSpeedAutomation(reason)
     S.autoSpeedRaid=false
     S.speedPendingCharacter=""
@@ -1290,6 +1475,9 @@ local function requestSpeedRaid()
         end
     end
     S.speedPendingCharacter=""
+    S.speedRestorePending=false
+    S.speedRestoreLobbyEpoch=0
+    S.speedOriginalCharacter=""
     savePreferences()
     return false
 end
@@ -1441,6 +1629,9 @@ local function specialLobbyTick()
         and S.modeFromJobId~=game.JobId
     if S.modeWasInBattle or cameBackToNewServer then
         S.modeWasInBattle=false
+        if S.autoEquipLoadout and preferredLoadoutValid() then
+            S.loadoutPriorityHoldUntil=os.clock()+18
+        end
         S.modeIntent="";S.modeRequestAt=0;S.modeFromPlace=game.PlaceId
         S.modeFromJobId=game.JobId
         savePreferences()
@@ -1464,6 +1655,11 @@ local function specialLobbyTick()
     if os.time() < (S.reconnectResumeEpoch or 0) then return end
     -- Avoid competing with a room that was already created by Auto Start.
     if S.lobbyBusy or S.createdOwnRoom or (S.speedRestorePending and regularLobby()) then return end
+    -- After Speed Raid or first boot, allow the selected permanent loadout a
+    -- short, bounded window to equip before the next mode priority request.
+    if S.autoEquipLoadout and preferredLoadoutValid()
+        and not preferredLoadoutMatches()
+        and now < (S.loadoutPriorityHoldUntil or 0) then return end
     S.specialBusy=true
     S.specialBusySince=os.clock()
     S.specialWorkerGeneration=(S.specialWorkerGeneration or 0)+1
@@ -3292,11 +3488,11 @@ local function buildUI()
     local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
     local window = Rayfield:CreateWindow({
         name = "HollowMoonHub",
-        subtitle = "Anime Dimensions | v35",
+        subtitle = "Anime Dimensions | v37",
         sidebarLayout = true,
     })
     S.window = window
-    window:CreateTag({text = "v35"})
+    window:CreateTag({text = "v37"})
 
     window:CreateSection({name="AUTOMATION"})
 
@@ -3772,6 +3968,102 @@ local function buildUI()
     local function buildPlayerTab()
         window:CreateSection({name="INVENTORY & REWARDS"})
         local playerTab=window:CreateTab({name="Player"})
+        playerTab:CreateSection({name="Character Loadout"})
+        local ownedOptions=ownedLoadoutOptions()
+        local loadoutRow=playerTab:CreateGroup({direction="row"})
+        local mainCol=loadoutRow:CreateGroup({direction="column"})
+        local assistCol=loadoutRow:CreateGroup({direction="column"})
+        mainCol:CreateSection({name="Main Character"})
+        assistCol:CreateSection({name="Assist Characters"})
+        local loadoutDrops={}
+        local function addLoadoutDropdown(column,label,slot,flag)
+            local current=S.preferredLoadout[slot]
+            local initial="Select Character"
+            for _,name in ipairs(ownedOptions) do
+                if current==name then initial=current;break end
+            end
+            loadoutDrops[slot]=column:CreateDropdown({
+                name=label,flag=flag,options=ownedOptions,value=initial,
+                callback=function(value)
+                    if type(value)=="table" then value=value[1] end
+                    if type(value)~="string" then return end
+                    local allowed=value=="Select Character"
+                    if not allowed then
+                        for _,name in ipairs(ownedOptions) do
+                            if value==name then allowed=true;break end
+                        end
+                    end
+                    if not allowed then return end
+                    S.preferredLoadout[slot]=(value=="Select Character") and "" or value
+                    S.loadoutEquipAttempts=0
+                    S.loadoutRetryAfter=0
+                    S.loadoutPriorityHoldUntil=os.clock()+18
+                    if S.autoEquipLoadout and not preferredLoadoutValid() then
+                        warnOnce("Loadout: select three DIFFERENT characters to activate Auto Equip")
+                    end
+                    savePreferences()
+                end,
+            })
+        end
+        addLoadoutDropdown(mainCol,"Main Character","main","AD37_LoadoutMain")
+        addLoadoutDropdown(assistCol,"Assist 1 (E)","assist1","AD37_LoadoutAssist1")
+        addLoadoutDropdown(assistCol,"Assist 2 (R)","assist2","AD37_LoadoutAssist2")
+
+        -- Rebuild ONLY when the collection changes. Preserve each user's
+        -- selected preset through dropdown refresh (Refresh prunes values).
+        local lastOptions=table.concat(ownedOptions,"\0")
+        local function refreshLoadoutDropdowns(force)
+            if not S.alive then return end
+            local updated,complete=ownedLoadoutOptions()
+            if #updated<=1 and #ownedOptions>1 then return end
+            local fingerprint=table.concat(updated,"\0")
+            if not force and fingerprint==lastOptions then return end
+            ownedOptions=updated
+            lastOptions=fingerprint
+            for slot,drop in pairs(loadoutDrops) do
+                pcall(function()
+                    drop:Refresh(ownedOptions)
+                    local selected=S.preferredLoadout[slot]
+                    local choice="Select Character"
+                    for _,name in ipairs(ownedOptions) do
+                        if name==selected then choice=selected;break end
+                    end
+                    drop:Set(choice,true) -- do not overwrite the saved preset
+                end)
+            end
+        end
+        S.refreshLoadoutChoices=refreshLoadoutDropdowns
+        mainCol:CreateButton({name="Refresh Owned Characters",callback=function()
+            refreshLoadoutDropdowns(true)
+            if #ownedOptions<=1 then
+                warnOnce("Owned characters are still loading; open the game's Character Inventory and try again")
+            end
+        end})
+        -- Update immediately when the native UpdateCollection event arrives.
+        -- Also updated in the central lobby loop as a missed-event fallback.
+        if remote then
+            S.connections[#S.connections+1]=remote.OnClientEvent:Connect(function(action)
+                if action=="UpdateCollection" then
+                    task.delay(0.15,function()
+                        if S.alive then pcall(refreshLoadoutDropdowns) end
+                    end)
+                end
+            end)
+        end
+        mainCol:CreateToggle({
+            name="Auto Equip Loadout",flag="AD37_AutoEquipLoadout",value=S.autoEquipLoadout,
+            callback=function(on)
+                S.autoEquipLoadout=on==true
+                S.loadoutEquipAttempts=0
+                S.loadoutRetryAfter=0
+                S.loadoutPriorityHoldUntil=os.clock()+18
+                if S.autoEquipLoadout and not preferredLoadoutValid() then
+                    warnOnce("Auto Equip Loadout: first select a different owned character in each slot")
+                end
+                savePreferences()
+            end,
+        })
+        playerTab:CreateDivider({spacing=6})
         playerTab:CreateSection({name="Card Management"})
         local selectedCardRarities={}
         for _,rarity in ipairs(CARD_SELL_RARITIES) do
@@ -4009,9 +4301,16 @@ end)
 -- After the UI is available, run exactly one scheduler for all special modes.
 task.spawn(function()
     while S.alive do
+        if inLobby() and type(S.refreshLoadoutChoices)=="function" then
+            -- The collection might load after UI creation or in the Raid Lobby.
+            local refreshOK,refreshErr=pcall(S.refreshLoadoutChoices)
+            if not refreshOK then warnOnce("Character list refresh: "..tostring(refreshErr)) end
+        end
         if regularLobby() then
             local restoreOk,restoreErr=pcall(restoreSpeedCharacter)
             if not restoreOk then warnOnce(restoreErr) end
+            local equipOk,equipErr=pcall(autoEquipPreferredLoadoutTick)
+            if not equipOk then warnOnce(equipErr) end
             local savedOk,savedErr=pcall(rememberEquippedLoadout)
             if not savedOk then warnOnce(savedErr) end
         end
@@ -4031,7 +4330,7 @@ end)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV35
+local priorBoot = env.HollowMoonADStartupV37
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -4042,7 +4341,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV35 = boot
+env.HollowMoonADStartupV37 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -4108,7 +4407,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV35 ~= boot then return end
+    if env.HollowMoonADStartupV37 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -4125,13 +4424,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v35] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v37] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v35] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v37] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -4139,16 +4438,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v35_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v37_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v35] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v37] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v35] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v37] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
