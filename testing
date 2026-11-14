@@ -1,12 +1,12 @@
--- HMH_ANIME_DIMENSIONS_V54
--- HollowMoonHub | Anime Dimensions v54 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V56
+-- HollowMoonHub | Anime Dimensions v56 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V54
--- HMH_AD_CORE_ADLER32:1081b92d
--- HollowMoonHub | Anime Dimensions v54 (boss priority + nearby safe attack positions) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V56
+-- HMH_AD_CORE_ADLER32:0e944341
+-- HollowMoonHub | Anime Dimensions v56 (cards + persistent auto sell + display names) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -137,6 +137,11 @@ local S = {
     autoClaimQuests = false,
     autoClaimSpeedRaidWeekly = false,
     autoSellCards = false,
+    autoEquipCards = false,
+    cardEquipPriority = "Highest Level",
+    cardEquipRetryAt = 0,
+    cardInventoryFingerprint = "",
+    cardInventoryStableSince = 0,
     cardSellRarities = {}, -- only specifically selected rarities may be enabled
     cardSellStrictV34Reviewed = false, -- disable any legacy auto-sell settings once on upgrade
     queuedAutoExecute = false,
@@ -296,6 +301,7 @@ local PERSIST_KEYS = {
     "autoAttack", "autoSkills", "autoFarm", "autoDodge",
     "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "reconnectResumeEpoch", "autoExecute",
     "autoClaimQuests", "autoClaimSpeedRaidWeekly", "autoSellCards", "cardSellRarities", "cardSellStrictV34Reviewed",
+    "autoEquipCards", "cardEquipPriority",
     "farmMethod", "tweenSpeed", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
 }
 local function savePreferences()
@@ -308,7 +314,7 @@ local function savePreferences()
     local wrote = pcall(writefile, STATE_FILE, encoded)
     if not wrote and not S.dataFolderWarningShown then
         S.dataFolderWarningShown = true
-        warn("[HollowMoonHub AD v54] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
+        warn("[HollowMoonHub AD v56] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
     end
     return wrote
 end
@@ -325,6 +331,9 @@ local function loadPreferences()
     S.startDelay = math.clamp(math.floor(tonumber(S.startDelay) or 3), 1, 10)
     S.matchesToLeave = math.clamp(math.floor(tonumber(S.matchesToLeave) or 10), 1, 99999)
     S.tweenSpeed = math.clamp(tonumber(S.tweenSpeed) or 120, 40, 650)
+    local validCardPriority = { ["Highest Level"]=true, ["Highest Rarity"]=true,
+        ["Highest Attack"]=true, ["Highest Health"]=true }
+    if not validCardPriority[S.cardEquipPriority] then S.cardEquipPriority="Highest Level" end
     if type(S.knownOwnedCharacters) ~= "table" then S.knownOwnedCharacters = {} end
     S.knownOwnedComplete = S.knownOwnedComplete == true
     S.matchesCompleted = math.max(0, math.floor(tonumber(S.matchesCompleted) or 0))
@@ -346,7 +355,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v54] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v56] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -359,7 +368,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v54] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v56] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -397,12 +406,11 @@ end
 -- Give Auto Equip a short opportunity to restore after every fresh lobby boot
 -- before a higher-priority mode can queue another teleport.
 S.loadoutPriorityHoldUntil=os.clock()+18
--- v32 could re-enable previously saved native card auto-sell rarities even
--- when those rarities were NOT selected in HollowMoonHub. One-time fail-safe:
--- disable Auto Sell until the user re-confirms their selections in v34.
+-- Preserve explicit Auto Sell intent on upgrades. Native rarity flags are
+-- reconciled strictly from the selected rarity list; never clear the user's
+-- own ON toggle as an implicit version migration.
 if not S.cardSellStrictV34Reviewed then
     S.cardSellStrictV34Reviewed = true
-    S.autoSellCards = false
     if type(S.cardSellRarities) ~= "table" then S.cardSellRarities = {} end
     savePreferences()
 end
@@ -452,10 +460,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v54 or newer; reject old cached builds that lack
+-- GitHub must host v56 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V54"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V56"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -467,7 +475,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v54 main entry adds a second gate for
+        -- until player stats load; the v56 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -483,7 +491,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v54] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v56] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -507,7 +515,7 @@ local function installTeleportBootstrap()
         -- First try GitHub with a fresh cache key, then the plain URL for
         -- executors that do not accept cache-busting query strings.
         local fetchOK, code = pcall(function()
-            return game:HttpGet(url .. "?hmh_ad_v54=" .. tostring(os.time()), true)
+            return game:HttpGet(url .. "?hmh_ad_v56=" .. tostring(os.time()), true)
         end)
         if not fetchOK or type(code) ~= "string" or #code == 0 then
             fetchOK, code = pcall(function() return game:HttpGet(url) end)
@@ -529,7 +537,7 @@ local function installTeleportBootstrap()
             local header = source:sub(1, 4096):gsub("^%s+", "")
             local firstLine = header:match("^[^\r\n]+") or "<empty>"
             local version = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-            local supported = version ~= nil and version >= 54
+            local supported = version ~= nil and version >= 55
                 and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
                 and header:find("6938803436", 1, true) ~= nil
                 and header:find("6990129309", 1, true) ~= nil
@@ -552,11 +560,11 @@ local function installTeleportBootstrap()
             local validLocal = localOK and acceptedHeader(localCode, true)
             if validLocal then
                 code = localCode
-                warn("[HollowMoonHub AD v54] GitHub returned " .. remoteHeader
-                    .. "; using verified local v54 core. Update the GitHub testing file to v54.")
+                warn("[HollowMoonHub AD v56] GitHub returned " .. remoteHeader
+                    .. "; using verified local v56 core. Update the GitHub testing file to v56.")
             else
-                warn("[HollowMoonHub AD v54] GitHub returned " .. remoteHeader
-                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v54.")
+                warn("[HollowMoonHub AD v56] GitHub returned " .. remoteHeader
+                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v56.")
                 return
             end
         end
@@ -578,17 +586,17 @@ local function installTeleportBootstrap()
             task.wait(0.2)
         end
         if not localReady then
-            warn("[HollowMoonHub AD v54] Auto Execute aborted: character/client library not ready")
+            warn("[HollowMoonHub AD v56] Auto Execute aborted: character/client library not ready")
             return
         end
         task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v54] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v56] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v54] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v56] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -1222,6 +1230,30 @@ local function collectedCharacters()
     if changed then savePreferences() end
     if not next(names) then return nil,false end
     return names,S.knownOwnedComplete==true,nativeCount,inventoryCount,equippedCount
+end
+
+-- The game stores internal character keys in stats/remotes but presents
+-- CharacterSettings[key].displayName to the player. Keep internal IDs in
+-- saved selections and use reversible labels ONLY in dropdowns.
+local function displayCharacterOptions(rawOptions)
+    local cfg = (getSettings() or {}).CharacterSettings or {}
+    local labels, toRaw, toLabel, counts = {}, {}, {}, {}
+    for _, raw in ipairs(rawOptions) do
+        local item = cfg[raw]
+        local label = item and type(item.displayName)=="string"
+            and item.displayName ~= "" and item.displayName or raw
+        counts[label] = (counts[label] or 0) + 1
+    end
+    for _, raw in ipairs(rawOptions) do
+        local item = cfg[raw]
+        local label = item and type(item.displayName)=="string"
+            and item.displayName ~= "" and item.displayName or raw
+        if counts[label] > 1 then label = label .. " [" .. raw .. "]" end
+        labels[#labels+1] = label
+        toRaw[label] = raw
+        toLabel[raw] = label
+    end
+    return labels, toRaw, toLabel
 end
 
 local function ownedLoadoutOptions()
@@ -4238,20 +4270,19 @@ end
 local function applyNativeCardSell(force)
     if not S.alive then return false end
     local flags, complete = nativeCardSellSettings()
-    if not flags then return false end
-
-    -- This toggle fully owns the game's native auto-sell configuration.
-    -- ON: only selected rarities are enabled (others explicitly OFF).
-    -- OFF: every native card auto-sell setting is OFF, avoiding surprises.
-    -- Fail closed when a rarity stat has not loaded: disable available flags
-    -- until all six can be reconciled, rather than accidentally leaving an
-    -- unselected rarity enabled.
-    local enabled = complete and S.autoSellCards and hasChosenCardRarity()
-    local allAligned = complete
+    -- Teleport loads StatDisplay one value at a time. Missing flags DO NOT
+    -- mean the user disabled selling; never send OFF to partial data.
+    if not complete or not flags then return false end
+    -- A normal startup with our toggle disabled must not erase independent
+    -- native game settings. Explicit OFF via the Oasis toggle uses force=true.
+    if not S.autoSellCards and not force then return true end
+    if S.autoSellCards and not hasChosenCardRarity() then return false end
+    local enabled = S.autoSellCards and hasChosenCardRarity()
+    local allAligned = true
     for _, rarity in ipairs(CARD_SELL_RARITIES) do
         local desired = enabled and S.cardSellRarities[rarity] == true or false
         local flag = flags[rarity]
-        if flag and flag.Value ~= desired then
+        if flag.Value ~= desired then
             allAligned = false
             local name = "Setting_AutoSell" .. rarity
             local now = os.clock()
@@ -4265,6 +4296,156 @@ local function applyNativeCardSell(force)
         end
     end
     return allAligned
+end
+
+-- CARD EQUIPMENT: use the game's InventoryModule cache and its native
+-- MainRemoteFunction EquipCard/UnequipCard actions (CardOverlay client API).
+-- No guessed remotes, server-side inventory changes, or new workspace files.
+S.cardEquipPriorities = {
+    "Highest Level", "Highest Rarity", "Highest Attack", "Highest Health"
+}
+S.cardFormulaModule = nil
+S.cardInventoryRetryAt = -math.huge
+S.getCurrentCardInventory = function()
+    if os.clock() < S.cardInventoryRetryAt then return nil end
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    local mods = gui and gui:FindFirstChild("Modules")
+    local inst = mods and mods:FindFirstChild("InventoryModule")
+    if not inst then return nil end
+    local ok, module = pcall(require, inst)
+    if not ok or type(module)~="table" or type(module.returnInventory)~="function" then
+        S.cardInventoryRetryAt = os.clock() + 3
+        return nil
+    end
+    local okInventory, inv = pcall(module.returnInventory)
+    if okInventory and type(inv)=="table" and type(inv.Cards)=="table" then
+        return inv
+    end
+    return nil
+end
+S.cardStatScores = function(card)
+    local attack, health = tonumber(card.Attack) or 0, tonumber(card.Health) or 0
+    if not S.cardFormulaModule then
+        local inst = ReplicatedStorage:FindFirstChild("Modules")
+        inst = inst and inst:FindFirstChild("FormulaModule")
+        if inst then
+            local ok, module = pcall(require, inst)
+            if ok and type(module)=="table" then S.cardFormulaModule=module end
+        end
+    end
+    local f = S.cardFormulaModule and S.cardFormulaModule.returnAttackAndHealthFromCard
+    if type(f)=="function" then
+        local ok, data = pcall(f, card)
+        if ok and type(data)=="table" then
+            attack = tonumber(data.Attack) or attack
+            health = tonumber(data.Health) or tonumber(data.CardHealth) or health
+        end
+    end
+    return attack, health
+end
+S.rankedCards = function(inventory, settings)
+    local eligible = {}
+    local cfg = settings.CardInfo or {}
+    local rarities = (settings.MiscRaritySettings or {}).RarityToNumber or {}
+    local inOtherLoadout = inventory.OtherLoadoutItems or {}
+    for key, card in pairs(inventory.Cards) do
+        if type(card)=="table" then
+            local info = cfg[card.CardName]
+            local uid = card.Unique_ID or key
+            if info and not info.isUpgradeMaterial and uid ~= nil
+                and (card.Equipped == true or not inOtherLoadout[uid]) then
+                local attack, health = tonumber(card.Attack) or 0, tonumber(card.Health) or 0
+                if S.cardEquipPriority=="Highest Attack" or S.cardEquipPriority=="Highest Health" then
+                    attack,health = S.cardStatScores(card)
+                end
+                eligible[#eligible+1] = {
+                    uid = uid, equipped = card.Equipped == true,
+                    level = tonumber(card.LevelReq) or 0,
+                    upgrade = tonumber(card.Level) or 0,
+                    rarity = tonumber(rarities[card.IsDivine and "Divine" or info.rarity]) or 0,
+                    attack = attack, health = health,
+                }
+            end
+        end
+    end
+    local priority = S.cardEquipPriority
+    local function keys(v)
+        if priority == "Highest Rarity" then
+            return {v.rarity, v.level, v.upgrade, v.attack}
+        elseif priority == "Highest Attack" then
+            return {v.attack, v.level, v.rarity, v.upgrade}
+        elseif priority == "Highest Health" then
+            return {v.health, v.level, v.rarity, v.upgrade}
+        end
+        return {v.level, v.upgrade, v.rarity, v.attack}
+    end
+    table.sort(eligible, function(a,b)
+        local x,y = keys(a),keys(b)
+        for i=1,#x do if x[i]~=y[i] then return x[i]>y[i] end end
+        return tostring(a.uid)<tostring(b.uid)
+    end)
+    return eligible
+end
+S.autoEquipCardsTick = function()
+    if not (S.alive and S.autoEquipCards and inLobby() and statsReady()) then return end
+    local now=os.clock()
+    if now < (S.cardEquipRetryAt or 0) then return end
+    local inventory=S.getCurrentCardInventory()
+    if not inventory then return end
+    local settings=getSettings()
+    if not (settings and type(settings.CardInfo)=="table" and mainFunction) then return end
+    -- A half-filled inventory on a new server is not a trustworthy snapshot.
+    local count, fingerprint = 0, {}
+    for key,card in pairs(inventory.Cards) do
+        if type(card)=="table" then
+            count=count+1
+            fingerprint[#fingerprint+1]=tostring(card.Unique_ID or key)
+        end
+    end
+    if count==0 then return end
+    table.sort(fingerprint)
+    local signature=table.concat(fingerprint,"|")
+    if signature~=S.cardInventoryFingerprint then
+        S.cardInventoryFingerprint=signature
+        S.cardInventoryStableSince=now
+        return
+    end
+    if now - (S.cardInventoryStableSince or now) < 2 then return end
+    local sorted=S.rankedCards(inventory, settings)
+    if #sorted==0 then return end
+    local slotInfo=settings.CardSlotInfo
+    local limit=type(slotInfo)=="table" and math.min(#slotInfo,3) or 3
+    if limit<=0 then return end
+    local wanted, equipped = {}, {}
+    for i=1,math.min(limit,#sorted) do wanted[tostring(sorted[i].uid)]=true end
+    for _,row in ipairs(sorted) do
+        if row.equipped then equipped[#equipped+1]=row end
+    end
+    local action, chosen
+    -- Unequip only if the current set actually conflicts with the target set.
+    for _,row in ipairs(equipped) do
+        if not wanted[tostring(row.uid)] then
+            action,chosen="UnequipCard",row.uid
+            break
+        end
+    end
+    if not action and #equipped < limit then
+        for i=1,math.min(limit,#sorted) do
+            if not sorted[i].equipped then
+                action,chosen="EquipCard",sorted[i].uid
+                break
+            end
+        end
+    end
+    if not action then return end
+    S.cardEquipRetryAt=now+2.2 -- exactly one native action per change
+    local ok,result=pcall(function() return mainFunction:InvokeServer(action, chosen) end)
+    local accepted=ok and (result=="Success" or (type(result)=="table" and result.status=="Success"))
+    if not accepted then
+        S.cardEquipRetryAt=now+9
+        local reason=type(result)=="table" and result.message or tostring(result)
+        warnOnce("Auto Equip Cards: "..action.." rejected: "..tostring(reason))
+    end
 end
 
 -- These are deliberately lightweight periodic workers, not per-Heartbeat
@@ -4290,20 +4471,29 @@ task.spawn(function()
 end)
 task.spawn(function()
     while S.alive do
-        -- Reconcile OFF as well as ON. In particular, disable any stale native
-        -- rarity flags left active by v32, the game UI, or a previous session.
+        -- Only reconcile when the user enabled Auto Sell in HollowMoonHub.
+        -- Never turn off native flags because of teleport or unload.
         local ok, err = pcall(applyNativeCardSell)
         if not ok then warnOnce("Card sell worker: " .. tostring(err)) end
         task.wait(0.9)
     end
 end)
 
+task.spawn(function()
+    while S.alive do
+        if S.autoEquipCards and inLobby() then
+            local ok,err=pcall(S.autoEquipCardsTick)
+            if not ok then warnOnce("Card equip worker: "..tostring(err)) end
+        end
+        task.wait(1.35)
+    end
+end)
+
 function S.Unload(manual)
     if not S.alive then return end
     if manual == true then S.autoExecute = false end
-    -- Strict mode: leaving the script must not reactivate unselected rarities.
-    S.autoSellCards = false
-    pcall(applyNativeCardSell, true)
+    -- Keep the user's Auto Sell preference AND the game's native flags on
+    -- unload, teleport, and re-execution. Next core reconciles on arrival.
     savePreferences()
     S.alive = false
     S.autoFarm, S.autoAttack, S.autoSkills, S.autoDodge = false, false, false, false
@@ -4319,7 +4509,7 @@ function S.Unload(manual)
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v54 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v56 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -4327,7 +4517,61 @@ end
 -- Oasis manages its own visual preferences, themes, favorites and keybinds.
 -- The script's existing JSON state remains the authority for automation
 -- because it persists across the lobby/battle place transition.
+-- v56: OasisUI used "HollowMoonHub_AD_Oasis" until v54. v56 moved the
+-- window folder but did not migrate its named UI configurations. This copies
+-- the old profiles into the game folder WITHOUT overwriting new v56 profiles.
+-- Do not delete source files: the user can verify and remove them manually.
+S.migrateOasisFiles = function()
+    if S.oasisMigrationAttempted then return end
+    S.oasisMigrationAttempted = true
+    if type(readfile) ~= "function" or type(writefile) ~= "function" then return end
+    ensureDataFolder()
+    local oldFolder = "HollowMoonHub_AD_Oasis"
+    local copied = 0
+    local function readText(path)
+        local ok, data = pcall(readfile, path)
+        if ok and type(data) == "string" then return data end
+        return nil
+    end
+    local function copyAbsent(source, destination, alternateSource)
+        -- Prefer a newer config already saved to the new folder.
+        if readText(destination) ~= nil then return false end
+        local data = readText(source)
+        if data == nil and alternateSource then data = readText(alternateSource) end
+        if data == nil then return false end
+        local success = pcall(writefile, destination, data)
+        if success then copied = copied + 1 end
+        return success
+    end
+    local function copyJsonDir(folderName)
+        if type(listfiles) ~= "function" then return end
+        local sourceDir = oldFolder .. "/" .. folderName
+        local destinationDir = DATA_FOLDER .. "/" .. folderName
+        if type(makefolder) == "function" then pcall(makefolder, destinationDir) end
+        local ok, files = pcall(listfiles, sourceDir)
+        if not ok or type(files) ~= "table" then return end
+        for _, path in ipairs(files) do
+            if type(path) == "string" then
+                local fileName = path:gsub("\\", "/"):match("([^/]+)$")
+                if fileName and fileName:match("^[^/\\]+%.json$") then
+                    copyAbsent(path, destinationDir .. "/" .. fileName,
+                        sourceDir .. "/" .. fileName)
+                end
+            end
+        end
+    end
+    copyJsonDir("configs")
+    copyJsonDir("themes")
+    -- OasisUI also persists themes/layout in ui.json, and the chosen autoload
+    -- profile in configs/autoload.txt. Move both before window initialization.
+    copyAbsent(oldFolder .. "/ui.json", DATA_FOLDER .. "/ui.json")
+    copyAbsent(oldFolder .. "/configs/autoload.txt",
+        DATA_FOLDER .. "/configs/autoload.txt")
+    S.oasisFilesMigrated = copied
+end
+
 local function buildUI()
+    S.migrateOasisFiles()
     local OASIS_URL = "https://raw.githubusercontent.com/Mold53/OasisUI/v1.9.0/dist/OasisUI.lua"
     local okFetch, source = pcall(function() return game:HttpGet(OASIS_URL) end)
     if not okFetch or type(source) ~= "string" or not source:find("OasisUI", 1, true) then
@@ -4356,7 +4600,7 @@ local function buildUI()
         Title = "[🎃] Anime Dimensions",
         Subtitle = "By | HollowMoonHub",
         Icon = "moon-star",
-        Folder = "HollowMoonHub_AD_Oasis",
+        Folder = "HollowMoonHub/AnimeDimensions",
         GuiName = "HollowMoonHub_AD_Oasis",
         Theme = "Obsidian",
         ToggleKey = Enum.KeyCode.RightShift,
@@ -4618,13 +4862,30 @@ local function buildUI()
 
     local function buildSpeedControls()
         local characterCard = section(speed, "Weekly Character", "users", "Left")
+        local speedLabels, speedToRaw, speedToLabel = displayCharacterOptions(speedCharacterOptions())
+        local refreshingSpeed = false
         local characterDrop = dropdown(characterCard, "Speed Raid Character", "AD24_SpeedCharacter",
-            speedCharacterOptions(), S.speedCharacterChoice, function(v)
+            speedLabels, speedToLabel[S.speedCharacterChoice] or "Auto — Next Unused", function(v)
+            if refreshingSpeed then return end
             v = one(v)
-            if type(v) == "string" then S.speedCharacterChoice = v; savePreferences() end
+            local raw = speedToRaw[v]
+            if type(raw) == "string" then
+                S.speedCharacterChoice = raw -- IDs only, never display labels
+                S.speedSkipUntil = 0 -- new choice can be eligible this week
+                savePreferences()
+            end
         end)
         button(characterCard, "Refresh Owned Characters", function()
-            pcall(function() characterDrop:Refresh(speedCharacterOptions(), true) end)
+            local nextLabels, nextToRaw, nextToLabel = displayCharacterOptions(speedCharacterOptions())
+            refreshingSpeed = true
+            speedLabels, speedToRaw, speedToLabel = nextLabels, nextToRaw, nextToLabel
+            pcall(function()
+                characterDrop:Refresh(speedLabels, true)
+                if type(characterDrop.Set)=="function" then
+                    characterDrop:Set(speedToLabel[S.speedCharacterChoice] or "Auto — Next Unused", true)
+                end
+            end)
+            refreshingSpeed = false
         end, "refresh-cw")
         S.speedRaidToggle = module(speed, "Auto Start Speed Raid", "zap", "Right", "autoSpeedRaid", "AD24_AutoSpeedRaid",
             "Runs the selected available weekly character.", function(on)
@@ -4824,26 +5085,26 @@ local function buildUI()
     -- PLAYER: owned loadout and rarity safety are untouched.
     window:TabSection("INVENTORY & REWARDS")
     local playerTab = window:Tab({ Title = "Player", Icon = "user", Columns = 2 })
-    local characterCard = section(playerTab, "Character Loadout", "users", "Left")
-    local assistCard = section(playerTab, "Assist Characters", "users-round", "Right")
-    local ownedOptions = ownedLoadoutOptions()
+    local charactersSub = playerTab:SubTab({ Title = "Characters", Icon = "users" })
+    local cardsSub = playerTab:SubTab({ Title = "Cards", Icon = "layers" })
+    local characterCard = section(charactersSub, "Character Loadout", "users", "Left")
+    local assistCard = section(charactersSub, "Assist Characters", "users-round", "Right")
+    local rawOwnedOptions = ownedLoadoutOptions()
+    local ownedOptions, ownedToRaw, ownedToLabel = displayCharacterOptions(rawOwnedOptions)
     local loadoutDrops = {}
     local function loadoutDrop(parent, title, slot, flag)
         local current = S.preferredLoadout[slot]
         local initial = "Select Character"
-        for _, name in ipairs(ownedOptions) do if current == name then initial = current; break end end
+        initial = ownedToLabel[current] or "Select Character"
         loadoutDrops[slot] = dropdown(parent, title, flag, ownedOptions, initial, function(value)
             -- Refresh/Set may emit synthetic callbacks; only explicit user
             -- selection is allowed to change their saved permanent preset.
             if S.loadoutDropdownRefreshing then return end
             value = one(value)
             if type(value) ~= "string" then return end
-            local allowed = value == "Select Character"
-            if not allowed then
-                for _, name in ipairs(ownedOptions) do if value == name then allowed = true; break end end
-            end
-            if not allowed then return end
-            S.preferredLoadout[slot] = value == "Select Character" and "" or value
+            local raw = ownedToRaw[value]
+            if not raw then return end
+            S.preferredLoadout[slot] = raw == "Select Character" and "" or raw
             S.loadoutEquipAttempts = 0
             S.loadoutRetryAfter = 0
             S.loadoutPriorityHoldUntil = os.clock() + 18
@@ -4861,11 +5122,13 @@ local function buildUI()
     local lastOptions = table.concat(ownedOptions, "\0")
     local function refreshLoadoutDropdowns(force)
         if not S.alive then return end
-        local updated = ownedLoadoutOptions()
-        if #updated <= 1 and #ownedOptions > 1 then return end
+        local newRawOptions = ownedLoadoutOptions()
+        if #newRawOptions <= 1 and #rawOwnedOptions > 1 then return end
+        local updated, toRaw, toLabel = displayCharacterOptions(newRawOptions)
         local fingerprint = table.concat(updated, "\0")
         if not force and fingerprint == lastOptions then return end
-        ownedOptions = updated
+        rawOwnedOptions, ownedOptions = newRawOptions, updated
+        ownedToRaw, ownedToLabel = toRaw, toLabel
         lastOptions = fingerprint
         S.loadoutDropdownRefreshing=true
         for slot, drop in pairs(loadoutDrops) do
@@ -4876,9 +5139,7 @@ local function buildUI()
                 drop:Refresh(ownedOptions, true)
                 local selectedChoice = S.preferredLoadout[slot]
                 local choice = "Select Character"
-                for _, name in ipairs(ownedOptions) do
-                    if name == selectedChoice then choice = selectedChoice; break end
-                end
+                choice = ownedToLabel[selectedChoice] or "Select Character"
                 -- Set exists on some Oasis builds; Refresh(keep) handles those
                 -- without it. This is deliberately guarded for compatibility.
                 if type(drop.Set)=="function" then drop:Set(choice, true) end
@@ -4931,7 +5192,7 @@ local function buildUI()
         end
         savePreferences()
     end)
-    local cardFilter = section(playerTab, "Card Rarities", "filter", "Left")
+    local cardFilter = section(cardsSub, "Sell Rarities", "filter", "Left")
     local selectedRarities = {}
     for _, rarity in ipairs(CARD_SELL_RARITIES) do
         if S.cardSellRarities[rarity] then selectedRarities[#selectedRarities + 1] = rarity end
@@ -4944,7 +5205,7 @@ local function buildUI()
         savePreferences()
         pcall(applyNativeCardSell, true)
     end, true)
-    local selling = section(playerTab, "Automatic Selling", "trash-2", "Right")
+    local selling = section(cardsSub, "Automatic Selling", "trash-2", "Right")
     toggle(selling, "Auto Sell Cards", "AD33_AutoSellCards", "autoSellCards", function(on)
         S.autoSellCards = on == true
         if S.autoSellCards and not hasChosenCardRarity() then
@@ -4952,6 +5213,26 @@ local function buildUI()
         end
         savePreferences()
         pcall(applyNativeCardSell, true)
+    end)
+    local equipCards = section(cardsSub, "Card Equipment", "layers", "Left")
+    dropdown(equipCards, "Equip Priority", "AD55_CardEquipPriority", S.cardEquipPriorities,
+        S.cardEquipPriority, function(v)
+            v=one(v)
+            for _, allowed in ipairs(S.cardEquipPriorities) do
+                if v==allowed then
+                    S.cardEquipPriority=v
+                    S.cardEquipRetryAt=0
+                    savePreferences()
+                    break
+                end
+            end
+        end)
+    local automaticCards = section(cardsSub, "Automatic Equipping", "shield-check", "Right")
+    toggle(automaticCards, "Auto Equip Cards", "AD55_AutoEquipCards", "autoEquipCards", function(on)
+        S.autoEquipCards=on==true
+        S.cardEquipRetryAt=0
+        S.cardInventoryFingerprint=""
+        savePreferences()
     end)
 
     local misc = window:Tab({ Title = "Misc", Icon = "gift", Columns = 2 })
@@ -5177,7 +5458,7 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
 local priorBoot = env.HollowMoonADStartupV48
-local newVersion = 54
+local newVersion = 55
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId
     and priorBoot.jobId == game.JobId then
     -- Two copies of THIS version must not run simultaneously. But allow
@@ -5276,13 +5557,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v54] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v56] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v54] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v56] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -5292,12 +5573,12 @@ boot.status = "starting"
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v54] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v56] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v54] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v56] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
 -- One stable core cache per game. Create the game folder only if the
@@ -5338,7 +5619,7 @@ if type(writefile) == "function" then
     if overwrite then
         local okWrite = pcall(writefile, cachePath, CORE)
         if not okWrite then
-            warn("[HollowMoonHub AD v54] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
+            warn("[HollowMoonHub AD v56] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
         end
     end
 end
