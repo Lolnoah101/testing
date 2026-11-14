@@ -1,11 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V42
--- HollowMoonHub | Anime Dimensions v42 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V43
+-- HollowMoonHub | Anime Dimensions v43 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V42
--- HollowMoonHub | Anime Dimensions v42 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V43
+-- HollowMoonHub | Anime Dimensions v43 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -49,6 +49,9 @@ local S = {
     savedLoadout = { main = "", assist1 = "", assist2 = "" },
     -- User-defined permanent preset. NEVER take this from a Speed Raid selection.
     preferredLoadout = { main = "", assist1 = "", assist2 = "" },
+    knownOwnedCharacters = {}, -- preserve confirmed owned roster across modes/places
+    knownOwnedComplete = false,
+    loadoutDropdownRefreshing = false,
     autoEquipLoadout = false,
     loadoutEquipAttempts = 0,
     loadoutRetryAfter = 0,
@@ -135,6 +138,7 @@ local S = {
     safeAlternate = nil,
     lastAlternateCheck = -math.huge,
     farmMethod = "Tween",
+    tweenSpeed = 120, -- studs/second, adjustable in OasisUI
     farmPosition = "Above",
     farmDistance = 4,
     selectedSkills = { [1] = true, [2] = true, [3] = true, [4] = true },
@@ -209,7 +213,7 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v42_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v43_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "v30MapReviewed", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
@@ -217,14 +221,14 @@ local PERSIST_KEYS = {
     "autoJoinRaid", "raidMapChoice", "raidDifficultyChoice", "raidFriendsOnly",
     "autoSpeedRaid", "speedCharacterChoice", "speedAutoLeave", "speedUsed", "speedWeek",
     "speedOriginalCharacter", "speedRestorePending", "speedRestoreLobbyEpoch", "speedPendingCharacter", "savedLoadout",
-    "preferredLoadout", "autoEquipLoadout",
+    "preferredLoadout", "autoEquipLoadout", "knownOwnedCharacters", "knownOwnedComplete",
     "autoDailyRaid", "dailyLastRequestedDate", "autoBossRush", "bossAutoRetry", "bossAutoLeave",
     "autoExtreme", "extremeDifficulty", "autoTimeChallenge", "modePriority", "modeIntent", "modeRequestAt",
     "modeFromPlace", "modeFromJobId", "modeWasInBattle", "raidUnavailableUntil",
     "autoAttack", "autoSkills", "autoFarm", "autoDodge",
     "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "reconnectResumeEpoch", "autoExecute",
     "autoClaimQuests", "autoClaimSpeedRaidWeekly", "autoSellCards", "cardSellRarities", "cardSellStrictV34Reviewed",
-    "farmMethod", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
+    "farmMethod", "tweenSpeed", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
 }
 local function savePreferences()
     if type(writefile) ~= "function" then return false end
@@ -247,6 +251,9 @@ local function loadPreferences()
     end
     S.startDelay = math.clamp(math.floor(tonumber(S.startDelay) or 3), 1, 10)
     S.matchesToLeave = math.clamp(math.floor(tonumber(S.matchesToLeave) or 10), 1, 99999)
+    S.tweenSpeed = math.clamp(tonumber(S.tweenSpeed) or 120, 40, 650)
+    if type(S.knownOwnedCharacters) ~= "table" then S.knownOwnedCharacters = {} end
+    S.knownOwnedComplete = S.knownOwnedComplete == true
     S.matchesCompleted = math.max(0, math.floor(tonumber(S.matchesCompleted) or 0))
     -- Persisted settings from old versions may be missing rank keys.
     local fallback = {BossRush=1,DailyRaid=2,SpeedRaid=3,Raid=4,
@@ -264,7 +271,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v42] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v43] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -276,7 +283,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v42] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v43] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -294,13 +301,17 @@ S.loadToggleIntent = function()
 end
 loadPreferences()
 if not S.loadToggleIntent() then
-    -- First v42 execution: seed from previously saved v34 user choices.
+    -- First v43 execution: seed from previously saved v34 user choices.
     S.saveToggleIntent()
 end
-if S.sessionStopped and S.autoStart then
-    warn("[HollowMoonHub AD v39] Match limit reached: Dimensions are intentionally paused until Resume Mode Queue. Auto Start is still ON.")
+-- v43 migration: a match limit is now an automatic return-to-lobby cycle,
+-- never a permanent pause. Clear any legacy paused state on startup.
+if S.sessionStopped then
+    S.sessionStopped = false
+    S.matchesCompleted = 0
+    savePreferences()
 end
--- New v42 loadout choices start empty on purpose: an automatic backup from an
+-- New v43 loadout choices start empty on purpose: an automatic backup from an
 -- older version may already have been overwritten by a temporary Speed Raid
 -- loadout. Users should choose their three permanent slots explicitly once.
 if type(S.preferredLoadout)~="table" then S.preferredLoadout={main="",assist1="",assist2=""} end
@@ -365,10 +376,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v42 or newer; reject old cached builds that lack
+-- GitHub must host v43 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V42"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V43"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -380,7 +391,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v42 main entry adds a second gate for
+        -- until player stats load; the v43 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -396,7 +407,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v42] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v43] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -413,39 +424,39 @@ local function installTeleportBootstrap()
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         -- Bust cached copies of the raw file after updating it in GitHub.
-        local freshURL = url .. "?hmh_ad_v42=" .. tostring(os.time())
+        local freshURL = url .. "?hmh_ad_v43=" .. tostring(os.time())
         local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
         if not ok or type(code) ~= "string" or #code == 0 then
             -- Some executors reject the optional no-cache parameter/query string.
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v42] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v43] GitHub Auto Execute fetch failed")
             return
         end
-        -- Accept v42 and newer, never silently downgrade to a known version
+        -- Accept v43 and newer, never silently downgrade to a known version
         -- that automatically disabled Auto Start/Retry. Future versions remain
         -- valid; unrelated games such as the old AOT GitHub file are blocked.
         local header = code:sub(1, 4096)
         local firstLine = header:match("^[^\r\n]+") or "<empty>"
         local scriptVersion = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-        local validHeader = scriptVersion ~= nil and scriptVersion >= 42
+        local validHeader = scriptVersion ~= nil and scriptVersion >= 43
         local isAnimeDimensions = validHeader
             and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v42] GitHub script missing, unrelated, or older than v42: "
+            warn("[HollowMoonHub AD v43] GitHub script missing, unrelated, or older than v43: "
                 .. firstLine:sub(1, 140) .. ". Not executing; update the testing file on main.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v42] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v43] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v42] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v43] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -908,30 +919,34 @@ local function resultsWorkflowTick(now, visible)
         -- normal Dimensions retry/leave action.
         return
     end
-    if S.sessionStopped then return end -- already reached this session's limit
+    -- Match limits are per run cycle, not a global stop condition.
     if not (S.autoRetry or S.autoLeaveMatches) then return end
     S.matchesCompleted = S.matchesCompleted + 1
     savePreferences()
     local shouldLeave = S.autoLeaveMatches and S.matchesCompleted >= S.matchesToLeave
     if shouldLeave then
-        -- STOP THIS RUN, not the user's saved toggles. The Lobby tab's
-        -- Resume Mode Queue button or a fresh manual Auto Start ON can
-        -- resume; it must not silently rewrite either preference to OFF.
-        S.sessionStopped = true
+        -- Reach the configured number of regular Dimension results, return to
+        -- lobby and begin the NEXT match cycle with Auto Start still enabled.
+        -- Do not set sessionStopped or change either toggle preference.
+        S.matchesCompleted = 0
+        S.sessionStopped = false
         savePreferences()
-        warnOnce("Match limit reached: leaving and pausing Dimensions. Auto Start/Retry preferences are preserved. Use Resume Mode Queue to continue.")
     elseif not S.autoRetry then
         -- Count the completed match but don't take an action until limit.
         return
     end
     task.delay(0.4, function()
-        if not S.alive or not inLobby() and game.PlaceId ~= 6990129309 then return end
+        if not S.alive or game.PlaceId ~= 6990129309 then return end
+        if shouldLeave then
+            -- We already confirmed the match result. A UI transition should
+            -- not cancel the return to lobby just because the panel hid.
+            if remote then remote:FireServer("LeaveDungeon") end
+            return
+        end
         local gui = player:FindFirstChildOfClass("PlayerGui")
         local result = gui and gui:FindFirstChild("ResultUI", true)
         if not (result and result:IsA("GuiObject") and result.Visible) then return end
-        if remote then
-            remote:FireServer(shouldLeave and "LeaveDungeon" or "RetryDungeon")
-        end
+        if remote then remote:FireServer("RetryDungeon") end
     end)
 end
 
@@ -1003,71 +1018,101 @@ local function getCharacterModule()
     local ok, mod=pcall(require,instance)
     return ok and type(mod)=="table" and mod or nil
 end
+-- Ownership is event-driven in the game. The normal CharacterModule cache
+-- may arrive after this script builds the UI; some lobby handoffs only have
+-- currently equipped stats populated. Never turn that *partial* live snapshot
+-- into a destructive refresh of the user's full character list.
 local function collectedCharacters()
     local settings=getSettings()
     local valid=settings and settings.CharacterSettings
     if type(valid)~="table" then return nil,false end
+    if type(S.knownOwnedCharacters)~="table" then S.knownOwnedCharacters={} end
     local names={}
     local nativeCount,inventoryCount,equippedCount=0,0,0
+    local changed=false
+    local function include(name,source)
+        if type(name)~="string" or not valid[name] then return end
+        names[name]=true
+        if S.knownOwnedCharacters[name]~=true then
+            S.knownOwnedCharacters[name]=true
+            changed=true
+        end
+        if source=="native" then nativeCount=nativeCount+1
+        elseif source=="inventory" then inventoryCount=inventoryCount+1
+        elseif source=="equipped" then equippedCount=equippedCount+1 end
+    end
+    -- Reuse already verified ownership across mode-driven character swaps.
+    for name,yes in pairs(S.knownOwnedCharacters) do
+        if yes==true and valid[name] then names[name]=true end
+    end
     local module=getCharacterModule()
-    if module and type(module.returnCharacterCollectedTable)=="function" then
-        -- DO NOT call returnCharacterCollectedTable(true) on the UI thread:
-        -- the native function waits indefinitely for UpdateCollection.
-        local ok, collected=pcall(module.returnCharacterCollectedTable,false)
-        if ok and type(collected)=="table" then
-            for key,has in pairs(collected) do
-                if type(key)=="string" and has and valid[key] then
-                    names[key]=true
-                    nativeCount=nativeCount+1
+    if module then
+        -- returnCharacterCollectedTable is the game-native *character-only* set.
+        if type(module.returnCharacterCollectedTable)=="function" then
+            local ok, collected=pcall(module.returnCharacterCollectedTable,false)
+            if ok and type(collected)=="table" then
+                for name,has in pairs(collected) do
+                    if has then include(name,"native") end
+                end
+            end
+        end
+        -- The combined collection table is a fallback if the specific cache
+        -- wasn't ready. Filter through CharacterSettings to exclude other items.
+        if type(module.returnCollectedTable)=="function" then
+            local ok, collected=pcall(module.returnCollectedTable,false)
+            if ok and type(collected)=="table" then
+                for name,has in pairs(collected) do
+                    if has then include(name,"native") end
                 end
             end
         end
     end
-    -- The game creates a visible CharacterInventorySlot named with the
-    -- exact character ID for each owned character (NOT costumes or shop rows).
     local gui=player:FindFirstChildOfClass("PlayerGui")
     local inventory=gui and gui:FindFirstChild("CharacterInventoryScrollingFrame",true)
     if inventory then
-        for _,slot in ipairs(inventory:GetChildren()) do
-            if slot:IsA("GuiObject") and slot.Visible and valid[slot.Name]
+        -- Do not require the inventory window to be visible/open: entries can
+        -- remain hidden while switching between lobby menus and Speed Raid.
+        for _,slot in ipairs(inventory:GetDescendants()) do
+            if slot:IsA("GuiObject") and valid[slot.Name]
                 and slot:FindFirstChild("CharacterImage")
                 and slot:FindFirstChild("CharacterClick") then
-                names[slot.Name]=true
-                inventoryCount=inventoryCount+1
+                include(slot.Name,"inventory")
             end
         end
     end
-    -- If UpdateCollection has not arrived yet, let the three already
-    -- equipped characters be chosen while the full list is still loading.
     for _,key in ipairs({"CharacterName","AssistCharacterName1","AssistCharacterName2"}) do
-        local name=stat(key)
-        if type(name)=="string" and name~="" and valid[name] then
-            names[name]=true
-            equippedCount=equippedCount+1
-        end
+        include(stat(key),"equipped")
     end
+    if nativeCount>0 or inventoryCount>0 then S.knownOwnedComplete=true end
+    if changed then savePreferences() end
     if not next(names) then return nil,false end
-    -- A native collection or real inventory slots are needed to conclude
-    -- that the ENTIRE owned list has loaded; equipped stats alone are partial.
-    return names,(nativeCount>0 or inventoryCount>0),
-        nativeCount,inventoryCount,equippedCount
+    return names,S.knownOwnedComplete==true,nativeCount,inventoryCount,equippedCount
 end
+
 local function ownedLoadoutOptions()
     local options={"Select Character"}
-    local owned,complete=collectedCharacters()
+    local owned=collectedCharacters()
     local settings=getSettings()
     local config=settings and settings.CharacterSettings or {}
     local names={}
     for name,has in pairs(owned or {}) do
-        if has and config[name] then names[#names+1]=name end
+        if has and config[name] then names[name]=true end
     end
-    table.sort(names,function(a,b)
+    -- The permanent preset must remain visible even when Roblox has only
+    -- replicated the equipped three characters in this place/server.
+    for _,slot in ipairs({"main","assist1","assist2"}) do
+        local name=S.preferredLoadout and S.preferredLoadout[slot]
+        if type(name)=="string" and config[name] then names[name]=true end
+    end
+    local ordered={}
+    for name in pairs(names) do ordered[#ordered+1]=name end
+    table.sort(ordered,function(a,b)
         local ar=tonumber(config[a].collectionRankValue) or 0
         local br=tonumber(config[b].collectionRankValue) or 0
         return ar==br and a<b or ar>br
     end)
-    for _,name in ipairs(names) do options[#options+1]=name end
-    return options,complete
+    for _,name in ipairs(ordered) do options[#options+1]=name end
+    return options,S.knownOwnedComplete==true
 end
 local function speedCharacterOptions()
     local options={"Auto — Next Unused"}
@@ -1757,7 +1802,8 @@ local function specialLobbyTick()
     -- v39: Self-heal the exact same room flags that switching Auto Start
     -- OFF/ON used to clear manually. ONLY rooms created by our regular
     -- Dimensions worker are affected, never public/multiplayer raid queues.
-    if S.sessionStopped and not S.autoLeaveMatches then
+    if S.sessionStopped then
+        -- Recover any old persisted stop flag without touching user toggles.
         S.sessionStopped=false
         S.matchesCompleted=0
         savePreferences()
@@ -3125,20 +3171,22 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         root.AssemblyAngularVelocity = Vector3.zero
         S.smoothPose = goalPose
     else
-        -- Tween mode: one follow controller, no overlapping tweens. Far travel
-        -- gets a high, *bounded* world-space speed so target changes don't
-        -- take seconds; near the target it damps the final few studs smoothly.
+        -- Visibly smooth, continuous Tween-style follow at the user's chosen
+        -- world-space speed. Old builds used 550-950 studs/sec and a huge
+        -- exponential correction, making ordinary travel look like teleport.
+        -- Dodge can temporarily travel faster to escape imminent strikes.
         local current = root.CFrame
-        local safeDt = math.clamp(dt, 0, 0.08)
-        local returning = not dodgeOverride and now < S.dodgeResumeUntil
-        local rate = dodgeOverride and 65 or (returning and 50 or (now - (S.targetChangedAt or -HUGE) < 0.3 and 42 or 28))
-        local alpha = 1 - math.exp(-safeDt * rate)
+        local safeDt = math.clamp(dt, 0, 0.07)
+        local speed = math.clamp(tonumber(S.tweenSpeed) or 120, 40, 650)
+        if dodgeOverride then speed = math.max(speed, 250) end
+        local alpha = 1 - math.exp(-safeDt * (dodgeOverride and 14 or 9))
         local delta = goalPose.Position - current.Position
         local magnitude = delta.Magnitude
-        local newPosition = goalPose.Position
-        if magnitude > 0.04 then
-            local maxSpeed = dodgeOverride and 1300 or (returning and 1000 or (magnitude > 35 and 950 or 550))
-            local step = math.min(magnitude, magnitude * alpha, maxSpeed * safeDt)
+        local newPosition = current.Position
+        if magnitude > 0.025 then
+            -- Constant speed on long travel; soft easing in the last few studs.
+            local step = math.min(magnitude, speed * safeDt, magnitude * alpha)
+            if magnitude > 8 then step = math.min(magnitude, speed * safeDt) end
             newPosition = current.Position + delta.Unit * step
         end
         local rotated = current:Lerp(CFrame.new(current.Position) * goalPose.Rotation, alpha)
@@ -3734,7 +3782,7 @@ function S.Unload()
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v42 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v43 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -4202,6 +4250,13 @@ local function buildUI()
             savePreferences()
         end
     end)
+    slider(moving, "Tween Speed", "AD43_TweenSpeed", 40, 650, S.tweenSpeed, 10, " studs/s", function(v)
+        local n = tonumber(v)
+        if n then
+            S.tweenSpeed = math.clamp(n, 40, 650)
+            savePreferences()
+        end
+    end)
     dropdown(moving, "Farm Position", "AD15_FarmPosition", { "Above", "Behind", "Below" }, S.farmPosition, function(v)
         v = one(v)
         if v == "Above" or v == "Behind" or v == "Below" then
@@ -4230,6 +4285,9 @@ local function buildUI()
         local initial = "Select Character"
         for _, name in ipairs(ownedOptions) do if current == name then initial = current; break end end
         loadoutDrops[slot] = dropdown(parent, title, flag, ownedOptions, initial, function(value)
+            -- Refresh/Set may emit synthetic callbacks; only explicit user
+            -- selection is allowed to change their saved permanent preset.
+            if S.loadoutDropdownRefreshing then return end
             value = one(value)
             if type(value) ~= "string" then return end
             local allowed = value == "Select Character"
@@ -4247,9 +4305,11 @@ local function buildUI()
             savePreferences()
         end)
     end
+    S.loadoutDropdownRefreshing=true
     loadoutDrop(characterCard, "Main Character", "main", "AD37_LoadoutMain")
     loadoutDrop(assistCard, "Assist 1 (E)", "assist1", "AD37_LoadoutAssist1")
     loadoutDrop(assistCard, "Assist 2 (R)", "assist2", "AD37_LoadoutAssist2")
+    S.loadoutDropdownRefreshing=false
     local lastOptions = table.concat(ownedOptions, "\0")
     local function refreshLoadoutDropdowns(force)
         if not S.alive then return end
@@ -4259,28 +4319,54 @@ local function buildUI()
         if not force and fingerprint == lastOptions then return end
         ownedOptions = updated
         lastOptions = fingerprint
+        S.loadoutDropdownRefreshing=true
         for slot, drop in pairs(loadoutDrops) do
             pcall(function()
+                -- Refresh(keep=true) is OasisUI v1.9.0's documented API.
+                -- The saved value is always in the options before refresh,
+                -- so a temporary three-character snapshot cannot erase it.
                 drop:Refresh(ownedOptions, true)
                 local selectedChoice = S.preferredLoadout[slot]
                 local choice = "Select Character"
                 for _, name in ipairs(ownedOptions) do
                     if name == selectedChoice then choice = selectedChoice; break end
                 end
-                drop:Set(choice, true)
+                -- Set exists on some Oasis builds; Refresh(keep) handles those
+                -- without it. This is deliberately guarded for compatibility.
+                if type(drop.Set)=="function" then drop:Set(choice, true) end
             end)
         end
+        S.loadoutDropdownRefreshing=false
     end
     S.refreshLoadoutChoices = refreshLoadoutDropdowns
     button(characterCard, "Refresh Owned Characters", function()
         refreshLoadoutDropdowns(true)
+        local _,complete,nativeCount,inventoryCount,equippedCount=collectedCharacters()
+        notify(string.format("Found %d characters (%s; native %d, inventory %d, equipped %d)",
+            math.max(0,#ownedOptions-1),complete and "collection loaded" or "partial collection",
+            nativeCount or 0,inventoryCount or 0,equippedCount or 0),"Info")
         if #ownedOptions <= 1 then
             warnOnce("Owned characters are still loading; open the game's Character Inventory and try again")
         end
     end, "refresh-cw")
     if remote then
-        S.connections[#S.connections + 1] = remote.OnClientEvent:Connect(function(action)
+        S.connections[#S.connections + 1] = remote.OnClientEvent:Connect(function(action, payload)
             if action == "UpdateCollection" then
+                if type(payload)=="table" then
+                    local cfg=getSettings()
+                    local valid=cfg and cfg.CharacterSettings or {}
+                    local changed=false
+                    if type(S.knownOwnedCharacters)~="table" then S.knownOwnedCharacters={} end
+                    for key,value in pairs(payload) do
+                        local name=type(value)=="string" and value or (value==true and key or nil)
+                        if type(name)=="string" and valid[name]
+                            and not S.knownOwnedCharacters[name] then
+                            S.knownOwnedCharacters[name]=true
+                            changed=true
+                        end
+                    end
+                    if changed then savePreferences() end
+                end
                 task.delay(0.15, function()
                     if S.alive then pcall(refreshLoadoutDropdowns) end
                 end)
@@ -4356,7 +4442,7 @@ local function buildUI()
     button(management, "Unload HollowMoonHub", function() S.Unload() end, "power", "Danger")
 
     pcall(function() window:SelectTab(lobby) end)
-    notify("OasisUI loaded. All Anime Dimensions controls are available.", "Success")
+    notify("HollowMoonHub Loaded Enjoy", "Success")
 end
 local uiOK, uiError = pcall(buildUI)
 if not uiOK then warn("[HollowMoonHub] OasisUI build error: " .. tostring(uiError)) end
@@ -4514,7 +4600,7 @@ end)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV42
+local priorBoot = env.HollowMoonADStartupV43
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -4525,7 +4611,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV42 = boot
+env.HollowMoonADStartupV43 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -4591,7 +4677,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV42 ~= boot then return end
+    if env.HollowMoonADStartupV43 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -4608,13 +4694,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v42] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v43] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v42] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v43] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -4622,16 +4708,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v42_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v43_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v42] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v43] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v42] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v43] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
