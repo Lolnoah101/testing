@@ -1,12 +1,12 @@
--- HMH_ANIME_DIMENSIONS_V45
--- HollowMoonHub | Anime Dimensions v45 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V47
+-- HollowMoonHub | Anime Dimensions v47 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V45
--- HMH_AD_CORE_ADLER32:6e388dfe
--- HollowMoonHub | Anime Dimensions v45 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V47
+-- HMH_AD_CORE_ADLER32:7ffd21f9
+-- HollowMoonHub | Anime Dimensions v47 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -147,7 +147,6 @@ local S = {
     selectedFruits = { [1] = true }, -- Z: equipped fruit skill 1
     target = nil,
     targetConnections = {},
-    noTargetSince = nil,
     lastClipCheck = -math.huge,
     attackNumber = 0,
     lastAttack = -math.huge,
@@ -160,6 +159,15 @@ local S = {
     monsterWatch = {},
     indexedTargets = {},
     pendingHumanoids = {},
+    -- Event-based monster indexing can miss a rig when the map streams in.
+    -- Reconcile only periodically, and more often when no live target is found.
+    lastMonsterReconcileAt = -math.huge,
+    noTargetSince = nil,
+    lastNoTargetDiagnosticAt = -math.huge,
+    stallTarget = nil,
+    stallProbeAt = 0,
+    stallProbePosition = nil,
+    lastStallRescueAt = -math.huge,
     resultVisible = false,
     lastResultCheck = -math.huge,
     connections = {},
@@ -213,8 +221,50 @@ env.HollowMoonAnimeDimensions = S
 -- Persist across place changes only if the executor exposes readfile/writefile.
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
-local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub/AnimeDimensions/HollowMoonHub_Core.lua"
+-- Keep all Anime Dimensions data in ONE stable game-specific folder.
+-- Old root-level files are read once for migration and never deleted.
+local DATA_FOLDER = "HollowMoonHub/AnimeDimensions"
+local STATE_FILE = DATA_FOLDER .. "/HollowMoonHub_Settings.json"
+local CORE_FILE = DATA_FOLDER .. "/HollowMoonHub_Core.lua"
+local TOGGLE_INTENT_FILE = DATA_FOLDER .. "/HollowMoonHub_ToggleIntent.json"
+local LEGACY_STATE_FILES = { "HollowMoonHub_AD_v15_state.json" }
+local LEGACY_TOGGLE_FILES = {
+    "HollowMoonHub_AD_v36_toggle_intent.json",
+    "HollowMoonHub_AD_v36_toggle_intent(1).json",
+}
+local function ensureDataFolder()
+    if type(isfolder) == "function" then
+        local ok, exists = pcall(isfolder, DATA_FOLDER)
+        if ok and exists then return true end
+    end
+    if type(makefolder) == "function" then
+        -- Executor file APIs usually require the parent folder to exist first.
+        pcall(makefolder, "HollowMoonHub")
+        pcall(makefolder, DATA_FOLDER)
+    end
+    if type(isfolder) == "function" then
+        local ok, exists = pcall(isfolder, DATA_FOLDER)
+        return ok and exists == true
+    end
+    -- Some executors support writefile(folder/file) without isfolder.
+    return true
+end
+local function readJSON(path)
+    if type(readfile) ~= "function" then return nil end
+    local readOK, raw = pcall(readfile, path)
+    if not readOK or type(raw) ~= "string" then return nil end
+    local parsed, data = pcall(HttpService.JSONDecode, HttpService, raw)
+    if not parsed or type(data) ~= "table" then return nil end
+    return data
+end
+local function legacyJSON(paths)
+    for _, path in ipairs(paths) do
+        local data = readJSON(path)
+        if data then return data end
+    end
+    return nil
+end
+ensureDataFolder()
 local PERSIST_KEYS = {
     "mapChoice", "v30MapReviewed", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
@@ -233,18 +283,23 @@ local PERSIST_KEYS = {
 }
 local function savePreferences()
     if type(writefile) ~= "function" then return false end
+    ensureDataFolder()
     local t = {}
     for _, k in ipairs(PERSIST_KEYS) do t[k] = S[k] end
     local ok, encoded = pcall(HttpService.JSONEncode, HttpService, t)
     if not ok then return false end
-    return pcall(writefile, STATE_FILE, encoded)
+    local wrote = pcall(writefile, STATE_FILE, encoded)
+    if not wrote and not S.dataFolderWarningShown then
+        S.dataFolderWarningShown = true
+        warn("[HollowMoonHub AD v47] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
+    end
+    return wrote
 end
 local function loadPreferences()
-    if type(readfile) ~= "function" then return end
-    local ok, raw = pcall(readfile, STATE_FILE)
-    if not ok or type(raw) ~= "string" then return end
-    local parsed, t = pcall(HttpService.JSONDecode, HttpService, raw)
-    if not parsed or type(t) ~= "table" then return end
+    local t = readJSON(STATE_FILE)
+    local migrationNeeded = not t
+    if not t then t = legacyJSON(LEGACY_STATE_FILES) end
+    if not t then return end
     local accepted = {}
     for _, k in ipairs(PERSIST_KEYS) do accepted[k] = true end
     for k, v in pairs(t) do
@@ -263,16 +318,18 @@ local function loadPreferences()
     for key, rank in pairs(fallback) do
         S.modePriority[key] = math.clamp(math.floor(tonumber(S.modePriority[key]) or rank),1,7)
     end
+    -- Only migrate when no valid folder copy exists. Do not delete legacy files.
+    if migrationNeeded then savePreferences() end
 end
 -- Save the user's choices separately from room/results/session bookkeeping.
 -- This file is only written by explicit Auto Start/Auto Retry UI callbacks,
 -- or once on upgrading from older state where no dedicated file exists.
-S.toggleIntentFile = "HollowMoonHub_AD_v36_toggle_intent.json" -- stable across script updates
+S.toggleIntentFile = TOGGLE_INTENT_FILE -- stable path; game-scoped folder
 S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v45] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v47] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -281,38 +338,39 @@ S.saveToggleIntent = function()
             autoRetry=S.autoRetry==true, changedAt=os.time()})
     end)
     if not ok then return false end
+    ensureDataFolder()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v45] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v47] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
 S.loadToggleIntent = function()
-    if type(readfile) ~= "function" then return false end
-    local ok, raw = pcall(readfile, S.toggleIntentFile)
-    if not ok or type(raw) ~= "string" then return false end
-    local parsed, state = pcall(HttpService.JSONDecode, HttpService, raw)
-    if not parsed or type(state) ~= "table" then return false end
+    local state = readJSON(S.toggleIntentFile)
+    local migrationNeeded = not state
+    if not state then state = legacyJSON(LEGACY_TOGGLE_FILES) end
+    if type(state) ~= "table" then return false end
     if type(state.autoStart) ~= "boolean" or type(state.autoRetry) ~= "boolean" then
         return false
     end
     S.autoStart, S.autoRetry = state.autoStart, state.autoRetry
+    if migrationNeeded then S.saveToggleIntent() end
     return true
 end
 loadPreferences()
 if not S.loadToggleIntent() then
-    -- First v45 execution: seed from previously saved v34 user choices.
+    -- First v47 execution: seed from previously saved v34 user choices.
     S.saveToggleIntent()
 end
--- v45 migration: a match limit is now an automatic return-to-lobby cycle,
+-- v47 migration: a match limit is now an automatic return-to-lobby cycle,
 -- never a permanent pause. Clear any legacy paused state on startup.
 if S.sessionStopped then
     S.sessionStopped = false
     S.matchesCompleted = 0
     savePreferences()
 end
--- New v45 loadout choices start empty on purpose: an automatic backup from an
+-- New v47 loadout choices start empty on purpose: an automatic backup from an
 -- older version may already have been overwritten by a temporary Speed Raid
 -- loadout. Users should choose their three permanent slots explicitly once.
 if type(S.preferredLoadout)~="table" then S.preferredLoadout={main="",assist1="",assist2=""} end
@@ -377,10 +435,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v45 or newer; reject old cached builds that lack
+-- GitHub must host v47 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V45"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V47"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -392,7 +450,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v45 main entry adds a second gate for
+        -- until player stats load; the v47 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -408,12 +466,17 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v45] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v47] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
         if type(readfile) == "function" then
-            local okFile, fileText = pcall(readfile, "HollowMoonHub_AD_v15_state.json")
+            local okFile, fileText = pcall(readfile,
+                "HollowMoonHub/AnimeDimensions/HollowMoonHub_Settings.json")
+            -- Backward compatibility while the one-time migration is pending.
+            if not okFile or type(fileText) ~= "string" then
+                okFile, fileText = pcall(readfile, "HollowMoonHub_AD_v15_state.json")
+            end
             if okFile and type(fileText) == "string" then
                 local okJSON, state = pcall(function()
                     return game:GetService("HttpService"):JSONDecode(fileText)
@@ -427,7 +490,7 @@ local function installTeleportBootstrap()
         -- First try GitHub with a fresh cache key, then the plain URL for
         -- executors that do not accept cache-busting query strings.
         local fetchOK, code = pcall(function()
-            return game:HttpGet(url .. "?hmh_ad_v45=" .. tostring(os.time()), true)
+            return game:HttpGet(url .. "?hmh_ad_v47=" .. tostring(os.time()), true)
         end)
         if not fetchOK or type(code) ~= "string" or #code == 0 then
             fetchOK, code = pcall(function() return game:HttpGet(url) end)
@@ -472,11 +535,11 @@ local function installTeleportBootstrap()
             local validLocal = localOK and acceptedHeader(localCode, true)
             if validLocal then
                 code = localCode
-                warn("[HollowMoonHub AD v45] GitHub returned " .. remoteHeader
-                    .. "; using verified local v45 core. Update the GitHub testing file to v45.")
+                warn("[HollowMoonHub AD v47] GitHub returned " .. remoteHeader
+                    .. "; using verified local v47 core. Update the GitHub testing file to v47.")
             else
-                warn("[HollowMoonHub AD v45] GitHub returned " .. remoteHeader
-                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v45.")
+                warn("[HollowMoonHub AD v47] GitHub returned " .. remoteHeader
+                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v47.")
                 return
             end
         end
@@ -498,17 +561,17 @@ local function installTeleportBootstrap()
             task.wait(0.2)
         end
         if not localReady then
-            warn("[HollowMoonHub AD v45] Auto Execute aborted: character/client library not ready")
+            warn("[HollowMoonHub AD v47] Auto Execute aborted: character/client library not ready")
             return
         end
         task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v45] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v47] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v45] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v47] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -2230,6 +2293,8 @@ end
 
 local function setTarget(nextTarget)
     if S.target == nextTarget then return end
+    S.stallTarget = nil
+    S.stallProbePosition = nil
     clearTargetConnections()
     S.target = nextTarget
     S.targetChangedAt = os.clock()
@@ -2347,6 +2412,30 @@ local function bindMonsterIndex()
     S.monsterWatch[#S.monsterWatch+1] = folder.DescendantRemoving:Connect(function(item)
         if item:IsA("Humanoid") then removeIndexedHumanoid(item) end
     end)
+end
+
+-- Rebuild missing entries if a stage loads a complete monster rig without a
+-- Humanoid/Root descendant event. Do not scan the whole Workspace or choose
+-- NPCs outside the game's Monsters folder.
+S.reconcileMonsterIndex = function(now, urgent)
+    local interval = urgent and 1.1 or 7
+    if now - (S.lastMonsterReconcileAt or -HUGE) < interval then return end
+    S.lastMonsterReconcileAt = now
+    bindMonsterIndex()
+    local folder = S.monsterFolder
+    if not folder then return end
+    for _, item in ipairs(folder:GetDescendants()) do
+        if item:IsA("Humanoid") then
+            local entry = S.indexedTargets[item]
+            if entry and (not entry.target or not entry.target.root
+                or not entry.target.root:IsDescendantOf(entry.target.model)) then
+                removeIndexedHumanoid(item)
+            end
+            if item.Health > 0 and not S.indexedTargets[item] then
+                trackHumanoid(item)
+            end
+        end
+    end
 end
 
 local function extremeModeActive()
@@ -3212,6 +3301,41 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
             return
         end
     end
+    if S.farmMethod == "Tween" and target and not dodgeOverride then
+        -- Only rescue a genuinely stalled Tween. Do not snap during ordinary
+        -- travel; the speed slider continues to govern all normal movement.
+        local remaining = (goalPose.Position - root.Position).Magnitude
+        if remaining >= 16 and not root.Anchored and humanoid.Health > 0 then
+            if S.stallTarget ~= target or not S.stallProbePosition then
+                S.stallTarget = target
+                S.stallProbePosition = root.Position
+                S.stallProbeAt = now
+            elseif now - S.stallProbeAt >= 2.6 then
+                local progressed = (root.Position - S.stallProbePosition).Magnitude
+                if progressed < 2 and now - (S.lastStallRescueAt or -HUGE) >= 7 then
+                    -- A direct rejoin is intentional ONLY after movement fails
+                    -- for several seconds while a living enemy is in range.
+                    root.CFrame = goalPose
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                    S.smoothPose = goalPose
+                    S.lastScriptPosition = root.Position
+                    S.lastStallRescueAt = now
+                    S.stallProbePosition = root.Position
+                    S.stallProbeAt = now
+                    return
+                end
+                S.stallProbePosition = root.Position
+                S.stallProbeAt = now
+            end
+        else
+            S.stallTarget = nil
+            S.stallProbePosition = nil
+        end
+    elseif not dodgeOverride then
+        S.stallTarget = nil
+        S.stallProbePosition = nil
+    end
     if S.farmMethod == "Teleport" then
         -- Instant mode follows target only when position/rotation changes materially.
         if (root.Position - goalPose.Position).Magnitude >= 0.3
@@ -3835,7 +3959,7 @@ function S.Unload(manual)
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v45 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v47 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -4519,6 +4643,10 @@ end
 -- just like a successful respawn does, without forcing the player to die.
 S.rebaseSpatialState = function(root, now)
     S.lastSpatialRebase=now
+    S.stallTarget=nil
+    S.stallProbePosition=nil
+    S.noTargetSince=nil
+    S.lastMonsterReconcileAt=-HUGE
     S.lastScriptPosition=nil
     S.smoothPose=nil
     S.poseHeading=nil
@@ -4570,6 +4698,28 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
         if target and not validTarget(target) then
             setTarget(nil)
             target = findTarget(root)
+        end
+    end
+
+    if S.autoFarm and not showingResults then
+        if target then
+            S.noTargetSince = nil
+            S.reconcileMonsterIndex(now, false)
+        else
+            S.noTargetSince = S.noTargetSince or now
+            if now - S.noTargetSince >= 0.8 then
+                S.reconcileMonsterIndex(now, true)
+                target = findTarget(root)
+                if target then S.noTargetSince = nil end
+            end
+            -- If the game has not replicated a live monster, avoid moving to
+            -- decorative objective markers or inventing an enemy position.
+            if not target and S.noTargetSince
+                and now - S.noTargetSince >= 12
+                and now - S.lastNoTargetDiagnosticAt >= 60 then
+                S.lastNoTargetDiagnosticAt = now
+                warnOnce("Auto Farm: no live monster rig is currently replicated; refreshing monster index while waiting for the next target")
+            end
         end
     end
 
@@ -4660,7 +4810,7 @@ end)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV45
+local priorBoot = env.HollowMoonADStartupV47
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -4671,7 +4821,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV45 = boot
+env.HollowMoonADStartupV47 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -4737,7 +4887,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV45 ~= boot then return end
+    if env.HollowMoonADStartupV47 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -4754,13 +4904,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v45] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v47] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v45] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v47] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -4770,12 +4920,12 @@ boot.status = "starting"
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v45] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v47] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v45] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v47] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
 -- One stable core cache per game. Create the game folder only if the
@@ -4799,21 +4949,24 @@ if type(writefile) == "function" then
     end
     ensureFolder("HollowMoonHub")
     ensureFolder("HollowMoonHub/AnimeDimensions")
-    -- Never overwrite a newer version with an older script if users switch
-    -- between builds while testing. This protects the single shared filename.
+    -- Never overwrite a genuinely newer backup, but ALWAYS replace an older
+    -- core when this source is updated. Derive the version from the embedded
+    -- marker, so subsequent updates don't require a hardcoded threshold.
+    local currentVersion = tonumber(CORE:match(
+        "^%s*%-%- HMH_ANIME_DIMENSIONS_V(%d+)")) or 0
     local overwrite = true
     if type(readfile) == "function" then
         local okRead, existing = pcall(readfile, cachePath)
         if okRead and type(existing) == "string" then
             local savedVersion = tonumber(existing:match(
                 "^%s*%-%- HMH_ANIME_DIMENSIONS_V(%d+)"))
-            if savedVersion and savedVersion > 45 then overwrite = false end
+            if savedVersion and savedVersion > currentVersion then overwrite = false end
         end
     end
     if overwrite then
         local okWrite = pcall(writefile, cachePath, CORE)
         if not okWrite then
-            warn("[HollowMoonHub AD v45] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
+            warn("[HollowMoonHub AD v47] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
         end
     end
 end
