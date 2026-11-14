@@ -1,12 +1,12 @@
--- HMH_ANIME_DIMENSIONS_V50
--- HollowMoonHub | Anime Dimensions v50 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V51
+-- HollowMoonHub | Anime Dimensions v51 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V50
--- HMH_AD_CORE_ADLER32:ee02745f
--- HollowMoonHub | Anime Dimensions v50 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V51
+-- HMH_AD_CORE_ADLER32:23ab21dd
+-- HollowMoonHub | Anime Dimensions v51 (v48 dodge + boss-death recovery) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -152,6 +152,8 @@ local S = {
     selectedFruits = { [1] = true }, -- Z: equipped fruit skill 1
     target = nil,
     targetConnections = {},
+    -- A dead/replaced boss must not keep an earlier warning's dodge lock.
+    targetGeneration = 0,
     lastClipCheck = -math.huge,
     attackNumber = 0,
     lastAttack = -math.huge,
@@ -197,13 +199,6 @@ local S = {
     lateral = Vector3.new(0, 0, -1),
     smoothPose = nil,
     dodgeGoal = nil,
-    dodgeStartedAt = nil,
-    dodgeLockoutUntil = -math.huge,
-    dodgeTarget = nil, -- never move toward a dead/replaced monster
-    dodgeNearTarget = 35,
-    dodgeMaxStep = 15,
-    dodgeHandledZones = {}, -- react once per warning, not once per Heartbeat
-    lastHandledDodgeTrimAt = -math.huge,
     dodgeUntil = -math.huge,
     dodgeSafeSince = nil,
     lastDodgeDash = -math.huge,
@@ -303,7 +298,7 @@ local function savePreferences()
     local wrote = pcall(writefile, STATE_FILE, encoded)
     if not wrote and not S.dataFolderWarningShown then
         S.dataFolderWarningShown = true
-        warn("[HollowMoonHub AD v50] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
+        warn("[HollowMoonHub AD v51] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
     end
     return wrote
 end
@@ -341,7 +336,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v50] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v51] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -354,7 +349,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v50] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v51] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -372,17 +367,17 @@ S.loadToggleIntent = function()
 end
 loadPreferences()
 if not S.loadToggleIntent() then
-    -- First v50 execution: seed from previously saved v34 user choices.
+    -- First v48 execution: seed from previously saved v34 user choices.
     S.saveToggleIntent()
 end
--- v50 migration: a match limit is now an automatic return-to-lobby cycle,
+-- v48 migration: a match limit is now an automatic return-to-lobby cycle,
 -- never a permanent pause. Clear any legacy paused state on startup.
 if S.sessionStopped then
     S.sessionStopped = false
     S.matchesCompleted = 0
     savePreferences()
 end
--- New v50 loadout choices start empty on purpose: an automatic backup from an
+-- New v48 loadout choices start empty on purpose: an automatic backup from an
 -- older version may already have been overwritten by a temporary Speed Raid
 -- loadout. Users should choose their three permanent slots explicitly once.
 if type(S.preferredLoadout)~="table" then S.preferredLoadout={main="",assist1="",assist2=""} end
@@ -447,10 +442,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v50 or newer; reject old cached builds that lack
+-- GitHub must host v51 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V50"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V51"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -462,7 +457,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v50 main entry adds a second gate for
+        -- until player stats load; the v51 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -478,7 +473,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v50] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v51] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -502,7 +497,7 @@ local function installTeleportBootstrap()
         -- First try GitHub with a fresh cache key, then the plain URL for
         -- executors that do not accept cache-busting query strings.
         local fetchOK, code = pcall(function()
-            return game:HttpGet(url .. "?hmh_ad_v50=" .. tostring(os.time()), true)
+            return game:HttpGet(url .. "?hmh_ad_v51=" .. tostring(os.time()), true)
         end)
         if not fetchOK or type(code) ~= "string" or #code == 0 then
             fetchOK, code = pcall(function() return game:HttpGet(url) end)
@@ -524,7 +519,7 @@ local function installTeleportBootstrap()
             local header = source:sub(1, 4096):gsub("^%s+", "")
             local firstLine = header:match("^[^\r\n]+") or "<empty>"
             local version = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-            local supported = version ~= nil and version >= 50
+            local supported = version ~= nil and version >= 51
                 and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
                 and header:find("6938803436", 1, true) ~= nil
                 and header:find("6990129309", 1, true) ~= nil
@@ -547,11 +542,11 @@ local function installTeleportBootstrap()
             local validLocal = localOK and acceptedHeader(localCode, true)
             if validLocal then
                 code = localCode
-                warn("[HollowMoonHub AD v50] GitHub returned " .. remoteHeader
-                    .. "; using verified local v50 core. Update the GitHub testing file to v50.")
+                warn("[HollowMoonHub AD v51] GitHub returned " .. remoteHeader
+                    .. "; using verified local v51 core. Update the GitHub testing file to v51.")
             else
-                warn("[HollowMoonHub AD v50] GitHub returned " .. remoteHeader
-                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v50.")
+                warn("[HollowMoonHub AD v51] GitHub returned " .. remoteHeader
+                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v51.")
                 return
             end
         end
@@ -573,17 +568,17 @@ local function installTeleportBootstrap()
             task.wait(0.2)
         end
         if not localReady then
-            warn("[HollowMoonHub AD v50] Auto Execute aborted: character/client library not ready")
+            warn("[HollowMoonHub AD v51] Auto Execute aborted: character/client library not ready")
             return
         end
         task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v50] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v51] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v50] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v51] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -613,10 +608,11 @@ local WARN_INTERVAL = 10
 -- The marker exists for the full warning duration. The strike can follow its
 -- disappearance, so retain a short impact buffer, not a multi-second stall.
 local IMPACT_HOLD = 0.45
-local DODGE_MAX_OVERRIDE = 0.65 -- short sidestep/hold, never a prolonged movement takeover
-local DODGE_RETRY_COOLDOWN = 1.20 -- let Auto Farm re-engage between separate warnings
--- Target proximity and maximum sidestep are stored on S to avoid
--- exceeding the Lua main-chunk local-variable limit.
+local DODGE_CLEAR_CONFIRM = 0.10
+local DODGE_MIN_HOLD = 0.18
+-- Visual fallback parts can linger after a boss dies. Server telegraphs keep
+-- their own real duration; a static neon remnant must not renew forever.
+local VISUAL_FALLBACK_MAX_AGE = 3.5
 local REENGAGE_BOOST_TIME = 0.35
 local HUGE = math.huge
 local atan2 = math.atan2
@@ -2332,6 +2328,14 @@ local function setTarget(nextTarget)
     clearTargetConnections()
     S.target = nextTarget
     S.targetChangedAt = os.clock()
+    -- The boss may keep playing its attack animation after its Humanoid dies.
+    -- Invalidate dodge instructions and hazard ownership from the old fight.
+    S.targetGeneration = (S.targetGeneration or 0) + 1
+    S.dodgeGoal = nil
+    S.dodgeLastClear = nil
+    S.dodgeHoldUntil = -HUGE
+    S.safeAlternate = nil
+    S.lastHazardRead = -HUGE
     S.waypoints = nil
     S.lastPathGoal = nil
     S.lastMoveTo = -HUGE
@@ -2648,6 +2652,9 @@ local function addFullTelegraph(cf, areaSize, fillSize, duration, circle, tint)
         circle = circle == true,
         expires = now + duration + IMPACT_HOLD,
         born = now,
+        -- Ownership is a local target snapshot, not a claim about the server's
+        -- attack source. We only use it to avoid carrying old dodge state over.
+        generation = S.autoFarm and S.targetGeneration or nil,
     }
     if zone.circle then
         local grow = typeof(fillSize) == "Vector3" and fillSize or areaSize
@@ -2682,11 +2689,6 @@ local function clearHazardTracking()
     S.dodgeGoal = nil
     S.dodgeHoldUntil = -HUGE
     S.dodgeLastClear = nil
-    S.dodgeStartedAt = nil
-    S.dodgeLockoutUntil = -HUGE
-    S.dodgeTarget = nil
-    table.clear(S.dodgeHandledZones)
-    S.lastHandledDodgeTrimAt = -HUGE
     S.dodgeResumeUntil = -HUGE
 end
 
@@ -2717,19 +2719,62 @@ local function nearZone(zone, pos)
     return (zone.cf.Position - pos).Magnitude < math.max(130, diameter * .9 + 40)
 end
 
-local function nearbyHazards(rootPos, now)
-    bindHazards(now)
-    -- Look ahead to the current farm target as well as our present position.
-    -- A fast Tween should not enter a telegraph before it is recognized.
-    local targetPos = S.target and S.target.root and S.target.root.Parent
-        and S.target.root.Position or nil
-    local function relevant(zone)
-        return nearZone(zone, rootPos) or (targetPos and nearZone(zone, targetPos))
-            or (S.autoFarm and S.autoDodge and (zone.cf.Position - rootPos).Magnitude < 420)
+-- Only warnings that threaten the CURRENT living enemy's combat area may
+-- interrupt Auto Farm. A dead boss's effects may persist for its animation,
+-- but must not indefinitely stop us from reaching a clear, living target.
+local function zoneOverlapsPosition(zone, pos, margin)
+    if not pos then return false end
+    local q = zone.cf:PointToObjectSpace(pos)
+    if math.abs(q.Y) > 70 then return false end
+    local halfX = zone.size.X * 0.5 + margin
+    local halfZ = zone.size.Z * 0.5 + margin
+    if zone.circle then
+        local radius = math.max(halfX, halfZ)
+        return q.X * q.X + q.Z * q.Z <= radius * radius
     end
+    return math.abs(q.X) <= halfX and math.abs(q.Z) <= halfZ
+end
+
+local function nearbyHazards(rootPos, now, target, farmGoal)
+    bindHazards(now)
     if now - S.lastHazardRead < 0.016 then return S.dangerList end
     S.lastHazardRead = now
     local zones = {}
+    local liveTarget = S.autoFarm and target and validTarget(target) and target or nil
+    local targetPos = liveTarget and liveTarget.root.Position or nil
+    local closeToTarget = targetPos and (targetPos - rootPos).Magnitude <= 85
+    local function relevant(zone)
+        if targetPos then
+            -- Once the boss dies / target changes, old telegraphs are no longer
+            -- authoritative for the next target's movement. Never extend their
+            -- dodgeHoldUntil just because an animation/visual still exists.
+            if zone.generation ~= nil and zone.generation ~= S.targetGeneration then
+                return false
+            end
+            if zoneOverlapsPosition(zone, targetPos, 24)
+                or zoneOverlapsPosition(zone, farmGoal, 14) then
+                return true
+            end
+            if closeToTarget and zoneOverlapsPosition(zone, rootPos, 8) then
+                return true
+            end
+            -- A warning spawned during THIS target's fight may lie across the
+            -- approach to the boss without covering either endpoint.
+            if zone.generation == S.targetGeneration and farmGoal
+                and closeToTarget then
+                for step = 1, 3 do
+                    if zoneOverlapsPosition(zone,
+                        rootPos:Lerp(farmGoal, step * 0.25), 5) then
+                        return true
+                    end
+                end
+            end
+            return false
+        end
+        -- Standalone Auto Dodge (without Auto Farm) keeps its normal
+        -- character-centric behavior.
+        return nearZone(zone, rootPos)
+    end
     for index = #S.remoteHazards, 1, -1 do
         local zone = S.remoteHazards[index]
         if now >= zone.expires then
@@ -2743,30 +2788,46 @@ local function nearbyHazards(rootPos, now)
         if not part.Parent then
             S.hazardParts[part] = nil
         elseif isHazard(part) then
-            -- Follow the moving visual marker and maintain a swept corridor
-            -- between its first position and its latest position. This is only
-            -- the fallback for telegraphs not received from the remote event.
             local m = S.visualHazardMemory[part]
             if not m then
-                m = { first = part.Position, position = part.Position, cf = part.CFrame,
-                    size = part.Size, expires = now + IMPACT_HOLD }
+                m = { first = part.Position, position = part.Position,
+                    cf = part.CFrame, size = part.Size,
+                    born = now, generation = S.autoFarm and S.targetGeneration or nil,
+                    expires = now + IMPACT_HOLD, expired = false }
                 S.visualHazardMemory[part] = m
             end
-            local difference = part.Position - m.first
-            local travel = math.abs(difference:Dot(part.CFrame.LookVector))
-            local center = m.first:Lerp(part.Position, .5)
-            m.cf = CFrame.new(center) * part.CFrame.Rotation
-            m.size = Vector3.new(math.max(1, part.Size.X), math.max(1, part.Size.Y),
-                math.max(1, part.Size.Z + travel + 12))
-            m.position = part.Position
-            m.expires = now + IMPACT_HOLD
+            if not m.expired then
+                if now - m.born >= VISUAL_FALLBACK_MAX_AGE then
+                    -- A part that is still present after the brief visual
+                    -- fallback window is not a NEW attack every Heartbeat.
+                    m.expired = true
+                else
+                    local difference = part.Position - m.first
+                    local travel = math.abs(difference:Dot(part.CFrame.LookVector))
+                    local center = m.first:Lerp(part.Position, 0.5)
+                    m.cf = CFrame.new(center) * part.CFrame.Rotation
+                    m.size = Vector3.new(math.max(1, part.Size.X),
+                        math.max(1, part.Size.Y),
+                        math.max(1, part.Size.Z + travel + 12))
+                    m.position = part.Position
+                    m.expires = now + IMPACT_HOLD
+                end
+            end
         end
     end
     for part, snapshot in pairs(S.visualHazardMemory) do
-        if now >= snapshot.expires then
-            S.visualHazardMemory[part] = nil
-        elseif relevant(snapshot) then
-            zones[#zones+1] = snapshot
+        if not part.Parent then
+            if now >= snapshot.expires then
+                S.visualHazardMemory[part] = nil
+            elseif not snapshot.expired and relevant(snapshot) then
+                zones[#zones + 1] = snapshot
+            end
+        elseif now >= snapshot.expires then
+            -- Keep a small tombstone while the old part exists, otherwise it
+            -- would be rediscovered on the next tick as a brand-new warning.
+            snapshot.expired = true
+        elseif not snapshot.expired and relevant(snapshot) then
+            zones[#zones + 1] = snapshot
         end
     end
     S.dangerList = zones
@@ -2942,135 +3003,118 @@ local function findSafeAlternateEnemy(root, current, zones, now)
     return nil, nil
 end
 
--- Treat warnings around the *living farm target* as the source of danger.
--- A remote/visual telegraph only takes control when it can affect the avatar
--- or the next nearby combat pose. Distant enemies/markers never trigger dodge.
-S.findTargetThreat = function(root, target, zones, now)
-    if not target or not validTarget(target) then return nil, nil end
-    local targetPos = target.root.Position
-    if (root.Position - targetPos).Magnitude > S.dodgeNearTarget then
-        return nil, nil
-    end
-    local farmPose = S.autoFarm and desiredFarmPose(root, target) or nil
-    local farmPos = farmPose and farmPose.Position or nil
-    local closeToFarmPose = farmPos and (farmPos - root.Position).Magnitude <= 14
-    for _, zone in ipairs(zones) do
-        if now < zone.expires and nearZone(zone, targetPos)
-            and not S.dodgeHandledZones[zone] then
-            local nearby = {zone}
-            local hitsUs = positionDanger(root.Position, nearby, 2) > 0
-            local hitsFarmPose = closeToFarmPose
-                and positionDanger(farmPos, nearby, 3) > 0
-            if hitsUs or hitsFarmPose then
-                return zone, hitsUs
-            end
-        end
-    end
-    return nil, nil
-end
-
--- The old wide-area candidate search (up to 100 studs) caused the excessive
--- side-to-side movement in v49. Try one small grounded sidestep near the same
--- target; never flee to another arena or chase a different enemy to dodge.
-S.chooseSmallTargetDodge = function(root, target, zones)
-    local fromPos, targetPos = root.Position, target.root.Position
-    local forward = Vector3.new(targetPos.X-fromPos.X, 0, targetPos.Z-fromPos.Z)
-    if forward.Magnitude < 0.1 then
-        local look = root.CFrame.LookVector
-        forward = Vector3.new(look.X, 0, look.Z)
-    end
-    if forward.Magnitude < 0.1 then forward = Vector3.new(0, 0, -1) end
-    forward = forward.Unit
-    local side = Vector3.new(-forward.Z, 0, forward.X)
-    for _, distance in ipairs({4, 7, 10, S.dodgeMaxStep}) do
-        -- Sideways first: stay attacking the same enemy, not retreating far.
-        for _, direction in ipairs({side, -side, -forward}) do
-            local candidate = fromPos + direction * distance
-            if positionDanger(candidate, zones, 3) == 0
-                and (candidate - targetPos).Magnitude <= S.dodgeNearTarget + 5
-                and supportedEscapePoint(candidate) then
-                return candidate
-            end
-        end
-    end
-    return nil
-end
-
-local function endDodge(now, pause)
+local function endDodge(now)
     S.safeAlternate = nil
     S.dodgeGoal = nil
-    S.dodgeTarget = nil
     S.dodgeLastClear = nil
     S.dodgeHoldUntil = -HUGE
-    S.dodgeStartedAt = nil
-    S.dodgeLockoutUntil = now + (pause or DODGE_RETRY_COOLDOWN)
     S.dodgeResumeUntil = now + REENGAGE_BOOST_TIME
 end
 
 local function dodgeTick(dt, root, humanoid, target, now)
-    if not S.autoDodge or not target or not validTarget(target) then
-        if S.dodgeGoal then endDodge(now, 0.20) end
+    if not S.autoDodge then
+        S.dodgeGoal, S.dodgeLastClear = nil, nil
         return false
     end
-    -- A previously selected enemy may have died while a dodge was active.
-    if S.dodgeGoal and S.dodgeTarget ~= target then
-        endDodge(now, 0.20)
+    -- During a boss's death animation there may be no living target yet.
+    -- Keep neither the old dodge goal nor its lengthy impact hold.
+    if S.autoFarm and not validTarget(target) then
+        if S.dodgeGoal then endDodge(now) end
+        return false
     end
+    local farmPose = (S.autoFarm and target) and desiredFarmPose(root, target) or nil
+    local farmGoal = farmPose and farmPose.Position
+    local zones = nearbyHazards(root.Position, now, target, farmGoal)
+    local hereUnsafe = positionDanger(root.Position, zones, 4) > 0
+    local farmUnsafe = farmGoal and positionDanger(farmGoal, zones, 5) > 0
+    local blockedFarmPath = farmGoal and #zones > 0
+        and not pathClearOfDanger(root.Position, farmGoal, zones)
+    if blockedFarmPath then farmUnsafe = true end
+    local goalUnsafe = S.dodgeGoal and positionDanger(S.dodgeGoal, zones, 5) > 0
 
-    -- Keep the once-per-warning set bounded during long overnight sessions.
-    if now - S.lastHandledDodgeTrimAt >= 3 then
-        S.lastHandledDodgeTrimAt = now
-        for zone in pairs(S.dodgeHandledZones) do
-            if now >= zone.expires then S.dodgeHandledZones[zone] = nil end
-        end
-    end
-
-    local zones = nearbyHazards(root.Position, now)
-    if S.dodgeGoal then
-        -- Never refresh the movement timer while an AoE stays red.
-        if now - (S.dodgeStartedAt or now) >= DODGE_MAX_OVERRIDE then
+    -- If our target is in danger, try a different, attackable enemy before
+    -- going idle. Do not fly across an active hazard to reach the alternate.
+    local alternate, alternateGoal
+    if (hereUnsafe or farmUnsafe) and target then
+        alternate, alternateGoal = findSafeAlternateEnemy(root, target, zones, now)
+        if alternate and not hereUnsafe
+            and pathClearOfDanger(root.Position, alternateGoal, zones) then
+            setTarget(alternate)
             endDodge(now)
             return false
         end
-        -- A new warning may cover the escape point: give Farm control back,
-        -- instead of repeatedly choosing new destinations every frame.
-        if positionDanger(S.dodgeGoal, zones, 2) > 0 then
-            endDodge(now)
-            return false
+    end
+
+    -- Current living target's combat position is clear: farm immediately,
+    -- even if the previous boss's telegraph animation is still in Debris.
+    -- Do not let an expired dodge goal by itself trigger another dodge.
+    if farmGoal and not hereUnsafe and not farmUnsafe
+        and not blockedFarmPath then
+        if S.dodgeGoal then endDodge(now) end
+        return false
+    end
+
+    if hereUnsafe or farmUnsafe or goalUnsafe then
+        S.dodgeLastClear = nil
+        local hold = now + DODGE_MIN_HOLD
+        for _, zone in ipairs(zones) do
+            if nearZone(zone, root.Position) or (farmGoal and nearZone(zone, farmGoal)) then
+                hold = math.max(hold, zone.expires)
+            end
+        end
+        S.dodgeHoldUntil = math.max(S.dodgeHoldUntil, hold)
+        if not S.dodgeGoal or goalUnsafe then
+            if not hereUnsafe and farmUnsafe then
+                -- Stand off at the current safe point until the attack clears.
+                S.dodgeGoal = root.Position
+            else
+                S.dodgeGoal = chooseSafeDodgePoint(root.Position, zones,
+                    alternateGoal or farmGoal or (target and target.root.Position)) or root.Position
+            end
+        end
+    elseif S.dodgeGoal then
+        if now < S.dodgeHoldUntil then
+            S.dodgeLastClear = nil
+        else
+            S.dodgeLastClear = S.dodgeLastClear or now
+            if now - S.dodgeLastClear >= DODGE_CLEAR_CONFIRM then
+                endDodge(now)
+                return false
+            end
         end
     else
-        if now < (S.dodgeLockoutUntil or -HUGE) then return false end
-        local warning, hitsUs = S.findTargetThreat(root, target, zones, now)
-        if not warning then return false end
-        -- Consume this warning even if there is nowhere safe to move;
-        -- duplicate visuals of the same AoE must not create a dodge loop.
-        S.dodgeHandledZones[warning] = true
-        local goal
-        if hitsUs then
-            goal = S.chooseSmallTargetDodge(root, target, zones)
-        else
-            -- We are safe but our *next* combat pose is marked for impact.
-            -- Briefly hold the current position; no unnecessary circling.
-            goal = root.Position
-        end
-        if not goal then
-            S.dodgeLockoutUntil = now + DODGE_RETRY_COOLDOWN
-            return false
-        end
-        S.dodgeGoal = goal
-        S.dodgeTarget = target
-        S.dodgeStartedAt = now
+        return false
     end
 
     local goal = S.dodgeGoal
+    if not goal then return false end
     if S.autoFarm and S.farmMethod ~= "Legit" then
-        -- Keep Auto Farm's established attack orientation while side-stepping.
-        -- Never rotate toward another target or perform a high-speed dash.
-        local pose = CFrame.new(goal) * desiredFarmPose(root, target).Rotation
+        local pose
+        if target then
+            if S.farmPosition == "Above" or S.farmPosition == "Below" then
+                -- Keep exactly the same flat body pose during evasive motion.
+                -- Looking from the dodge point toward the enemy would pitch
+                -- or roll the avatar sideways while it travels.
+                pose = CFrame.new(goal) * desiredFarmPose(root, target).Rotation
+            else
+                local focus = target.root.Position
+                local flat = Vector3.new(focus.X, goal.Y, focus.Z)
+                pose = safeLookAt(goal, flat, Vector3.yAxis)
+            end
+        else
+            pose = CFrame.new(goal) * root.CFrame.Rotation
+        end
         farmTick(dt, root, humanoid, target, now, pose)
     else
         if S.oldCharacter and S.farmMethod ~= "Legit" then releaseMovement() end
-        humanoid:MoveTo(Vector3.new(goal.X, root.Position.Y, goal.Z))
+        local walking = Vector3.new(goal.X, root.Position.Y, goal.Z)
+        humanoid:MoveTo(walking)
+        local dir = walking - root.Position
+        if dir.Magnitude > 2 and now - S.lastDodgeDash > .4 then
+            local client = getSkillModule()
+            if client and type(client.dash) == "function" then pcall(client.dash, dir.Unit) end
+            S.lastDodgeDash = now
+        end
     end
     return true
 end
@@ -3413,12 +3457,12 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         -- Visibly smooth, continuous Tween-style follow at the user's chosen
         -- world-space speed. Old builds used 550-950 studs/sec and a huge
         -- exponential correction, making ordinary travel look like teleport.
-        -- Dodge uses the SAME user-selected Tween speed as Auto Farm.
-        -- A short sidestep must not become an abrupt high-speed zigzag.
+        -- Dodge can temporarily travel faster to escape imminent strikes.
         local current = root.CFrame
         local safeDt = math.clamp(dt, 0, 0.07)
         local speed = math.clamp(tonumber(S.tweenSpeed) or 120, 40, 650)
-        local alpha = 1 - math.exp(-safeDt * 9)
+        if dodgeOverride then speed = math.max(speed, 250) end
+        local alpha = 1 - math.exp(-safeDt * (dodgeOverride and 14 or 9))
         local delta = goalPose.Position - current.Position
         local magnitude = delta.Magnitude
         local newPosition = current.Position
@@ -4022,7 +4066,7 @@ function S.Unload(manual)
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v50 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v51 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -4464,9 +4508,6 @@ local function buildUI()
         S.autoDodge = on == true
         if not S.autoDodge then
             S.dodgeGoal, S.dodgeLastClear = nil, nil
-            S.dodgeStartedAt = nil
-            S.dodgeLockoutUntil = -HUGE
-            S.dodgeTarget = nil
             clearHazardTracking()
             S.lastHazardBind = -HUGE
         end
@@ -4488,9 +4529,6 @@ local function buildUI()
             releaseMovement()
             S.poseHeading = nil
             S.dodgeGoal = nil
-            S.dodgeStartedAt = nil
-            S.dodgeLockoutUntil = -HUGE
-            S.dodgeTarget = nil
             S.dodgeHoldUntil = -HUGE
         end
         savePreferences()
@@ -4721,9 +4759,6 @@ S.rebaseSpatialState = function(root, now)
     S.poseHeading=nil
     S.dodgeGoal=nil
     S.dodgeLastClear=nil
-    S.dodgeStartedAt=nil
-    S.dodgeLockoutUntil=-HUGE
-    S.dodgeTarget=nil
     S.dodgeHoldUntil=-HUGE
     S.dodgeResumeUntil=now
     resetTarget()
@@ -4845,9 +4880,6 @@ S.connections[#S.connections+1] = player.CharacterAdded:Connect(function()
     S.lastScriptPosition = nil
     S.lastSpatialRebase = -HUGE
     S.dodgeGoal, S.dodgeLastClear = nil, nil
-    S.dodgeStartedAt = nil
-    S.dodgeLockoutUntil = -HUGE
-    S.dodgeTarget = nil
     S.poseHeading = nil
     clearHazardTracking()
     S.lastHazardBind = -HUGE
@@ -4885,7 +4917,7 @@ end)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV50
+local priorBoot = env.HollowMoonADStartupV48
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -4896,7 +4928,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV50 = boot
+env.HollowMoonADStartupV48 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -4962,7 +4994,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV50 ~= boot then return end
+    if env.HollowMoonADStartupV48 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -4979,13 +5011,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v50] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v51] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v50] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v51] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -4995,12 +5027,12 @@ boot.status = "starting"
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v50] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v51] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v50] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v51] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
 -- One stable core cache per game. Create the game folder only if the
@@ -5041,7 +5073,7 @@ if type(writefile) == "function" then
     if overwrite then
         local okWrite = pcall(writefile, cachePath, CORE)
         if not okWrite then
-            warn("[HollowMoonHub AD v50] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
+            warn("[HollowMoonHub AD v51] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
         end
     end
 end
