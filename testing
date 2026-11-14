@@ -1,11 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V37
--- HollowMoonHub | Anime Dimensions v37 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V38
+-- HollowMoonHub | Anime Dimensions v38 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V37
--- HollowMoonHub | Anime Dimensions v37 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V38
+-- HollowMoonHub | Anime Dimensions v38 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -114,6 +114,7 @@ local S = {
     antiAfkLastPulse = 0,
     autoExecute = false,
     autoClaimQuests = false,
+    autoClaimSpeedRaidWeekly = false,
     autoSellCards = false,
     cardSellRarities = {}, -- only specifically selected rarities may be enabled
     cardSellStrictV34Reviewed = false, -- disable any legacy auto-sell settings once on upgrade
@@ -196,7 +197,7 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v37_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v38_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "v30MapReviewed", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
@@ -210,7 +211,7 @@ local PERSIST_KEYS = {
     "modeFromPlace", "modeFromJobId", "modeWasInBattle", "raidUnavailableUntil",
     "autoAttack", "autoSkills", "autoFarm", "autoDodge",
     "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "reconnectResumeEpoch", "autoExecute",
-    "autoClaimQuests", "autoSellCards", "cardSellRarities", "cardSellStrictV34Reviewed",
+    "autoClaimQuests", "autoClaimSpeedRaidWeekly", "autoSellCards", "cardSellRarities", "cardSellStrictV34Reviewed",
     "farmMethod", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
 }
 local function savePreferences()
@@ -251,7 +252,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v37] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v38] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -263,7 +264,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v37] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v38] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -281,13 +282,13 @@ S.loadToggleIntent = function()
 end
 loadPreferences()
 if not S.loadToggleIntent() then
-    -- First v37 execution: seed from previously saved v34 user choices.
+    -- First v38 execution: seed from previously saved v34 user choices.
     S.saveToggleIntent()
 end
 if S.sessionStopped and S.autoStart then
-    warn("[HollowMoonHub AD v37] Auto Start is ON, but the previous match limit paused Dimensions. Select Resume Mode Queue in Lobby to continue.")
+    warn("[HollowMoonHub AD v38] Auto Start is ON, but the previous match limit paused Dimensions. Select Resume Mode Queue in Lobby to continue.")
 end
--- New v37 loadout choices start empty on purpose: an automatic backup from an
+-- New v38 loadout choices start empty on purpose: an automatic backup from an
 -- older version may already have been overwritten by a temporary Speed Raid
 -- loadout. Users should choose their three permanent slots explicitly once.
 if type(S.preferredLoadout)~="table" then S.preferredLoadout={main="",assist1="",assist2=""} end
@@ -352,10 +353,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v37 or newer; reject old cached builds that lack
+-- GitHub must host v38 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V37"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V38"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -367,7 +368,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v37 main entry adds a second gate for
+        -- until player stats load; the v38 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -383,7 +384,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v37] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v38] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -400,39 +401,39 @@ local function installTeleportBootstrap()
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         -- Bust cached copies of the raw file after updating it in GitHub.
-        local freshURL = url .. "?hmh_ad_v37=" .. tostring(os.time())
+        local freshURL = url .. "?hmh_ad_v38=" .. tostring(os.time())
         local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
         if not ok or type(code) ~= "string" or #code == 0 then
             -- Some executors reject the optional no-cache parameter/query string.
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v37] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v38] GitHub Auto Execute fetch failed")
             return
         end
-        -- Accept v37 and newer, never silently downgrade to a known version
+        -- Accept v38 and newer, never silently downgrade to a known version
         -- that automatically disabled Auto Start/Retry. Future versions remain
         -- valid; unrelated games such as the old AOT GitHub file are blocked.
         local header = code:sub(1, 4096)
         local firstLine = header:match("^[^\r\n]+") or "<empty>"
         local scriptVersion = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-        local validHeader = scriptVersion ~= nil and scriptVersion >= 37
+        local validHeader = scriptVersion ~= nil and scriptVersion >= 38
         local isAnimeDimensions = validHeader
             and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v37] GitHub script missing, unrelated, or older than v37: "
+            warn("[HollowMoonHub AD v38] GitHub script missing, unrelated, or older than v38: "
                 .. firstLine:sub(1, 140) .. ". Not executing; update the testing file on main.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v37] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v38] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v37] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v38] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -3376,6 +3377,46 @@ local function claimReadyQuests()
     end
 end
 
+-- Weekly Speed Raid rewards: the native SpeedRaidModule uses the
+-- LocalStatsModule stats WeeklyShadowRaidsCleared and SpeedRaid_Weekly1..9.
+-- Only an unlocked, explicitly unclaimed reward is eligible. The native
+-- RewardClaim click sends MainRemoteFunction:InvokeServer(
+--     "ClaimWeeklySpeedRaidReward", rewardIndex).
+-- Use the same action and current SettingsModule reward table: no guessed
+-- remote names, fake rewards, or automatic raid entry.
+local speedWeeklyRewardRetryAt = {}
+local function claimReadyWeeklySpeedRaidRewards()
+    if not (S.alive and S.autoClaimSpeedRaidWeekly and statsReady()
+        and regularLobby()) then return end
+    local settings = getSettings()
+    local rewards = settings and settings.SpeedRaidWeeklyRewards
+    if type(rewards) ~= "table" then return end
+    local clears = tonumber(stat("WeeklyShadowRaidsCleared"))
+    if not clears then return end -- player data hasn't replicated yet
+    local now = os.clock()
+    for index, reward in ipairs(rewards) do
+        if not (S.alive and S.autoClaimSpeedRaidWeekly and regularLobby()) then return end
+        if type(reward) == "table" and type(reward.statName) == "string" then
+            local required = tonumber(reward.clearsNeeded)
+            local claimed = stat(reward.statName)
+            if required and clears >= required and claimed == false
+                and now >= (speedWeeklyRewardRetryAt[index] or 0) then
+                -- A retry backoff prevents repeated network requests when
+                -- Roblox has not yet replicated the claimed BoolValue.
+                speedWeeklyRewardRetryAt[index] = now + 20
+                local response, reason = invokeRoom("ClaimWeeklySpeedRaidReward", index)
+                if response and response.status ~= "Fail" then
+                    -- Wait for the game's replicated claimed flag before
+                    -- considering this milestone eligible again.
+                    speedWeeklyRewardRetryAt[index] = now + 30
+                elseif reason then
+                    warnOnce("Speed Raid weekly reward claim: " .. tostring(reason))
+                end
+            end
+        end
+    end
+end
+
 -- The game's own UI has these six BoolValue flags, each controlled by
 -- MainRemoteEvent:FireServer("ChangeSetting", "Setting_AutoSell"..rarity, bool).
 -- Never restore earlier native settings: they could include unselected rarities.
@@ -3450,6 +3491,15 @@ task.spawn(function()
 end)
 task.spawn(function()
     while S.alive do
+        if S.autoClaimSpeedRaidWeekly and regularLobby() then
+            local ok, err = pcall(claimReadyWeeklySpeedRaidRewards)
+            if not ok then warnOnce("Speed Raid weekly claim worker: " .. tostring(err)) end
+        end
+        task.wait(1.8)
+    end
+end)
+task.spawn(function()
+    while S.alive do
         -- Reconcile OFF as well as ON. In particular, disable any stale native
         -- rarity flags left active by v32, the game UI, or a previous session.
         local ok, err = pcall(applyNativeCardSell)
@@ -3488,11 +3538,11 @@ local function buildUI()
     local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
     local window = Rayfield:CreateWindow({
         name = "HollowMoonHub",
-        subtitle = "Anime Dimensions | v37",
+        subtitle = "Anime Dimensions | v38",
         sidebarLayout = true,
     })
     S.window = window
-    window:CreateTag({text = "v37"})
+    window:CreateTag({text = "v38"})
 
     window:CreateSection({name="AUTOMATION"})
 
@@ -4122,6 +4172,15 @@ local function buildUI()
             name="Auto Claim Quests",flag="AD22_AutoClaimQuests",value=S.autoClaimQuests,
             callback=function(on) S.autoClaimQuests=on==true; savePreferences() end,
         })
+        miscTab:CreateSection({name="Speed Raid Rewards"})
+        miscTab:CreateToggle({
+            name="Auto Claim Weekly Speed Raid Rewards",
+            flag="AD38_AutoClaimSpeedRaidWeekly",value=S.autoClaimSpeedRaidWeekly,
+            callback=function(on)
+                S.autoClaimSpeedRaidWeekly=on==true
+                savePreferences()
+            end,
+        })
 
     end
 
@@ -4330,7 +4389,7 @@ end)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV37
+local priorBoot = env.HollowMoonADStartupV38
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -4341,7 +4400,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV37 = boot
+env.HollowMoonADStartupV38 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -4407,7 +4466,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV37 ~= boot then return end
+    if env.HollowMoonADStartupV38 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -4424,13 +4483,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v37] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v38] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v37] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v38] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -4438,16 +4497,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v37_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v38_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v37] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v38] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v37] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v38] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
