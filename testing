@@ -1,11 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V43
--- HollowMoonHub | Anime Dimensions v43 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V44
+-- HollowMoonHub | Anime Dimensions v44 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V43
--- HollowMoonHub | Anime Dimensions v43 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V44
+-- HollowMoonHub | Anime Dimensions v44 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -213,7 +213,7 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v43_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v44_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "v30MapReviewed", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
@@ -271,7 +271,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v43] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v44] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -283,7 +283,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v43] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v44] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -301,17 +301,17 @@ S.loadToggleIntent = function()
 end
 loadPreferences()
 if not S.loadToggleIntent() then
-    -- First v43 execution: seed from previously saved v34 user choices.
+    -- First v44 execution: seed from previously saved v34 user choices.
     S.saveToggleIntent()
 end
--- v43 migration: a match limit is now an automatic return-to-lobby cycle,
+-- v44 migration: a match limit is now an automatic return-to-lobby cycle,
 -- never a permanent pause. Clear any legacy paused state on startup.
 if S.sessionStopped then
     S.sessionStopped = false
     S.matchesCompleted = 0
     savePreferences()
 end
--- New v43 loadout choices start empty on purpose: an automatic backup from an
+-- New v44 loadout choices start empty on purpose: an automatic backup from an
 -- older version may already have been overwritten by a temporary Speed Raid
 -- loadout. Users should choose their three permanent slots explicitly once.
 if type(S.preferredLoadout)~="table" then S.preferredLoadout={main="",assist1="",assist2=""} end
@@ -376,10 +376,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v43 or newer; reject old cached builds that lack
+-- GitHub must host v44 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V43"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V44"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -391,7 +391,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v43 main entry adds a second gate for
+        -- until player stats load; the v44 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -407,7 +407,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v43] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v44] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -423,40 +423,73 @@ local function installTeleportBootstrap()
             end
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-        -- Bust cached copies of the raw file after updating it in GitHub.
-        local freshURL = url .. "?hmh_ad_v43=" .. tostring(os.time())
-        local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
-        if not ok or type(code) ~= "string" or #code == 0 then
-            -- Some executors reject the optional no-cache parameter/query string.
-            ok, code = pcall(function() return game:HttpGet(url) end)
+        -- First try GitHub with a fresh cache key, then the plain URL for
+        -- executors that do not accept cache-busting query strings.
+        local fetchOK, code = pcall(function()
+            return game:HttpGet(url .. "?hmh_ad_v44=" .. tostring(os.time()), true)
+        end)
+        if not fetchOK or type(code) ~= "string" or #code == 0 then
+            fetchOK, code = pcall(function() return game:HttpGet(url) end)
         end
-        if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v43] GitHub Auto Execute fetch failed")
+        local function acceptedHeader(source)
+            if type(source) ~= "string" then return false, "<empty>" end
+            local header = source:sub(1, 4096)
+            local firstLine = header:match("^[^\r\n]+") or "<empty>"
+            local version = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
+            return version ~= nil and version >= 44
+                and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
+                and header:find("6938803436", 1, true) ~= nil
+                and header:find("6990129309", 1, true) ~= nil,
+                firstLine
+        end
+        local validRemote, remoteHeader = acceptedHeader(code)
+        if not validRemote then
+            -- The full wrapper saved the v44 core at first successful start.
+            -- It is a version-checked offline fallback, not a v42 downgrade.
+            local localOK, localCode = false, nil
+            if type(readfile) == "function" then
+                localOK, localCode = pcall(readfile, "HollowMoonHub_AD_v44_core.lua")
+            end
+            local validLocal = localOK and acceptedHeader(localCode)
+            if validLocal then
+                code = localCode
+                warn("[HollowMoonHub AD v44] GitHub returned " .. remoteHeader
+                    .. "; using verified local v44 core. Update the GitHub testing file to v44.")
+            else
+                warn("[HollowMoonHub AD v44] GitHub returned " .. remoteHeader
+                    .. "; local v44 backup unavailable. Replace the GitHub testing file (main branch) with v44.")
+                return
+            end
+        end
+        -- When using the locally saved CORE, wait for the basic character
+        -- and client library before starting; the full wrapper normally does
+        -- an even stronger readiness check.
+        local live = players.LocalPlayer
+        local readyFrom = os.clock()
+        local localReady = false
+        while os.clock() - readyFrom < 60 do
+            local gui = live and live:FindFirstChildOfClass("PlayerGui")
+            local char = live and live.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if gui and gui:FindFirstChild("ClientLibrary") and char
+                and hum and hum.Health > 0 and char:FindFirstChild("HumanoidRootPart") then
+                localReady = true
+                break
+            end
+            task.wait(0.2)
+        end
+        if not localReady then
+            warn("[HollowMoonHub AD v44] Auto Execute aborted: character/client library not ready")
             return
         end
-        -- Accept v43 and newer, never silently downgrade to a known version
-        -- that automatically disabled Auto Start/Retry. Future versions remain
-        -- valid; unrelated games such as the old AOT GitHub file are blocked.
-        local header = code:sub(1, 4096)
-        local firstLine = header:match("^[^\r\n]+") or "<empty>"
-        local scriptVersion = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-        local validHeader = scriptVersion ~= nil and scriptVersion >= 43
-        local isAnimeDimensions = validHeader
-            and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
-            and header:find("6938803436", 1, true) ~= nil
-            and header:find("6990129309", 1, true) ~= nil
-        if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v43] GitHub script missing, unrelated, or older than v43: "
-                .. firstLine:sub(1, 140) .. ". Not executing; update the testing file on main.")
-            return
-        end
+        task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v43] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v44] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v43] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v44] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -3762,8 +3795,9 @@ task.spawn(function()
     end
 end)
 
-function S.Unload()
+function S.Unload(manual)
     if not S.alive then return end
+    if manual == true then S.autoExecute = false end
     -- Strict mode: leaving the script must not reactivate unselected rarities.
     S.autoSellCards = false
     pcall(applyNativeCardSell, true)
@@ -3782,7 +3816,7 @@ function S.Unload()
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v43 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v44 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -3808,6 +3842,13 @@ local function buildUI()
         return
     end
     S.oasis = OasisUI
+    -- Built-in Oasis Settings > Menu > Unload invokes library:Unload().
+    -- Connect that one button to HollowMoonHub's full cleanup routine.
+    -- S.Unload() marks S.alive=false before unloading Oasis, so invoking it
+    -- from this event cannot recursively unload more than once.
+    OasisUI:OnUnload(function()
+        if S.alive then S.Unload(true) end
+    end)
     local window = OasisUI:CreateWindow({
         Title = "[🎃] Anime Dimensions",
         Subtitle = "By | HollowMoonHub",
@@ -4438,8 +4479,8 @@ local function buildUI()
             end
         end
     end)
-    local management = section(systemTab, "Script Management", "wrench", "Right")
-    button(management, "Unload HollowMoonHub", function() S.Unload() end, "power", "Danger")
+    -- Unload is already present in the built-in OasisUI Settings > Menu.
+    -- Avoid a second button in System; the native one now runs S.Unload().
 
     pcall(function() window:SelectTab(lobby) end)
     notify("HollowMoonHub Loaded Enjoy", "Success")
@@ -4600,7 +4641,7 @@ end)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV43
+local priorBoot = env.HollowMoonADStartupV44
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -4611,7 +4652,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV43 = boot
+env.HollowMoonADStartupV44 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -4677,7 +4718,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV43 ~= boot then return end
+    if env.HollowMoonADStartupV44 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -4694,13 +4735,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v43] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v44] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v43] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v44] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -4708,16 +4749,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v43_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v44_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v43] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v44] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v43] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v44] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
