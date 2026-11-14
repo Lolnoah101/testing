@@ -1,11 +1,11 @@
--- HMH_ANIME_DIMENSIONS_V34
--- HollowMoonHub | Anime Dimensions v34 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V35
+-- HollowMoonHub | Anime Dimensions v35 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V34
--- HollowMoonHub | Anime Dimensions v34 (Boss Rush + mode priority) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V35
+-- HollowMoonHub | Anime Dimensions v35 (Boss Rush + mode priority) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | Rayfield Gen 2 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -84,6 +84,7 @@ local S = {
     matchesCompleted = 0,
     sessionStopped = false,
     lobbyBusy = false,
+    roomUnavailableUntil = 0, -- transient failure backoff, never a toggle change
     lobbyGeneration = 0,
     createdOwnRoom = false,
     createdOwnRoomAt = 0,
@@ -189,7 +190,7 @@ env.HollowMoonAnimeDimensions = S
 -- A queue_on_teleport bootstrap is registered below when supported; otherwise
 -- users must configure their executor's Auto Execute for both place IDs.
 local STATE_FILE = "HollowMoonHub_AD_v15_state.json"
-local CORE_FILE = "HollowMoonHub_AD_v34_core.lua"
+local CORE_FILE = "HollowMoonHub_AD_v35_core.lua"
 local PERSIST_KEYS = {
     "mapChoice", "v30MapReviewed", "difficultyChoice", "hardcore", "friendsOnly", "startDelay",
     "autoStart", "autoRetry", "autoLeaveMatches", "matchesToLeave",
@@ -235,7 +236,50 @@ local function loadPreferences()
         S.modePriority[key] = math.clamp(math.floor(tonumber(S.modePriority[key]) or rank),1,7)
     end
 end
+-- Save the user's choices separately from room/results/session bookkeeping.
+-- This file is only written by explicit Auto Start/Auto Retry UI callbacks,
+-- or once on upgrading from older state where no dedicated file exists.
+S.toggleIntentFile = "HollowMoonHub_AD_v35_toggle_intent.json"
+S.saveToggleIntent = function()
+    if type(writefile) ~= "function" then
+        if not S.toggleIntentStorageWarned then
+            S.toggleIntentStorageWarned = true
+            warn("[HollowMoonHub AD v35] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+        end
+        return false
+    end
+    local ok, json = pcall(function()
+        return HttpService:JSONEncode({version=35, autoStart=S.autoStart==true,
+            autoRetry=S.autoRetry==true, changedAt=os.time()})
+    end)
+    if not ok then return false end
+    local wrote = pcall(writefile, S.toggleIntentFile, json)
+    if not wrote and not S.toggleIntentStorageWarned then
+        S.toggleIntentStorageWarned = true
+        warn("[HollowMoonHub AD v35] Could not write Auto Start/Retry settings; choices may not survive teleports")
+    end
+    return wrote
+end
+S.loadToggleIntent = function()
+    if type(readfile) ~= "function" then return false end
+    local ok, raw = pcall(readfile, S.toggleIntentFile)
+    if not ok or type(raw) ~= "string" then return false end
+    local parsed, state = pcall(HttpService.JSONDecode, HttpService, raw)
+    if not parsed or type(state) ~= "table" then return false end
+    if type(state.autoStart) ~= "boolean" or type(state.autoRetry) ~= "boolean" then
+        return false
+    end
+    S.autoStart, S.autoRetry = state.autoStart, state.autoRetry
+    return true
+end
 loadPreferences()
+if not S.loadToggleIntent() then
+    -- First v35 execution: seed from previously saved v34 user choices.
+    S.saveToggleIntent()
+end
+if S.sessionStopped and S.autoStart then
+    warn("[HollowMoonHub AD v35] Auto Start is ON, but the previous match limit paused Dimensions. Select Resume Mode Queue in Lobby to continue.")
+end
 -- v32 could re-enable previously saved native card auto-sell rarities even
 -- when those rarities were NOT selected in HollowMoonHub. One-time fail-safe:
 -- disable Auto Sell until the user re-confirms their selections in v34.
@@ -294,7 +338,7 @@ end
 -- GitHub must host a complete Anime Dimensions script. Accept older/newer
 -- version headers, but never execute an unrelated game script.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V34"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V35"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -306,7 +350,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v30 main entry adds a second gate for
+        -- until player stats load; the v35 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -322,7 +366,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v34] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v35] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -339,38 +383,39 @@ local function installTeleportBootstrap()
         end
         local url = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
         -- Bust cached copies of the raw file after updating it in GitHub.
-        local freshURL = url .. "?hmh_ad_v30=" .. tostring(os.time())
+        local freshURL = url .. "?hmh_ad_v35=" .. tostring(os.time())
         local ok, code = pcall(function() return game:HttpGet(freshURL, true) end)
         if not ok or type(code) ~= "string" or #code == 0 then
             -- Some executors reject the optional no-cache parameter/query string.
             ok, code = pcall(function() return game:HttpGet(url) end)
         end
         if not ok or type(code) ~= "string" or #code == 0 then
-            warn("[HollowMoonHub AD v34] GitHub Auto Execute fetch failed")
+            warn("[HollowMoonHub AD v35] GitHub Auto Execute fetch failed")
             return
         end
-        -- Accept ANY complete HollowMoonHub Anime Dimensions version.
-        -- An older v19 loader rejected v20 solely because the marker changed.
-        -- Still reject other games, e.g. the AOT script previously at this URL.
+        -- Accept v35 and newer, never silently downgrade to a known version
+        -- that automatically disabled Auto Start/Retry. Future versions remain
+        -- valid; unrelated games such as the old AOT GitHub file are blocked.
         local header = code:sub(1, 4096)
         local firstLine = header:match("^[^\r\n]+") or "<empty>"
-        local validHeader = firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V%d+%s*$") ~= nil
+        local scriptVersion = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
+        local validHeader = scriptVersion ~= nil and scriptVersion >= 35
         local isAnimeDimensions = validHeader
             and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
             and header:find("6938803436", 1, true) ~= nil
             and header:find("6990129309", 1, true) ~= nil
         if not isAnimeDimensions then
-            warn("[HollowMoonHub AD v34] GitHub returned a different script: "
-                .. firstLine:sub(1, 140) .. ". Not executing; check branch/file/raw URL.")
+            warn("[HollowMoonHub AD v35] GitHub script missing, unrelated, or older than v35: "
+                .. firstLine:sub(1, 140) .. ". Not executing; update the testing file on main.")
             return
         end
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v34] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v35] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v34] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v35] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -626,6 +671,7 @@ local function autoStartWorker()
     if os.time() < (S.reconnectResumeEpoch or 0) then return end
     if S.specialSelected or S.specialBusy then return end
     if S.lobbyBusy or not S.alive or not inLobby() or not S.autoStart or S.sessionStopped then return end
+    if os.clock() < (S.roomUnavailableUntil or 0) then return end
     S.lobbyBusy = true
     S.lobbyGeneration = S.lobbyGeneration + 1
     local token = S.lobbyGeneration
@@ -651,13 +697,14 @@ local function autoStartWorker()
         end
         local request, why = buildRoomData()
         if not request then
-            warnOnce("Auto Start: " .. tostring(why))
-            S.autoStart = false
-            savePreferences()
-            if S.autoStartToggle then pcall(function() S.autoStartToggle:Set(false, true) end) end
+            -- A locked map, missing level, or invalid difficulty is a temporary
+            -- eligibility state. NEVER overwrite what the user toggled ON.
+            warnOnce("Auto Start waiting (still enabled): " .. tostring(why))
+            S.roomUnavailableUntil = os.clock() + 12
             S.lobbyBusy = false
             return
         end
+        S.roomUnavailableUntil = 0
         local response, err = invokeRoom("CreateRoom", request)
         if not response or response.status ~= "Success" then
             warnOnce("CreateRoom failed: " .. tostring(err or (response and response.message)))
@@ -738,17 +785,18 @@ local function resultsWorkflowTick(now, visible)
         -- normal Dimensions retry/leave action.
         return
     end
+    if S.sessionStopped then return end -- already reached this session's limit
     if not (S.autoRetry or S.autoLeaveMatches) then return end
     S.matchesCompleted = S.matchesCompleted + 1
     savePreferences()
     local shouldLeave = S.autoLeaveMatches and S.matchesCompleted >= S.matchesToLeave
     if shouldLeave then
+        -- STOP THIS RUN, not the user's saved toggles. The Lobby tab's
+        -- Resume Mode Queue button or a fresh manual Auto Start ON can
+        -- resume; it must not silently rewrite either preference to OFF.
         S.sessionStopped = true
-        S.autoStart = false
-        S.autoRetry = false
         savePreferences()
-        if S.autoStartToggle then pcall(function() S.autoStartToggle:Set(false, true) end) end
-        if S.autoRetryToggle then pcall(function() S.autoRetryToggle:Set(false, true) end) end
+        warnOnce("Match limit reached: leaving and pausing Dimensions. Auto Start/Retry preferences are preserved. Use Resume Mode Queue to continue.")
     elseif not S.autoRetry then
         -- Count the completed match but don't take an action until limit.
         return
@@ -3244,11 +3292,11 @@ local function buildUI()
     local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
     local window = Rayfield:CreateWindow({
         name = "HollowMoonHub",
-        subtitle = "Anime Dimensions | v30",
+        subtitle = "Anime Dimensions | v35",
         sidebarLayout = true,
     })
     S.window = window
-    window:CreateTag({text = "v30"})
+    window:CreateTag({text = "v35"})
 
     window:CreateSection({name="AUTOMATION"})
 
@@ -3294,6 +3342,7 @@ local function buildUI()
                 if type(value)~="string" then return end
                 S.mapChoice=value=="Hardest" and "Hardest" or (mapLabels[value] or S.mapChoice)
                 S.createdOwnRoom=false
+                S.roomUnavailableUntil=0
                 refreshDifficulties()
                 savePreferences()
             end,
@@ -3305,6 +3354,7 @@ local function buildUI()
                 if type(value)=="table" then value=value[1] end
                 if type(value)~="string" then return end
                 S.difficultyChoice=value
+                S.roomUnavailableUntil=0
                 savePreferences()
             end,
         })
@@ -3329,6 +3379,7 @@ local function buildUI()
             name="Auto Start",flag="AD15_AutoStart",value=S.autoStart,
             callback=function(on)
                 S.autoStart=on==true
+                S.roomUnavailableUntil=0
                 S.lobbyGeneration=S.lobbyGeneration+1
                 if S.autoStart then
                     if S.sessionStopped then S.matchesCompleted=0 end
@@ -3340,11 +3391,16 @@ local function buildUI()
                     -- eligible mode on its next tick; no independent kickoff.
                 else S.lobbyBusy=false end
                 savePreferences()
+                S.saveToggleIntent()
             end,
         })
         S.autoRetryToggle=startCol:CreateToggle({
             name="Auto Retry",flag="AD15_AutoRetry",value=S.autoRetry,
-            callback=function(on) S.autoRetry=on==true; savePreferences() end,
+            callback=function(on)
+                S.autoRetry=on==true
+                savePreferences()
+                S.saveToggleIntent()
+            end,
         })
         startCol:CreateToggle({
             name="Auto Leave After X Matches",flag="AD15_AutoLeave",value=S.autoLeaveMatches,
@@ -3828,6 +3884,12 @@ local function buildUI()
     buildSettingsTab()
 end
 buildUI()
+-- Diagnostics only: absence of file support explains toggles reverting on
+-- arrival in another place even when neither workflow changes the preference.
+if (S.autoStart or S.autoRetry or S.autoExecute)
+    and (type(readfile) ~= "function" or type(writefile) ~= "function") then
+    warnOnce("Cross-place settings are not persistent in this executor. Enable file support, otherwise Auto Start/Retry may reset on teleport.")
+end
 
 -- Recover from game-side arena/portal teleports. Our flight controller writes
 -- a position each Heartbeat; a large discrepancy means Roblox has moved us
@@ -3969,7 +4031,7 @@ end)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
-local priorBoot = env.HollowMoonADStartupV34
+local priorBoot = env.HollowMoonADStartupV35
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoot.jobId == game.JobId then
     if priorBoot.status == "waiting" or priorBoot.status == "starting" then
         return -- duplicate Auto Execute invocation for the same destination
@@ -3980,7 +4042,7 @@ if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId and priorBoo
     end
 end
 local boot = { status = "waiting", placeId = game.PlaceId, jobId = game.JobId }
-env.HollowMoonADStartupV34 = boot
+env.HollowMoonADStartupV35 = boot
 
 local lobbyPlaces = {
     [6938803436] = true,
@@ -4046,7 +4108,7 @@ local cleared = false
 local noticeShown = false
 local bootStartedAt = os.clock()
 while os.clock() < untilTime do
-    if env.HollowMoonADStartupV34 ~= boot then return end
+    if env.HollowMoonADStartupV35 ~= boot then return end
     local ok, reason, char, flag = isReady()
     lastReason = reason
     if ok then
@@ -4063,13 +4125,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v34] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v35] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v34] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v35] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -4077,16 +4139,16 @@ end
 boot.status = "starting"
 -- Only AFTER the entire readiness gate succeeds do we touch the game.
 if type(writefile) == "function" then
-    pcall(writefile, "HollowMoonHub_AD_v34_core.lua", CORE)
+    pcall(writefile, "HollowMoonHub_AD_v35_core.lua", CORE)
 end
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v34] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v35] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v34] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v35] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
