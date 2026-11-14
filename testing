@@ -1,12 +1,12 @@
--- HMH_ANIME_DIMENSIONS_V51
--- HollowMoonHub | Anime Dimensions v51 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V52
+-- HollowMoonHub | Anime Dimensions v52 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V51
--- HMH_AD_CORE_ADLER32:23ab21dd
--- HollowMoonHub | Anime Dimensions v51 (v48 dodge + boss-death recovery) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V52
+-- HMH_AD_CORE_ADLER32:fe6b8f62
+-- HollowMoonHub | Anime Dimensions v52 (v51 dodge + boss priority over summons) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -298,7 +298,7 @@ local function savePreferences()
     local wrote = pcall(writefile, STATE_FILE, encoded)
     if not wrote and not S.dataFolderWarningShown then
         S.dataFolderWarningShown = true
-        warn("[HollowMoonHub AD v51] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
+        warn("[HollowMoonHub AD v52] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
     end
     return wrote
 end
@@ -336,7 +336,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v51] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v52] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -349,7 +349,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v51] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v52] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -442,10 +442,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v51 or newer; reject old cached builds that lack
+-- GitHub must host v52 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V51"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V52"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -457,7 +457,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v51 main entry adds a second gate for
+        -- until player stats load; the v52 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -473,7 +473,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v51] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v52] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -497,7 +497,7 @@ local function installTeleportBootstrap()
         -- First try GitHub with a fresh cache key, then the plain URL for
         -- executors that do not accept cache-busting query strings.
         local fetchOK, code = pcall(function()
-            return game:HttpGet(url .. "?hmh_ad_v51=" .. tostring(os.time()), true)
+            return game:HttpGet(url .. "?hmh_ad_v52=" .. tostring(os.time()), true)
         end)
         if not fetchOK or type(code) ~= "string" or #code == 0 then
             fetchOK, code = pcall(function() return game:HttpGet(url) end)
@@ -519,7 +519,7 @@ local function installTeleportBootstrap()
             local header = source:sub(1, 4096):gsub("^%s+", "")
             local firstLine = header:match("^[^\r\n]+") or "<empty>"
             local version = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-            local supported = version ~= nil and version >= 51
+            local supported = version ~= nil and version >= 52
                 and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
                 and header:find("6938803436", 1, true) ~= nil
                 and header:find("6990129309", 1, true) ~= nil
@@ -542,11 +542,11 @@ local function installTeleportBootstrap()
             local validLocal = localOK and acceptedHeader(localCode, true)
             if validLocal then
                 code = localCode
-                warn("[HollowMoonHub AD v51] GitHub returned " .. remoteHeader
-                    .. "; using verified local v51 core. Update the GitHub testing file to v51.")
+                warn("[HollowMoonHub AD v52] GitHub returned " .. remoteHeader
+                    .. "; using verified local v52 core. Update the GitHub testing file to v52.")
             else
-                warn("[HollowMoonHub AD v51] GitHub returned " .. remoteHeader
-                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v51.")
+                warn("[HollowMoonHub AD v52] GitHub returned " .. remoteHeader
+                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v52.")
                 return
             end
         end
@@ -568,17 +568,17 @@ local function installTeleportBootstrap()
             task.wait(0.2)
         end
         if not localReady then
-            warn("[HollowMoonHub AD v51] Auto Execute aborted: character/client library not ready")
+            warn("[HollowMoonHub AD v52] Auto Execute aborted: character/client library not ready")
             return
         end
         task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v51] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v52] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v51] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v52] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -2480,28 +2480,72 @@ local function extremeModeActive()
     local mode=tostring(Workspace:GetAttribute("GameMode") or ""):lower()
     return mode:find("extreme",1,true)~=nil or S.modeIntent=="ExtremeDimension"
 end
+-- Boss identification works in regular timed Dimensions as well as raids.
+-- The game's UIModule exposes the actual boss name through BossHealthFrame.
+-- Refresh the HUD briefly rather than traversing PlayerGui every Heartbeat.
 S.bossBarActive = function()
-    local gui=player:FindFirstChildOfClass("PlayerGui")
-    local battle=gui and gui:FindFirstChild("BattleCenterUIFrame",true)
-    local frame=battle and battle:FindFirstChild("BossHealthFrame")
-    return frame and frame:IsA("GuiObject") and frame.Visible==true or false
+    local now = os.clock()
+    if now - (S.bossHudCheckedAt or -HUGE) < 0.15 then
+        return S.bossHudVisible == true
+    end
+    S.bossHudCheckedAt = now
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    local frame = gui and gui:FindFirstChild("BossHealthFrame", true)
+    local visible = frame and frame:IsA("GuiObject") and frame.Visible == true or false
+    if visible then
+        local parent = frame.Parent
+        while parent and parent ~= gui do
+            if parent:IsA("GuiObject") and not parent.Visible then
+                visible = false
+                break
+            elseif parent:IsA("ScreenGui") and not parent.Enabled then
+                visible = false
+                break
+            end
+            parent = parent.Parent
+        end
+    end
+    S.bossHudVisible = visible
+    local label = visible and frame:FindFirstChild("BossName", true)
+    local name = label and label:IsA("TextLabel") and label.Text or ""
+    S.bossHudName = (name ~= "Test Boss Name" and name) or ""
+    return visible
 end
 local function bossScore(target)
     if not target or not target.model then return 0 end
-    local model=target.model
-    if model:GetAttribute("IsBoss")==true or model:GetAttribute("Boss")==true
-        or target.hum:GetAttribute("IsBoss")==true then return 100 end
-    local flag=model:FindFirstChild("IsBoss") or model:FindFirstChild("Boss")
+    local model = target.model
+    if model:GetAttribute("IsBoss") == true or model:GetAttribute("Boss") == true
+        or target.hum:GetAttribute("IsBoss") == true
+        or target.hum:GetAttribute("Boss") == true then return 100 end
+    local flag = model:FindFirstChild("IsBoss") or model:FindFirstChild("Boss")
     if flag and flag:IsA("BoolValue") and flag.Value then return 100 end
-    local name=model.Name:lower()
-    if name:find("portal",1,true) or name:find("minion",1,true) then return -10 end
-    if name:find("boss",1,true) or name:find("guardian",1,true)
-        or name:find("final",1,true) or name:find("vampire king",1,true)
-        or name:find("pumpkin king",1,true) then return 80 end
-    -- Some boss rigs have no explicit marker. Prefer substantially larger
-    -- combat roots over portal adds, never mere decorative parts.
-    local size=target.root.Size
-    if math.max(size.X,size.Y,size.Z)>=14 then return 25 end
+    local name = model.Name:lower()
+    -- Summons/portals should not inherit boss priority just for being large.
+    if name:find("portal", 1, true) or name:find("minion", 1, true)
+        or name:find("summon", 1, true) or name:find("clone", 1, true) then
+        return -10
+    end
+    -- Match the in-game boss health bar, including bosses without 'Boss' in
+    -- the Model name (some maps display the boss's name rather than its title).
+    local hudName = tostring(S.bossHudName or ""):lower():gsub("[^%w]", "")
+    local modelName = name:gsub("[^%w]", "")
+    local displayName = tostring(target.hum.DisplayName or ""):lower():gsub("[^%w]", "")
+    if #hudName >= 4 and
+        ((#modelName >= 4 and (hudName == modelName
+            or hudName:find(modelName, 1, true) ~= nil
+            or modelName:find(hudName, 1, true) ~= nil))
+        or (#displayName >= 4 and (hudName == displayName
+            or hudName:find(displayName, 1, true) ~= nil
+            or displayName:find(hudName, 1, true) ~= nil))) then
+        return 95
+    end
+    if name:find("boss", 1, true) or name:find("guardian", 1, true)
+        or name:find("final", 1, true) or name:find("vampire king", 1, true)
+        or name:find("pumpkin king", 1, true) then return 80 end
+    -- Size is only a supporting signal WHILE a boss health bar is present;
+    -- otherwise a large summoned NPC might be incorrectly treated as the boss.
+    local size = target.root.Size
+    if S.bossHudVisible and math.max(size.X, size.Y, size.Z) >= 14 then return 25 end
     return 0
 end
 S.targetInCurrentArea = function(t, root)
@@ -2521,11 +2565,58 @@ local function findTarget(root)
     bindMonsterIndex()
     local folder = S.monsterFolder
     if not folder then
+        S.activeBossTarget = nil
         if S.target then setTarget(nil) end
         return nil
     end
     local current = S.target
-    local prioritizeBoss=extremeModeActive() or S.bossBarActive()
+    -- Check the current HUD boss name before scoring any monster model.
+    local bossBarShowing = S.bossBarActive()
+    -- A confirmed living boss always outranks nearby summoned NPCs, even in
+    -- a regular timed Dimension without the Extreme/Boss Rush mode flags.
+    local bestBoss, bestBossScore, bestBossDistance = nil, 0, HUGE
+    local hpLeader, hpLeaderHealth, hpRunnerUp, localCount = nil, 0, 0, 0
+    for _, entry in pairs(S.indexedTargets) do
+        local candidate = entry.target
+        if validTarget(candidate) and candidate.model:IsDescendantOf(folder)
+            and S.targetInCurrentArea(candidate, root) then
+            localCount = localCount + 1
+            local hp = math.max(0, tonumber(candidate.hum.MaxHealth) or 0)
+            if hp > hpLeaderHealth then
+                hpRunnerUp = hpLeaderHealth
+                hpLeaderHealth = hp
+                hpLeader = candidate
+            elseif hp > hpRunnerUp then
+                hpRunnerUp = hp
+            end
+            local score = bossScore(candidate)
+            if score >= 70 or (bossBarShowing and score >= 25) then
+                local dist = (candidate.root.Position - root.Position).Magnitude
+                if not bestBoss or score > bestBossScore
+                    or (score == bestBossScore and candidate == current)
+                    or (score == bestBossScore and bestBoss ~= current
+                        and dist < bestBossDistance) then
+                    bestBoss, bestBossScore, bestBossDistance = candidate, score, dist
+                end
+            end
+        end
+    end
+    -- On some maps the boss model has no tag or recognizable name. While
+    -- summons coexist with it, the actual boss usually has far more MaxHealth.
+    -- Require a clear HP lead rather than mistaking a same-health add for it.
+    if not bestBoss and localCount >= 2 and hpLeader then
+        local ratio = bossBarShowing and 2.5 or 6
+        if hpLeaderHealth >= math.max(hpRunnerUp, 1) * ratio
+            and hpLeaderHealth >= 100 then
+            bestBoss = hpLeader
+        end
+    end
+    S.activeBossTarget = bestBoss
+    if bestBoss then
+        if current ~= bestBoss then setTarget(bestBoss) end
+        return bestBoss
+    end
+    local prioritizeBoss=extremeModeActive() or bossBarShowing
     local highestBoss = 0
     if prioritizeBoss then
         for _,entry in pairs(S.indexedTargets) do
@@ -2961,6 +3052,12 @@ end
 -- Never select a target purely by proximity if its farm pose is in danger.
 local function findSafeAlternateEnemy(root, current, zones, now)
     if not (S.autoFarm and current and #zones > 0) then return nil, nil end
+    -- The mission may fail if the boss isn't defeated before its timer ends.
+    -- Dodge around the boss instead of moving to an easier summoned NPC.
+    if S.activeBossTarget == current and validTarget(current) then
+        S.safeAlternate = nil
+        return nil, nil
+    end
     if now - S.lastAlternateCheck < 0.09 then
         local cached = S.safeAlternate
         if cached and cached ~= current and validTarget(cached) then
@@ -4066,7 +4163,7 @@ function S.Unload(manual)
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v51 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v52 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -5011,13 +5108,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v51] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v52] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v51] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v52] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -5027,12 +5124,12 @@ boot.status = "starting"
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v51] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v52] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v51] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v52] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
 -- One stable core cache per game. Create the game folder only if the
@@ -5073,7 +5170,7 @@ if type(writefile) == "function" then
     if overwrite then
         local okWrite = pcall(writefile, cachePath, CORE)
         if not okWrite then
-            warn("[HollowMoonHub AD v51] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
+            warn("[HollowMoonHub AD v52] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
         end
     end
 end
