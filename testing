@@ -1,12 +1,12 @@
--- HMH_ANIME_DIMENSIONS_V56
--- HollowMoonHub | Anime Dimensions v56 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V60
+-- HollowMoonHub | Anime Dimensions v60 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V56
--- HMH_AD_CORE_ADLER32:0e944341
--- HollowMoonHub | Anime Dimensions v56 (cards + persistent auto sell + display names) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V60
+-- HMH_AD_CORE_ADLER32:5b94eb62
+-- HollowMoonHub | Anime Dimensions v60 (arena-aware stage portals and bounded mobile movement) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -26,6 +26,18 @@ if previous and type(previous.Unload) == "function" then pcall(previous.Unload) 
 
 local S = {
     alive = true,
+    -- Runtime-only mobile budget. Never overwrite a user's saved settings.
+    mobileOptimized = game:GetService("UserInputService").TouchEnabled
+        and (not game:GetService("UserInputService").KeyboardEnabled
+            or not game:GetService("UserInputService").MouseEnabled),
+    lastCombatScan = -math.huge,
+    lastAbilityCheck = -math.huge,
+    lastResultsWorker = -math.huge,
+    lastStatsHeartbeat = -math.huge,
+    lastVisualInspection = -math.huge,
+    lastRosterRefresh = -math.huge,
+    noclipCharacter = nil,
+    noclipConnection = nil,
     -- Lobby / results workflow (persisted when the executor supports files)
     mapChoice = "Hardest", -- internal map name or "Hardest"
     v30MapReviewed = false, -- one-time migration of stale Halloween map selection
@@ -149,6 +161,20 @@ local S = {
     safeAlternate = nil,
     lastAlternateCheck = -math.huge,
     farmMethod = "Tween",
+    safeMovement = true, -- protects arena floors and limits sudden root motion; default ON
+    movementStatus = "Ready",
+    stagePortalCandidates = {},
+    stagePortalScanAt = -math.huge,
+    stagePortalScanPending = false,
+    stagePortalPath = nil,
+    stagePortalPathIndex = 1,
+    stagePortalPathPending = false,
+    stagePortalPathAt = -math.huge,
+    stagePortalGoal = nil,
+    stagePortalLastAction = -math.huge,
+    approachLastCheckAt = -math.huge,
+    approachLastStart = nil,
+    approachLastPose = nil,
     tweenSpeed = 120, -- studs/second, adjustable in OasisUI
     farmPosition = "Above",
     farmDistance = 4,
@@ -237,6 +263,10 @@ local S = {
     lastSafetyRecovery = -math.huge,
     lastScriptPosition = nil, -- position last written by farm; detect game-side arena teleports
     lastSpatialRebase = -math.huge,
+    -- Runtime-only arena floor cache. Never store Roblox Instances in settings.
+    divineArena = nil,
+    safeArena = nil, -- runtime boss floor, never saved
+    lastMotionStepAt = -math.huge,
 }
 env.HollowMoonAnimeDimensions = S
 
@@ -302,7 +332,7 @@ local PERSIST_KEYS = {
     "antiAfk", "autoReconnect", "reconnectV17Reviewed", "reconnectV18Reviewed", "lastReconnectEpoch", "reconnectResumeEpoch", "autoExecute",
     "autoClaimQuests", "autoClaimSpeedRaidWeekly", "autoSellCards", "cardSellRarities", "cardSellStrictV34Reviewed",
     "autoEquipCards", "cardEquipPriority",
-    "farmMethod", "tweenSpeed", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
+    "farmMethod", "safeMovement", "tweenSpeed", "farmPosition", "farmDistance", "selectedSkills", "selectedAssists", "selectedFruits",
 }
 local function savePreferences()
     if type(writefile) ~= "function" then return false end
@@ -314,7 +344,7 @@ local function savePreferences()
     local wrote = pcall(writefile, STATE_FILE, encoded)
     if not wrote and not S.dataFolderWarningShown then
         S.dataFolderWarningShown = true
-        warn("[HollowMoonHub AD v56] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
+        warn("[HollowMoonHub AD v60] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
     end
     return wrote
 end
@@ -355,7 +385,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v56] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v60] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -368,7 +398,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v56] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v60] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -460,10 +490,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v56 or newer; reject old cached builds that lack
+-- GitHub must host v60 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V56"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V60"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -475,7 +505,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v56 main entry adds a second gate for
+        -- until player stats load; the v60 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -491,7 +521,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v56] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v60] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -515,7 +545,7 @@ local function installTeleportBootstrap()
         -- First try GitHub with a fresh cache key, then the plain URL for
         -- executors that do not accept cache-busting query strings.
         local fetchOK, code = pcall(function()
-            return game:HttpGet(url .. "?hmh_ad_v56=" .. tostring(os.time()), true)
+            return game:HttpGet(url .. "?hmh_ad_v60=" .. tostring(os.time()), true)
         end)
         if not fetchOK or type(code) ~= "string" or #code == 0 then
             fetchOK, code = pcall(function() return game:HttpGet(url) end)
@@ -537,7 +567,7 @@ local function installTeleportBootstrap()
             local header = source:sub(1, 4096):gsub("^%s+", "")
             local firstLine = header:match("^[^\r\n]+") or "<empty>"
             local version = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-            local supported = version ~= nil and version >= 55
+            local supported = version ~= nil and version >= 60
                 and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
                 and header:find("6938803436", 1, true) ~= nil
                 and header:find("6990129309", 1, true) ~= nil
@@ -560,11 +590,11 @@ local function installTeleportBootstrap()
             local validLocal = localOK and acceptedHeader(localCode, true)
             if validLocal then
                 code = localCode
-                warn("[HollowMoonHub AD v56] GitHub returned " .. remoteHeader
-                    .. "; using verified local v56 core. Update the GitHub testing file to v56.")
+                warn("[HollowMoonHub AD v60] GitHub returned " .. remoteHeader
+                    .. "; using verified local v60 core. Update the GitHub testing file to v60.")
             else
-                warn("[HollowMoonHub AD v56] GitHub returned " .. remoteHeader
-                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v56.")
+                warn("[HollowMoonHub AD v60] GitHub returned " .. remoteHeader
+                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v60.")
                 return
             end
         end
@@ -586,17 +616,17 @@ local function installTeleportBootstrap()
             task.wait(0.2)
         end
         if not localReady then
-            warn("[HollowMoonHub AD v56] Auto Execute aborted: character/client library not ready")
+            warn("[HollowMoonHub AD v60] Auto Execute aborted: character/client library not ready")
             return
         end
         task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v56] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v60] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v56] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v60] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -616,6 +646,9 @@ local MAX_TARGET_DISTANCE = 10000 -- discovery, not a claim of infinite server a
 -- must relocate the player between rooms. Oversized bosses can still be used
 -- when a large visible body part is physically close to the character.
 S.localFarmRange = 220
+-- Bosses shown by the native HUD can be visible across a nearby courtyard.
+-- That is an approach distance, NOT permission to cross a far-away stage.
+S.localTransitionRange = 340
 S.localBossPriorityRange = 140
 local SKILL_RANGE = 25
 -- The native cooldown result remains authoritative. This faster retry guard
@@ -2292,9 +2325,19 @@ end
 local function getCharacter()
     local character = player.Character
     if not (character and character.Parent) then return end
+    local cached = S.characterParts
+    if cached and cached.character == character
+        and cached.humanoid.Parent and cached.root.Parent
+        and cached.humanoid.Health > 0 then
+        return character, cached.humanoid, cached.root
+    end
     local hum = character:FindFirstChildOfClass("Humanoid")
     local root = character:FindFirstChild("HumanoidRootPart")
-    if hum and root and hum.Health > 0 then return character, hum, root end
+    if hum and root and hum.Health > 0 then
+        S.characterParts = {character=character, humanoid=hum, root=root}
+        return character, hum, root
+    end
+    S.characterParts = nil
 end
 
 -- A giant's decorative UpperTorso/Head can be dozens of studs away from
@@ -2339,17 +2382,34 @@ local function closestBoxPoint(part, worldPosition)
     return part.CFrame:PointToWorldSpace(clamped)
 end
 
+S.bodyPartNames = {"LowerTorso", "Torso", "UpperTorso", "Head", "Hitbox", "HitBox"}
+S.cachedCombatBodyParts = function(t)
+    if not t or not t.model then return {} end
+    local now = os.clock()
+    if t.cachedBodyParts and now - (t.bodyCacheAt or 0) < 2.5 then
+        return t.cachedBodyParts
+    end
+    local result, seen = {}, {}
+    for _, name in ipairs(S.bodyPartNames) do
+        local body = t.model:FindFirstChild(name, true)
+        if body and body:IsA("BasePart") and body ~= t.root and not seen[body] then
+            result[#result + 1] = body
+            seen[body] = true
+        end
+    end
+    t.cachedBodyParts = result
+    t.bodyCacheAt = now
+    return result
+end
+
 local function effectiveDistance(t, fromPosition)
-    -- Only for deciding whether to use a skill. Skill validation is server-side.
+    -- Nearby body surfaces are relevant for giant bosses, but repeated
+    -- FindFirstChild(true) calls every mobile frame are prohibitively costly.
     local center = (t.root.Position - fromPosition).Magnitude
     local surface = (closestBoxPoint(t.root, fromPosition) - fromPosition).Magnitude
     local d = math.min(center, surface)
-    -- Some giant rigs have a small central root but very large nearby torsos.
-    -- Allow the skill attempt when beside that torso; do not use a huge model
-    -- bounding box, which can include unrelated attachments and decorations.
-    for _, name in ipairs({"LowerTorso", "Torso", "UpperTorso", "Head", "Hitbox", "HitBox"}) do
-        local body = t.model:FindFirstChild(name, true)
-        if body and body:IsA("BasePart") and body ~= t.root then
+    for _, body in ipairs(S.cachedCombatBodyParts(t)) do
+        if body.Parent then
             d = math.min(d, (closestBoxPoint(body, fromPosition) - fromPosition).Magnitude)
         end
     end
@@ -2383,6 +2443,11 @@ local function setTarget(nextTarget)
     S.nearFarmClearSince = nil
     S.lastNearFarmSearchAt = -HUGE
     S.safeAlternate = nil
+    -- Do not reuse a previous boss's platform after a target switch.
+    S.divineArena = nil
+    S.divineLastFailedTarget = nil
+    S.safeArena = nil
+    S.lastMotionStepAt = -HUGE
     S.lastHazardRead = -HUGE
     S.waypoints = nil
     S.lastPathGoal = nil
@@ -2504,7 +2569,7 @@ end
 -- Humanoid/Root descendant event. Do not scan the whole Workspace or choose
 -- NPCs outside the game's Monsters folder.
 S.reconcileMonsterIndex = function(now, urgent)
-    local interval = urgent and 1.1 or 7
+    local interval = urgent and (S.mobileOptimized and 1.75 or 1.1) or (S.mobileOptimized and 10 or 7)
     if now - (S.lastMonsterReconcileAt or -HUGE) < interval then return end
     S.lastMonsterReconcileAt = now
     bindMonsterIndex()
@@ -2533,12 +2598,15 @@ end
 -- Refresh the HUD briefly rather than traversing PlayerGui every Heartbeat.
 S.bossBarActive = function()
     local now = os.clock()
-    if now - (S.bossHudCheckedAt or -HUGE) < 0.15 then
+    if now - (S.bossHudCheckedAt or -HUGE) < (S.mobileOptimized and 0.25 or 0.15) then
         return S.bossHudVisible == true
     end
     S.bossHudCheckedAt = now
     local gui = player:FindFirstChildOfClass("PlayerGui")
-    local frame = gui and gui:FindFirstChild("BossHealthFrame", true)
+    local frame = S.cachedBossHealthFrame
+    if frame and (not gui or not frame:IsDescendantOf(gui)) then frame = nil end
+    if not frame and gui then frame = gui:FindFirstChild("BossHealthFrame", true) end
+    S.cachedBossHealthFrame = frame
     local visible = frame and frame:IsA("GuiObject") and frame.Visible == true or false
     if visible then
         local parent = frame.Parent
@@ -2600,7 +2668,11 @@ S.targetInCurrentArea = function(t, root)
     if not validTarget(t) then return false end
     local dist = (t.root.Position - root.Position).Magnitude
     if dist <= S.localFarmRange then return true end
-    -- A very large boss may have its actual root far below its visible torso.
+    -- An identified nearby boss can be approached over verified floor, not
+    -- chased for thousands of studs because it was the last live rig.
+    if S.safeMovement and dist <= S.localTransitionRange
+        and bossScore(t) >= 70 then return true end
+    -- A giant boss may have an offset root and a nearby, attackable body.
     return dist <= S.localFarmRange + 90
         and effectiveDistance(t, root.Position) <= 45
 end
@@ -2692,7 +2764,7 @@ local function findTarget(root)
         end
     end
     local localBest, localDistance, localPriority = nil, math.huge, -math.huge
-    local fallbackBest, fallbackDistance = nil, math.huge
+    local nearestDistant = math.huge
     for hum, entry in pairs(S.indexedTargets) do
         local t = entry.target
         if validTarget(t) and t.model:IsDescendantOf(folder) then
@@ -2704,25 +2776,20 @@ local function findTarget(root)
                     or (score == localPriority and d < localDistance) then
                     localBest, localDistance, localPriority = t,d,score
                 end
-            elseif d < fallbackDistance then
-                -- No arbitrary height or 220-stud lockout: if the avatar was
-                -- sent onto a roof, choose the nearest living enemy anywhere.
-                fallbackBest, fallbackDistance = t,d
+            elseif d < nearestDistant then
+                -- Diagnostic only. Never feed a remote stage's monster into
+                -- movement. Old code chased it across 4,000+ studs.
+                nearestDistant = d
             end
         else
             removeIndexedHumanoid(hum)
         end
     end
+    -- Far stages are transitioned by the game, not by flying toward remote
+    -- HumanoidRootParts. If no target is in the local encounter, release
+    -- movement and optionally use a verified physical portal below.
     local best = localBest
-    if not best then
-        -- Preserve the existing living target during long-distance travel;
-        -- a newly spawned nearby enemy still overrides it immediately.
-        if current and validTarget(current) and current.model:IsDescendantOf(folder) then
-            best = current
-        else
-            best = fallbackBest
-        end
-    end
+    S.nearestDistantEnemy = nearestDistant
     if S.target ~= best then setTarget(best) end
     return best
 end
@@ -2882,7 +2949,7 @@ end
 
 local function nearbyHazards(rootPos, now, target, farmGoal)
     bindHazards(now)
-    if now - S.lastHazardRead < 0.016 then return S.dangerList end
+    if now - S.lastHazardRead < (S.mobileOptimized and 0.045 or 0.016) then return S.dangerList end
     S.lastHazardRead = now
     local zones = {}
     local liveTarget = S.autoFarm and target and validTarget(target) and target or nil
@@ -2929,6 +2996,10 @@ local function nearbyHazards(rootPos, now, target, farmGoal)
         end
     end
 
+    local inspectVisuals = not S.mobileOptimized
+        or now - (S.lastVisualInspection or -HUGE) >= 0.09
+    if inspectVisuals then
+        S.lastVisualInspection = now
     for part in pairs(S.hazardParts) do
         if not part.Parent then
             S.hazardParts[part] = nil
@@ -2960,6 +3031,7 @@ local function nearbyHazards(rootPos, now, target, farmGoal)
             end
         end
     end
+    end -- visual part inspection budget
     for part, snapshot in pairs(S.visualHazardMemory) do
         if not part.Parent then
             if now >= snapshot.expires then
@@ -3035,13 +3107,338 @@ local function groundSupportAt(position)
     return nil
 end
 
--- Farm destinations are based on the enemy, never on a remembered arena
--- floor or roof height. No arena-height clamp interferes with Auto Farm.
+-- Divine Guardian Raid uses the Obsidian Guardian, a huge anchored boss
+-- with separate arena attack positioners. Its HRP is NOT a walkable destination.
+-- Keep damage targeting unchanged, but choose a real walkable arena floor for
+-- movement, never a boss limb, boss root, telegraph part, or outside-map point.
+S.isDivineGuardianTarget = function(target)
+    if not (target and target.model and target.hum) then return false end
+    if target.divineChecked then return target.divineBoss == true end
+    local name = tostring(target.model.Name):lower():gsub("[^%w]", "")
+    local display = tostring(target.hum.DisplayName or ""):lower():gsub("[^%w]", "")
+    local isDivine = name:find("obsidianguardian", 1, true) ~= nil
+        or display:find("obsidianguardian", 1, true) ~= nil
+        or name:find("divineguardian", 1, true) ~= nil
+        or display:find("divineguardian", 1, true) ~= nil
+    target.divineBoss = isDivine
+    target.divineChecked = true
+    return isDivine
+end
+
+-- Unlike generic groundSupportAt(), this also returns the actual floor part
+-- and rejects surfaces far below the current arena level. The map is not in
+-- the uploaded lobby snapshots, so the floor must be found at runtime.
+S.divineFloorHit = function(point, drop, expectedY)
+    local excluded = {}
+    if player.Character then excluded[#excluded + 1] = player.Character end
+    local folders = Workspace:FindFirstChild("Folders")
+    if folders then
+        local monsters = folders:FindFirstChild("Monsters")
+        local debris = folders:FindFirstChild("Debris")
+        if monsters then excluded[#excluded + 1] = monsters end
+        if debris then excluded[#excluded + 1] = debris end
+    end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.IgnoreWater = true
+    local origin = point + Vector3.new(0, 6, 0)
+    for _ = 1, 9 do
+        params.FilterDescendantsInstances = excluded
+        local hit = Workspace:Raycast(origin, Vector3.new(0, -(drop or 70), 0), params)
+        if not hit then return nil end
+        if hit.Normal.Y >= 0.72 and hit.Instance.CanCollide
+            and hit.Position.Y > Workspace.FallenPartsDestroyHeight + 22
+            and (not expectedY or math.abs(hit.Position.Y - expectedY) <= 7) then
+            return hit
+        end
+        -- A lower world floor or a completely different platform is NOT the
+        -- fighting platform. Do not continue searching through that surface.
+        if expectedY and hit.Position.Y < expectedY - 8 then return nil end
+        excluded[#excluded + 1] = hit.Instance
+    end
+    return nil
+end
+
+-- v60: General boss-arena guard. Beast King (shown in the recording) is NOT
+-- Obsidian Guardian and therefore never used the older Divine-only guard.
+-- Capture the platform from a genuine nearby floor. Do not guess an arena from
+-- boss parts or a deep ground ray into the abyss. Boss fight movement retains
+-- its damage target, but its movement destination must lie over this floor.
+S.captureSafeBossArena = function(root, target)
+    if not S.safeMovement or not target or not validTarget(target) then return nil end
+    if S.isDivineGuardianTarget(target) then return nil end
+    local isBoss = bossScore(target) >= 70 or S.activeBossTarget == target
+    if not isBoss then return nil end
+    local arena = S.safeArena
+    if arena and arena.target == target then return arena end
+    local now = os.clock()
+    if now - (S.lastSafeArenaProbe or -HUGE) < 0.5 then return nil end
+    S.lastSafeArenaProbe = now
+    local seed = root.Position
+    -- When Farm started on walkable ground, this is the most trustworthy
+    -- snapshot. A valid floor near the avatar is acceptable after respawn.
+    if S.groundBackup and (S.groundBackup - root.Position).Magnitude < 80 then
+        seed = S.groundBackup
+    end
+    local hit = S.divineFloorHit(seed, 38)
+    if not hit or math.abs(seed.Y - hit.Position.Y) > 25
+        or math.abs(root.Position.Y - hit.Position.Y) > 35 then
+        return nil
+    end
+    arena = {
+        target = target,
+        anchor = hit.Position,
+        floorY = hit.Position.Y,
+        lastSafe = Vector3.new(hit.Position.X, hit.Position.Y + 4, hit.Position.Z),
+        lastCheckAt = -HUGE,
+        lastCheckPosition = nil,
+        lastCheckResult = nil,
+    }
+    S.safeArena = arena
+    return arena
+end
+
+S.safeArenaSupports = function(arena, pos)
+    if not arena then return false end
+    local dx, dz = pos.X - arena.anchor.X, pos.Z - arena.anchor.Z
+    if dx * dx + dz * dz > 125 * 125 then return false end
+    local point = Vector3.new(pos.X, arena.floorY + 8, pos.Z)
+    if not S.divineFloorHit(point, 29, arena.floorY) then return false end
+    -- A margin is necessary: a center ray alone can land the avatar on a lip.
+    for _, delta in ipairs({Vector3.new(2,0,0), Vector3.new(-2,0,0),
+                            Vector3.new(0,0,2), Vector3.new(0,0,-2)}) do
+        if not S.divineFloorHit(point + delta, 29, arena.floorY) then return false end
+    end
+    return true
+end
+
+S.guardBossPose = function(root, target, pose)
+    local arena = S.captureSafeBossArena(root, target)
+    if not arena then
+        -- A visible boss but no proved platform: stop rather than diving to
+        -- its HumanoidRootPart. Recheck after replication / respawn catches up.
+        return CFrame.new(root.Position) * root.CFrame.Rotation
+    end
+    local desired = pose.Position
+    local position = Vector3.new(desired.X,
+        math.clamp(desired.Y, arena.floorY + 3.25, arena.floorY + 11),
+        desired.Z)
+    local now = os.clock()
+    local valid = arena.lastCheckResult
+    if not arena.lastCheckPosition
+        or (position - arena.lastCheckPosition).Magnitude > 2
+        or now - (arena.lastCheckAt or -HUGE) >= 0.18 then
+        valid = S.safeArenaSupports(arena, position)
+        -- Do not fly through an empty corridor between disjoint platforms.
+        if valid and (position - root.Position).Magnitude >= 20 then
+            for _, part in ipairs({0.25, 0.5, 0.75}) do
+                local p = root.Position:Lerp(position, part)
+                if not S.safeArenaSupports(arena, p) then
+                    valid = false
+                    break
+                end
+            end
+        end
+        arena.lastCheckPosition = position
+        arena.lastCheckAt = now
+        arena.lastCheckResult = valid
+    end
+    if valid then
+        arena.lastSafe = position
+    else
+        -- Stick to a verified place on the original platform. Never snap to
+        -- a distant boss root, a lower floor, or an unsafe dodge candidate.
+        position = arena.lastSafe
+    end
+    local focus = aimPosition(target)
+    local flatFocus = Vector3.new(focus.X, position.Y, focus.Z)
+    if (flatFocus - position).Magnitude < 0.5 then
+        flatFocus = position + Vector3.new(root.CFrame.LookVector.X, 0,
+            root.CFrame.LookVector.Z)
+    end
+    return safeLookAt(position, flatFocus, Vector3.yAxis)
+end
+
+S.divineArenaClearance = function(root)
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    return math.clamp((humanoid and humanoid.HipHeight or 2)
+        + root.Size.Y * 0.5 + 0.45, 2.7, 6)
+end
+
+S.divineFloorValid = function(arena, position)
+    local dx = position.X - arena.anchor.X
+    local dz = position.Z - arena.anchor.Z
+    if dx * dx + dz * dz > 100 * 100 then return false end
+    local probe = Vector3.new(position.X, arena.floorY + 8, position.Z)
+    return S.divineFloorHit(probe, 30, arena.floorY) ~= nil
+end
+
+-- Cache a floor per target and throttle failed probes. The
+-- existing spawn's floor is preferable; the native CenterAttackPositioner
+-- is only a search origin, and is NEVER a teleport destination.
+S.captureDivineArena = function(root, target)
+    if not S.isDivineGuardianTarget(target) then return nil end
+    local gameMap = Workspace:FindFirstChild("GameMap")
+    local map = gameMap and gameMap:FindFirstChild("Divine Guardian Raid")
+    if not map then return nil end
+    local current = S.divineArena
+    if current and current.target == target and current.map == map then
+        return current
+    end
+    local now = os.clock()
+    if S.divineLastFailedTarget == target
+        and now - (S.divineLastFailedProbe or -HUGE) < 0.6 then
+        return nil
+    end
+    local hit = S.divineFloorHit(root.Position, 75)
+    local candidate = root.Position
+    if not hit and S.groundBackup
+        and (S.groundBackup - root.Position).Magnitude < 90 then
+        candidate = S.groundBackup
+        hit = S.divineFloorHit(candidate, 45)
+    end
+    if not hit then
+        local marker = map:FindFirstChild("CenterAttackPositioner", true)
+        if marker and marker:IsA("BasePart")
+            and (marker.Position - root.Position).Magnitude < 260 then
+            candidate = marker.Position + Vector3.new(0, 45, 0)
+            hit = S.divineFloorHit(candidate, 260)
+        end
+    end
+    if not hit then
+        -- Fail closed: do not use the raid boss HRP as a fallback destination.
+        S.divineLastFailedTarget = target
+        S.divineLastFailedProbe = now
+        return nil
+    end
+    S.divineLastFailedTarget = nil
+    local arena = {
+        target = target, map = map,
+        anchor = hit.Position, floorY = hit.Position.Y,
+        floorPart = hit.Instance,
+        goal = nil, sampledAt = -math.huge,
+        lastBossPosition = nil,
+    }
+    S.divineArena = arena
+    return arena
+end
+
+-- Server hit validation still controls range. Search only *real* walkable
+-- platform locations, keep a few studs from the boss geometry, and reuse the
+-- selected position instead of trying to follow a gigantic animated root.
+S.divinePlatformPose = function(root, target)
+    local arena = S.captureDivineArena(root, target)
+    if not arena then return nil end
+    local now = os.clock()
+    local y = arena.floorY + S.divineArenaClearance(root)
+    local anchor = Vector3.new(arena.anchor.X, y, arena.anchor.Z)
+    -- Always have a confirmed foothold available immediately, even if the
+    -- more precise platform search is still running on a slower phone.
+    if not arena.goal then arena.goal = anchor end
+    local moved = not arena.lastBossPosition
+        or (target.root.Position - arena.lastBossPosition).Magnitude > 12
+    local interval = S.mobileOptimized and 6 or 4
+    if (moved or now - (arena.sampledAt or -math.huge) >= interval)
+        and not arena.searchPending then
+        arena.sampledAt = now
+        arena.lastBossPosition = target.root.Position
+        arena.searchPending = true
+        local generation = S.targetGeneration
+        task.spawn(function()
+            local ok, searchError = pcall(function()
+                -- Candidate ranking is cheap. Raycast only likely positions;
+                -- yield every few floor checks instead of blocking Heartbeat.
+                local points = {}
+                local parts = S.cachedCombatBodyParts(target)
+                local function add(x, z, travel)
+                    local point = Vector3.new(x, y, z)
+                    local dist = effectiveDistance(target, point)
+                    local bodyPenalty = 0
+                    for _, part in ipairs(parts) do
+                        if part.Parent then
+                            local relative = part.CFrame:PointToObjectSpace(point)
+                            local half = part.Size * 0.5
+                            if math.abs(relative.X) <= half.X + 3
+                                and math.abs(relative.Y) <= half.Y + 3
+                                and math.abs(relative.Z) <= half.Z + 3 then
+                                bodyPenalty = bodyPenalty + 150
+                            end
+                        end
+                    end
+                    local score = math.max(0, dist - 18) * 5
+                        + travel * 0.21 + bodyPenalty
+                    if dist <= 24 then score = score - 16 end
+                    points[#points + 1] = {point=point, score=score}
+                end
+                add(anchor.X, anchor.Z, 0)
+                for _, radius in ipairs({10, 20, 32, 46, 62, 80}) do
+                    for i = 1, 12 do
+                        local angle = (i - 1) * math.pi * 2 / 12
+                        add(arena.anchor.X + math.cos(angle) * radius,
+                            arena.anchor.Z + math.sin(angle) * radius, radius)
+                    end
+                end
+                table.sort(points, function(a, b) return a.score < b.score end)
+                local maxProbes = S.mobileOptimized and 30 or 42
+                for i = 1, math.min(maxProbes, #points) do
+                    if not S.alive or S.divineArena ~= arena
+                        or generation ~= S.targetGeneration or not validTarget(target) then
+                        return
+                    end
+                    local position = points[i].point
+                    if S.divineFloorValid(arena, position) then
+                        -- Validate avatar-width clearance, not just center.
+                        local clear = true
+                        for _, offset in ipairs({Vector3.new(3,0,0), Vector3.new(-3,0,0),
+                                Vector3.new(0,0,3), Vector3.new(0,0,-3)}) do
+                            if not S.divineFloorValid(arena, position + offset) then
+                                clear = false
+                                break
+                            end
+                        end
+                        if clear then
+                            arena.goal = position
+                            return
+                        end
+                    end
+                    if i % (S.mobileOptimized and 3 or 6) == 0 then task.wait() end
+                end
+                -- Keep the original platform anchor if no checked point works.
+            end)
+            arena.searchPending = false
+            if not ok then warnOnce("Divine Guardian platform probe: " .. tostring(searchError)) end
+        end)
+    end
+    local goal = arena.goal
+    local focus = aimPosition(target)
+    local facing = Vector3.new(focus.X, goal.Y, focus.Z)
+    if (facing - goal).Magnitude <= 0.5 then
+        local forward = root.CFrame.LookVector
+        facing = goal + Vector3.new(forward.X, 0, forward.Z)
+    end
+    return safeLookAt(goal, facing, Vector3.yAxis)
+end
+
+-- Normal enemies still use the user's Above/Below/Behind offset. The
+-- Divine Guardian exception owns only its own arena-safe movement.
 
 local function supportedEscapePoint(point)
-    -- Dodge still requires real support beneath an escape destination, but
-    -- it must not prohibit moving between different arena elevations.
-    return groundSupportAt(point) ~= nil
+    if S.divineArena then
+        return S.divineFloorValid(S.divineArena, point)
+    end
+    if S.safeMovement and S.safeArena then
+        return S.safeArenaSupports(S.safeArena, point)
+    end
+    local floorY = groundSupportAt(point)
+    if not floorY then return false end
+    -- Reject 'safe' spots over pits / separate floors. The v60 version
+    -- accepted any floor within 460 studs, which causes the filmed fall.
+    if S.safeMovement and S.groundBackup then
+        local expected = S.groundBackup.Y - 4
+        return math.abs(floorY - expected) <= 14
+    end
+    return true
 end
 
 local function chooseSafeDodgePoint(fromPos, zones, nearPos)
@@ -3143,7 +3540,7 @@ S.findNearFarmEscape = function(farmGoal, rootPos, zones, now)
     table.sort(candidates, function(a, b) return a.score < b.score end)
     for i = 1, math.min(#candidates, 12) do
         local point = candidates[i].point
-        if S.farmMethod == "Legit" or supportedEscapePoint(point) then
+        if (S.farmMethod == "Legit" and not S.divineArena) or supportedEscapePoint(point) then
             S.nearFarmEscape = point
             S.nearFarmEscapeGeneration = S.targetGeneration
             return point
@@ -3197,7 +3594,7 @@ local function findSafeAlternateEnemy(root, current, zones, now)
     -- Ground support is expensive: verify only the best few candidates.
     for i = 1, math.min(5, #choices) do
         local option = choices[i]
-        if S.farmMethod == "Legit" or supportedEscapePoint(option.goal) then
+        if (S.farmMethod == "Legit" and not S.divineArena) or supportedEscapePoint(option.goal) then
             S.safeAlternate = option.target
             return option.target, option.goal
         end
@@ -3221,6 +3618,12 @@ local function dodgeTick(dt, root, humanoid, target, now)
     -- During a boss's death animation there may be no living target yet.
     -- Keep neither the old dodge goal nor its lengthy impact hold.
     if S.autoFarm and not validTarget(target) then
+        if S.dodgeGoal then endDodge(now) end
+        return false
+    end
+    if S.autoFarm and S.safeMovement and target
+        and (target.root.Position-root.Position).Magnitude > 105
+        and (bossScore(target) >= 70 or S.activeBossTarget == target) then
         if S.dodgeGoal then endDodge(now) end
         return false
     end
@@ -3280,7 +3683,7 @@ local function dodgeTick(dt, root, humanoid, target, now)
         -- than fleeing in ever-larger circles or standing idle until impact.
         -- Keep a distance/cooldown guard to avoid across-map teleports and
         -- jitter. Legit mode never teleports; its dodge/path rules remain.
-        if S.farmMethod ~= "Legit" and validTarget(target)
+        if not S.safeMovement and S.farmMethod ~= "Legit" and validTarget(target)
             and S.targetInCurrentArea(target, root)
             and (farmGoal - root.Position).Magnitude <= 180
             and now - (S.lastDodgeRejoinAt or -HUGE) >= 0.5 then
@@ -3310,7 +3713,7 @@ local function dodgeTick(dt, root, humanoid, target, now)
             local distance = (nearby - root.Position).Magnitude
             -- A single deliberate rejoin avoids dragging a Tween through an
             -- active attack. Don't continually teleport if already nearby.
-            if S.farmMethod ~= "Legit" and distance > 9 and distance <= 180
+            if not S.safeMovement and S.farmMethod ~= "Legit" and distance > 9 and distance <= 180
                 and S.targetInCurrentArea(target, root)
                 and now - S.nearFarmClearSince >= 0.06
                 and now - (S.lastDodgeRejoinAt or -HUGE) >= 0.65 then
@@ -3446,15 +3849,20 @@ local function resultScreenVisible(now)
         S.resultVisible = false
         return false
     end
-    if now - S.lastResultCheck < .12 then return S.resultVisible end
+    if now - S.lastResultCheck < (S.mobileOptimized and 0.18 or 0.12) then return S.resultVisible end
     S.lastResultCheck = now
     local gui = player:FindFirstChildOfClass("PlayerGui")
-    local result = gui and gui:FindFirstChild("ResultUI", true)
+    local result = S.cachedResultUI
+    if result and (not gui or not result:IsDescendantOf(gui)) then result = nil end
+    if not result and gui then result = gui:FindFirstChild("ResultUI", true) end
+    S.cachedResultUI = result
     S.resultVisible = result and result:IsA("GuiObject") and result.Visible or false
     return S.resultVisible
 end
 
 releaseMovement = function(resetFacing)
+    if S.noclipConnection then S.noclipConnection:Disconnect(); S.noclipConnection = nil end
+    S.noclipCharacter = nil
     -- Land while Physics/noclip is still owned by the farm controller.
     -- Do not simply turn off PlatformStand in the air: Roblox gravity will
     -- drop the rig through a floor when restored before collision resolution.
@@ -3464,6 +3872,9 @@ releaseMovement = function(resetFacing)
         and humanoid.Parent and humanoid.Health > 0 and S.forcedPhysics then
         local landing = findWalkableLanding(root, character, 650)
         if not landing then landing = S.groundBackup end
+        if S.safeMovement and landing and (landing - root.Position).Magnitude > 30 then
+            landing = nil -- do not teleport across the arena merely to unload
+        end
         local facing = root.CFrame.LookVector
         local flat = Vector3.new(facing.X, 0, facing.Z)
         if flat.Magnitude < .1 then flat = S.lateral end
@@ -3513,14 +3924,213 @@ releaseMovement = function(resetFacing)
     S.pathPending = false
     S.smoothPose = nil
     S.lastScriptPosition = nil
+    S.lastMotionStepAt = -HUGE
+    S.safeArena = nil
     S.lastClipCheck = -HUGE
 end
 
+-- v60: Use an ACTUAL game-world portal when it is identifiable. We do not
+-- invent a teleport remote or jump toward an enemy that is in another stage.
+-- Portals are discovered only if the runtime map has a named physical
+-- teleporter with a TouchTransmitter or ProximityPrompt.
+S.scanStagePortals = function(now)
+    if S.stagePortalScanPending or now - (S.stagePortalScanAt or -HUGE) < 5 then return end
+    S.stagePortalScanAt = now
+    S.stagePortalScanPending = true
+    task.spawn(function()
+        local found, seen = {}, {}
+        local roots = {}
+        for _, name in ipairs({"GameMap", "Folders", "Teleporters", "Portals"}) do
+            local object = Workspace:FindFirstChild(name)
+            if object then roots[#roots + 1] = object end
+        end
+        local examined = 0
+        for _, container in ipairs(roots) do
+            if container and container.Parent then
+                for _, inst in ipairs(container:GetDescendants()) do
+                    if not S.alive then S.stagePortalScanPending = false; return end
+                    examined = examined + 1
+                    if inst:IsA("BasePart") and not seen[inst] then
+                        local name = (inst.Name .. " " .. (inst.Parent and inst.Parent.Name or "")):lower()
+                        local prompt = inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+                        local looksLikePortal = name:find("portal",1,true)
+                            or name:find("teleport",1,true)
+                            or name:find("gateway",1,true)
+                            or name:find("warp",1,true)
+                        if prompt and (tostring(prompt.ActionText):lower():find("teleport",1,true)
+                            or tostring(prompt.ActionText):lower():find("enter",1,true)) then
+                            looksLikePortal = true
+                        end
+                        local touch = inst:FindFirstChildOfClass("TouchTransmitter")
+                        if looksLikePortal and (touch or (prompt and prompt.Enabled)) then
+                            found[#found+1] = {part=inst, prompt=prompt}
+                            seen[inst] = true
+                        end
+                    end
+                    -- Keep the potentially large raid map scan off Heartbeat.
+                    if examined % 150 == 0 then task.wait() end
+                end
+            end
+        end
+        S.stagePortalCandidates = found
+        S.stagePortalScanPending = false
+    end)
+end
+
+S.nearestStagePortal = function(root, target, now)
+    S.scanStagePortals(now)
+    local choice, shortest = nil, HUGE
+    for _, portal in ipairs(S.stagePortalCandidates or {}) do
+        local part = portal.part
+        if part and part:IsDescendantOf(Workspace) then
+            local distance = (part.Position - root.Position).Magnitude
+            -- No portal across the level: look for a real nearby entrance.
+            if distance <= 220 and distance < shortest then
+                choice, shortest = portal, distance
+            end
+        end
+    end
+    return choice, shortest
+end
+
+S.walkToStagePortal = function(root, humanoid, now, target)
+    local portal, distance = S.nearestStagePortal(root, target, now)
+    if not portal then return false end
+    local part = portal.part
+    if S.oldCharacter then releaseMovement() end
+    S.movementStatus = "Using map teleporter"
+    -- Use native walking and collision: touch portals should receive Touched.
+    humanoid.PlatformStand = false
+    local prompt = portal.prompt
+    if prompt and prompt.Parent and prompt.Enabled
+        and distance <= math.max(3, prompt.MaxActivationDistance - 1)
+        and now - (S.stagePortalLastAction or -HUGE) >= 4 then
+        S.stagePortalLastAction = now
+        pcall(function()
+            prompt:InputHoldBegin()
+            task.delay(math.max(prompt.HoldDuration, 0.05) + 0.1, function()
+                if prompt.Parent then pcall(function() prompt:InputHoldEnd() end) end
+            end)
+        end)
+    end
+    if S.stagePortalGoal ~= part then
+        S.stagePortalGoal = part
+        S.stagePortalPath = nil
+        S.stagePortalPathIndex = 1
+        S.stagePortalPathAt = -HUGE
+        S.stagePortalPathPending = false
+    end
+    if distance <= 4 then
+        if now - (S.lastMoveTo or -HUGE) >= 0.4 then
+            humanoid:MoveTo(part.Position)
+            S.lastMoveTo = now
+        end
+        return true
+    end
+    -- Pathfinding is asynchronous, reused, and limited to one route per 5 sec.
+    if not S.stagePortalPathPending and not S.stagePortalPath
+        and now - (S.stagePortalPathAt or -HUGE) >= 5 then
+        S.stagePortalPathAt = now
+        S.stagePortalPathPending = true
+        local destination, from = part.Position, root.Position
+        task.spawn(function()
+            local ok, points = pcall(function()
+                local path = PathfindingService:CreatePath({AgentRadius=2,
+                    AgentHeight=5, AgentCanJump=true})
+                path:ComputeAsync(from, destination)
+                if path.Status == Enum.PathStatus.Success then
+                    return path:GetWaypoints()
+                end
+            end)
+            if S.stagePortalGoal ~= part or not S.alive then return end
+            S.stagePortalPathPending = false
+            if ok and points and #points > 0 then
+                S.stagePortalPath = points
+                S.stagePortalPathIndex = math.min(2, #points)
+            end
+        end)
+    end
+    local steps = S.stagePortalPath
+    local waypoint = steps and steps[S.stagePortalPathIndex]
+    if waypoint then
+        if (Vector3.new(waypoint.Position.X, root.Position.Y, waypoint.Position.Z)
+                - root.Position).Magnitude < 4 then
+            S.stagePortalPathIndex = math.min(#steps, S.stagePortalPathIndex + 1)
+            waypoint = steps[S.stagePortalPathIndex]
+        end
+    end
+    if now - (S.lastMoveTo or -HUGE) >= 0.3 then
+        if waypoint then
+            if waypoint.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
+            humanoid:MoveTo(waypoint.Position)
+        else
+            humanoid:MoveTo(part.Position)
+        end
+        S.lastMoveTo = now
+    end
+    return true
+end
+
+-- Approaching a boss on the SAME continuous floor is distinct from fighting.
+-- Never capture the starter platform as the boss's permanent arena anchor.
+-- Only travel while two short ground probes confirm nearby walkable terrain;
+-- a gap, portal, or another remote map stops the flight instead.
+S.safeBossApproachPose = function(root, target, now)
+    local dist = (target.root.Position - root.Position).Magnitude
+    if dist > S.localTransitionRange then return nil end
+    if S.approachLastStart and (root.Position-S.approachLastStart).Magnitude <= 2
+        and now - (S.approachLastCheckAt or -HUGE) < 0.12 then
+        return S.approachLastPose
+    end
+    S.approachLastCheckAt = now
+    S.approachLastStart = root.Position
+    local direction = Vector3.new(target.root.Position.X-root.Position.X, 0,
+        target.root.Position.Z-root.Position.Z)
+    if direction.Magnitude < 1 then S.approachLastPose = nil; return nil end
+    local step = math.min(10, direction.Magnitude)
+    local ahead = root.Position + direction.Unit * step
+    local here = S.divineFloorHit(root.Position, 32)
+    local nextFloor = S.divineFloorHit(ahead + Vector3.new(0, 9, 0), 56)
+    local middle = S.divineFloorHit(root.Position + direction.Unit * (step*0.5)
+        + Vector3.new(0, 9, 0), 56)
+    if not here or not nextFloor or not middle
+        or math.abs(here.Position.Y - root.Position.Y) > 15
+        or math.abs(nextFloor.Position.Y - here.Position.Y) > 8
+        or math.abs(middle.Position.Y - here.Position.Y) > 8 then
+        S.approachLastPose = nil
+        return nil
+    end
+    local character = player.Character
+    local hum = character and character:FindFirstChildOfClass("Humanoid")
+    local clearance = math.clamp((hum and hum.HipHeight or 2)
+        + root.Size.Y * 0.5 + 0.4, 2.7, 6)
+    local point = Vector3.new(ahead.X, nextFloor.Position.Y + clearance, ahead.Z)
+    local focus = target.root.Position
+    local flatFocus = Vector3.new(focus.X, point.Y, focus.Z)
+    S.approachLastPose = safeLookAt(point, flatFocus, Vector3.yAxis)
+    return S.approachLastPose
+end
+
 local function makeNoClip(character)
-    for _, part in ipairs(character:GetDescendants()) do
-        if part:IsA("BasePart") then
-            if S.oldCollisions[part] == nil then S.oldCollisions[part] = part.CanCollide end
-            if part.CanCollide then part.CanCollide = false end
+    local function noclipPart(part)
+        if not part:IsA("BasePart") then return end
+        if S.oldCollisions[part] == nil then S.oldCollisions[part] = part.CanCollide end
+        if part.CanCollide then part.CanCollide = false end
+    end
+    if S.noclipCharacter ~= character then
+        if S.noclipConnection then S.noclipConnection:Disconnect() end
+        S.noclipCharacter = character
+        for _, part in ipairs(character:GetDescendants()) do noclipPart(part) end
+        S.noclipConnection = character.DescendantAdded:Connect(function(part)
+            if S.alive and S.autoFarm and S.farmMethod ~= "Legit"
+                and S.noclipCharacter == character then
+                noclipPart(part)
+            end
+        end)
+    else
+        -- Some game scripts can toggle collision back on after we set it.
+        for part in pairs(S.oldCollisions) do
+            if part.Parent and part.CanCollide then part.CanCollide = false end
         end
     end
 end
@@ -3543,6 +4153,17 @@ local function stablePoseHeading(root)
 end
 
 desiredFarmPose = function(root, target)
+    local enemyDist = (target.root.Position - root.Position).Magnitude
+    if S.safeMovement and enemyDist > 105
+        and (bossScore(target) >= 70 or S.activeBossTarget == target) then
+        return S.safeBossApproachPose(root, target, os.clock()) or root.CFrame
+    end
+    if S.isDivineGuardianTarget(target) then
+        local pose = S.divinePlatformPose(root, target)
+        -- If arena geometry has not loaded, hold position rather than
+        -- teleporting into Obsidian Guardian's body or outside the map.
+        return pose or (CFrame.new(root.Position) * root.CFrame.Rotation)
+    end
     local enemyRoot = target.root
     local focus = enemyRoot.Position
     local distance = S.farmDistance
@@ -3565,17 +4186,63 @@ desiredFarmPose = function(root, target)
         lookAt = Vector3.new(focus.X, position.Y, focus.Z)
         up = Vector3.yAxis
     end
-    return CFrame.lookAt(position, lookAt, up)
+    local pose = CFrame.lookAt(position, lookAt, up)
+    if S.safeMovement and (bossScore(target) >= 70 or S.activeBossTarget == target) then
+        return S.guardBossPose(root, target, pose)
+    end
+    return pose
 end
 
 local function moveLegit(humanoid, root, target, now)
     -- Legit = grounded walking/pathfinding. No flight or below-the-map movement.
-    local focus = target.root.Position
-    local look = target.root.CFrame.LookVector
-    local direction = Vector3.new(look.X, 0, look.Z)
-    if direction.Magnitude < 0.05 then direction = S.lateral end
-    local goal = focus - direction.Unit * S.farmDistance
-    goal = Vector3.new(goal.X, root.Position.Y, goal.Z)
+    local goal
+    local dist = (target.root.Position - root.Position).Magnitude
+    if S.safeMovement and dist > 105
+        and (bossScore(target) >= 70 or S.activeBossTarget == target) then
+        local safe = S.safeBossApproachPose(root, target, now)
+        if not safe then
+            humanoid:MoveTo(root.Position)
+            return
+        end
+        goal = safe.Position
+    elseif S.isDivineGuardianTarget(target) then
+        local safe = S.divinePlatformPose(root, target)
+        if not safe then
+            humanoid:MoveTo(root.Position)
+            return
+        end
+        goal = safe.Position
+    elseif S.safeMovement and (bossScore(target) >= 70 or S.activeBossTarget == target) then
+        -- v60: Legit walking must respect the same boss-arena safety as
+        -- Teleport and Tween. Large boss HRPs are not walkable goal points.
+        local arena = S.captureSafeBossArena(root, target)
+        if not arena then
+            humanoid:MoveTo(root.Position)
+            return
+        end
+        local focus = target.root.Position
+        local horizontal = Vector3.new(focus.X - root.Position.X, 0,
+            focus.Z - root.Position.Z)
+        if horizontal.Magnitude < 0.1 then
+            horizontal = Vector3.new(root.CFrame.LookVector.X, 0,
+                root.CFrame.LookVector.Z)
+        end
+        if horizontal.Magnitude < 0.1 then horizontal = Vector3.new(0, 0, -1) end
+        local offset = horizontal.Unit * math.max(S.farmDistance, 6)
+        local requested = Vector3.new(focus.X - offset.X,
+            arena.floorY + 4, focus.Z - offset.Z)
+        -- guardBossPose validates both the destination and intermediate
+        -- corridor; on failure it keeps a previously verified arena foothold.
+        local checked = S.guardBossPose(root, target, CFrame.new(requested))
+        goal = checked.Position
+    else
+        local focus = target.root.Position
+        local look = target.root.CFrame.LookVector
+        local direction = Vector3.new(look.X, 0, look.Z)
+        if direction.Magnitude < 0.05 then direction = S.lateral end
+        goal = focus - direction.Unit * S.farmDistance
+        goal = Vector3.new(goal.X, root.Position.Y, goal.Z)
+    end
     local delta = goal - root.Position
     if delta.Magnitude <= 2 then
         if now - S.lastMoveTo > 0.12 then
@@ -3640,6 +4307,23 @@ end
 farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
     local character = player.Character
     if not character then return end
+    local dist = (target.root.Position-root.Position).Magnitude
+    if S.safeMovement and dist > S.localTransitionRange then
+        S.movementStatus = "Waiting for map teleporter"
+        if S.oldCharacter then releaseMovement() end
+        return
+    end
+    if S.safeMovement and S.farmMethod ~= "Legit" and dist > 105
+        and (bossScore(target) >= 70 or S.activeBossTarget == target) then
+        if not S.safeBossApproachPose(root,target,now) then
+            S.movementStatus = "Waiting for safe route / teleporter"
+            if S.oldCharacter then releaseMovement() end
+            return
+        end
+        S.movementStatus = "Approaching boss on supported ground"
+    else
+        S.movementStatus = "Farming nearby enemy"
+    end
     if S.oldCharacter ~= character then
         releaseMovement()
         rememberGround(root, humanoid, character)
@@ -3651,6 +4335,8 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
     end
 
     if S.farmMethod == "Legit" then
+        if S.noclipConnection then S.noclipConnection:Disconnect(); S.noclipConnection = nil end
+        S.noclipCharacter = nil
         S.lastScriptPosition = nil
         rememberGround(root, humanoid, character)
         if next(S.oldCollisions) then
@@ -3674,15 +4360,19 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         humanoid:ChangeState(Enum.HumanoidStateType.Physics)
     end
     S.forcedPhysics = true
-    if now - S.lastClipCheck >= 0.1 then
+    if now - S.lastClipCheck >= (S.mobileOptimized and 0.24 or 0.1) then
         makeNoClip(character)
         S.lastClipCheck = now
     end
     local goalPose = dodgeOverride or desiredFarmPose(root, target)
+    if dodgeOverride and target and S.safeMovement and not S.isDivineGuardianTarget(target)
+        and (bossScore(target) >= 70 or S.activeBossTarget == target) then
+        goalPose = S.guardBossPose(root, target, goalPose)
+    end
     -- If the avatar is stranded far above/outside the active fight, directly
     -- rejoin the selected enemy rather than staying on an old floor reference.
     -- Normal Tween distances remain smooth; dodge movement retains priority.
-    if target and not dodgeOverride and S.farmMethod == "Tween" then
+    if not S.safeMovement and target and not dodgeOverride and S.farmMethod == "Tween" then
         local offset = goalPose.Position - root.Position
         if math.abs(offset.Y) >= 90 or offset.Magnitude >= 400 then
             root.CFrame = goalPose
@@ -3693,7 +4383,7 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
             return
         end
     end
-    if S.farmMethod == "Tween" and target and not dodgeOverride then
+    if not S.safeMovement and S.farmMethod == "Tween" and target and not dodgeOverride then
         -- Only rescue a genuinely stalled Tween. Do not snap during ordinary
         -- travel; the speed slider continues to govern all normal movement.
         local remaining = (goalPose.Position - root.Position).Magnitude
@@ -3728,7 +4418,15 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         S.stallTarget = nil
         S.stallProbePosition = nil
     end
-    if S.farmMethod == "Teleport" then
+    -- Mobile sends one controlled position update roughly every 50ms, rather
+    -- than continuously writing root CFrame as frame times fluctuate.
+    if S.safeMovement and S.mobileOptimized then
+        local elapsed = now - (S.lastMotionStepAt or -HUGE)
+        if elapsed < 0.045 then return end
+        dt = math.clamp(elapsed, 0, 0.055)
+    end
+    S.lastMotionStepAt = now
+    if S.farmMethod == "Teleport" and not S.safeMovement then
         -- Instant mode follows target only when position/rotation changes materially.
         if (root.Position - goalPose.Position).Magnitude >= 0.3
             or root.CFrame.LookVector:Dot(goalPose.LookVector) < 0.999
@@ -3744,9 +4442,21 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         -- exponential correction, making ordinary travel look like teleport.
         -- Dodge can temporarily travel faster to escape imminent strikes.
         local current = root.CFrame
-        local safeDt = math.clamp(dt, 0, 0.07)
+        -- Compensate for mobile frame drops without multiplying speed.
+        local safeDt = math.clamp(dt, 0, S.safeMovement and 0.055
+            or (S.mobileOptimized and 0.12 or 0.07))
         local speed = math.clamp(tonumber(S.tweenSpeed) or 120, 40, 650)
-        if dodgeOverride then speed = math.max(speed, 250) end
+        if S.safeMovement then
+            -- Teleport becomes fast bounded travel instead of an arbitrarily
+            -- large per-Heartbeat instant jump. Dashboard retains the method.
+            local limit = S.mobileOptimized and 90 or 135
+            if S.farmMethod == "Teleport" then limit = S.mobileOptimized and 110 or 155 end
+            speed = math.min(speed, limit)
+            -- Dodging should not increase speed to 250 studs/s on low FPS.
+            if dodgeOverride then speed = math.max(speed, S.mobileOptimized and 75 or 100) end
+        elseif dodgeOverride then
+            speed = math.max(speed, 250)
+        end
         local alpha = 1 - math.exp(-safeDt * (dodgeOverride and 14 or 9))
         local delta = goalPose.Position - current.Position
         local magnitude = delta.Magnitude
@@ -3755,6 +4465,9 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
             -- Constant speed on long travel; soft easing in the last few studs.
             local step = math.min(magnitude, speed * safeDt, magnitude * alpha)
             if magnitude > 8 then step = math.min(magnitude, speed * safeDt) end
+            if S.safeMovement then
+                step = math.min(step, S.mobileOptimized and 5.5 or 9)
+            end
             newPosition = current.Position + delta.Unit * step
         end
         local rotated = current:Lerp(CFrame.new(current.Position) * goalPose.Rotation, alpha)
@@ -3781,7 +4494,9 @@ local function holdFarmPose(root, humanoid)
         humanoid:ChangeState(Enum.HumanoidStateType.Physics)
     end
     local pose = S.smoothPose or root.CFrame
-    root.CFrame = pose
+    if not S.safeMovement or (pose.Position - root.Position).Magnitude > 0.25 then
+        root.CFrame = pose
+    end
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
     S.lastScriptPosition = root.Position
@@ -3923,6 +4638,7 @@ local function fireSkills(root, target, now)
         local key = isFruit and "Fruit1" or (isAssist and ("Assist"..assistNum) or action)
         local chosen = isFruit and S.selectedFruits[1]
             or (isAssist and S.selectedAssists[assistNum] or S.selectedSkills[action])
+        if chosen then
         local def
         local available = true
         if isFruit then
@@ -3947,6 +4663,7 @@ local function fireSkills(root, target, now)
                 return
             end
         end
+        end -- chosen ability
     end
 end
 
@@ -4509,7 +5226,7 @@ function S.Unload(manual)
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v56 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v60 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -4517,9 +5234,9 @@ end
 -- Oasis manages its own visual preferences, themes, favorites and keybinds.
 -- The script's existing JSON state remains the authority for automation
 -- because it persists across the lobby/battle place transition.
--- v56: OasisUI used "HollowMoonHub_AD_Oasis" until v54. v56 moved the
+-- v60: OasisUI used "HollowMoonHub_AD_Oasis" until v54. v60 moved the
 -- window folder but did not migrate its named UI configurations. This copies
--- the old profiles into the game folder WITHOUT overwriting new v56 profiles.
+-- the old profiles into the game folder WITHOUT overwriting new v60 profiles.
 -- Do not delete source files: the user can verify and remove them manually.
 S.migrateOasisFiles = function()
     if S.oasisMigrationAttempted then return end
@@ -5036,6 +5753,8 @@ local function buildUI()
         S.autoFarm = on == true
         resetTarget()
         S.lastScriptPosition = nil
+        S.safeArena = nil
+        S.lastMotionStepAt = -HUGE
         if S.autoFarm then
             S.poseHeading = nil
             local char, hum, root = getCharacter()
@@ -5058,6 +5777,17 @@ local function buildUI()
             S.farmMethod = v
             savePreferences()
         end
+    end)
+    S.movementStatusLabel = moving:Label({ Text = "Movement status", Value = S.movementStatus })
+    toggle(moving, "Safe Movement (Arena Guard)", "AD59_SafeMovement", "safeMovement", function(on)
+        S.safeMovement = on == true
+        S.safeArena = nil
+        S.approachLastStart = nil
+        S.stagePortalGoal = nil
+        S.lastMotionStepAt = -HUGE
+        S.dodgeGoal = nil
+        S.nearFarmEscape = nil
+        savePreferences()
     end)
     slider(moving, "Tween Speed", "AD43_TweenSpeed", 40, 650, S.tweenSpeed, 10, " studs/s", function(v)
         local n = tonumber(v)
@@ -5246,6 +5976,8 @@ local function buildUI()
     window:TabSection("SYSTEM")
     local systemTab = window:Tab({ Title = "System", Icon = "settings-2", Columns = 2 })
     local session = section(systemTab, "Session", "shield", "Left")
+    session:Label({ Text = "Runtime", Value = S.mobileOptimized
+        and "Mobile optimized" or "Desktop standard" })
     toggle(session, "Anti-AFK", "AD16_AntiAFK", "antiAfk", function(on)
         S.antiAfk = on == true
         S.antiAfkLastPulse = os.clock()
@@ -5287,6 +6019,15 @@ end
 -- externally (not an intended Tween step). Rebase spatial memory immediately,
 -- just like a successful respawn does, without forcing the player to die.
 S.rebaseSpatialState = function(root, now)
+    S.divineArena=nil
+    S.divineLastFailedTarget=nil
+    S.safeArena=nil
+    S.stagePortalPath=nil
+    S.stagePortalGoal=nil
+    S.stagePortalScanAt=-HUGE
+    S.approachLastStart=nil
+    S.approachLastPose=nil
+    S.lastMotionStepAt=-HUGE
     S.lastSpatialRebase=now
     S.stallTarget=nil
     S.stallProbePosition=nil
@@ -5318,11 +6059,16 @@ end
 -- One Heartbeat controls the timeline. Combat is checked first so a busy
 -- hazard scan, grounded pathfinder, or pose update cannot postpone ready skills.
 S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
-    if not S.alive then return end
-    if inLobby() then return end
-    if not statsReady() then return end
+    if not S.alive or inLobby() then return end
     local now = os.clock()
-    if game.PlaceId == 6990129309 then
+    if now - (S.lastStatsHeartbeat or -HUGE) >= 0.25 then
+        S.lastStatsHeartbeat = now
+        S.statsHeartbeatReady = statsReady()
+    end
+    if not S.statsHeartbeatReady then return end
+    if game.PlaceId == 6990129309
+        and now - (S.lastResultsWorker or -HUGE) >= (S.mobileOptimized and 0.17 or 0.10) then
+        S.lastResultsWorker = now
         local ok,err=pcall(specialResultTick)
         if not ok then warnOnce(err) end
     end
@@ -5333,21 +6079,25 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
     if not (S.autoFarm or S.autoAttack or S.autoSkills or S.autoDodge) then return end
     local _, humanoid, root = getCharacter()
     if not root then return end
-    if S.autoFarm then
-        -- Rebase stale state after genuine game teleports, without blocking
-        -- the next target or moving back to a previously saved arena floor.
-        S.detectExternalArenaTeleport(root, now)
-    end
+    if S.autoFarm then S.detectExternalArenaTeleport(root, now) end
     local showingResults = resultScreenVisible(now)
     local target = nil
     if not showingResults then
-        target = findTarget(root)
-        if target and not validTarget(target) then
-            setTarget(nil)
+        local interval = S.mobileOptimized and 0.075 or 0.035
+        local stale = S.target ~= nil and not validTarget(S.target)
+        if stale or now - (S.lastTargetScan or -HUGE) >= interval then
+            -- New/dead monster events set lastTargetScan to -HUGE and
+            -- invalidate this cache instantly, regardless of mobile FPS.
+            S.lastTargetScan = now
             target = findTarget(root)
+            if target and not validTarget(target) then
+                setTarget(nil)
+                target = findTarget(root)
+            end
+        else
+            target = S.target
         end
     end
-
     if S.autoFarm and not showingResults then
         if target then
             S.noTargetSince = nil
@@ -5356,11 +6106,13 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
             S.noTargetSince = S.noTargetSince or now
             if now - S.noTargetSince >= 0.8 then
                 S.reconcileMonsterIndex(now, true)
-                target = findTarget(root)
+                -- Recheck immediately after a streamed rig is indexed.
+                if S.lastTargetScan == -HUGE then
+                    S.lastTargetScan = now
+                    target = findTarget(root)
+                end
                 if target then S.noTargetSince = nil end
             end
-            -- If the game has not replicated a live monster, avoid moving to
-            -- decorative objective markers or inventing an enemy position.
             if not target and S.noTargetSince
                 and now - S.noTargetSince >= 12
                 and now - S.lastNoTargetDiagnosticAt >= 60 then
@@ -5369,39 +6121,70 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
             end
         end
     end
-
     if not showingResults then
         local ok, err = pcall(function()
             if S.autoAttack then
                 if not S.autoFarm and target then faceFlat(root, target) end
-                fireBasic(root, characterData(), now)
+                if now - S.lastAttack >= S.attackDelay then
+                    fireBasic(root, characterData(), now)
+                end
             end
-            if S.autoSkills and target then
+            -- Only skill cooldown polling is budgeted, never attack movement.
+            if S.autoSkills and target
+                and now - (S.lastAbilityCheck or -HUGE) >= (S.mobileOptimized and 0.045 or 0.016) then
+                S.lastAbilityCheck = now
                 if not S.autoFarm then faceFlat(root, target) end
                 fireSkills(root, target, now)
             end
         end)
         if not ok then warnOnce(err) end
     end
-
+    local portalTravel = false
+    if S.autoFarm and S.safeMovement and not showingResults then
+        local bossFar = target and (target.root.Position-root.Position).Magnitude > 105
+            and (bossScore(target) >= 70 or S.activeBossTarget == target)
+        if not target or bossFar then
+            portalTravel = S.walkToStagePortal(root, humanoid, now, target)
+            if not portalTravel and not target then
+                S.movementStatus = "Waiting for map teleport / local enemy"
+                if S.oldCharacter then releaseMovement() end
+            end
+        end
+    end
     local dodging = false
-    if S.autoDodge and not showingResults then
+    if S.autoDodge and not showingResults and not portalTravel then
         local ok, result = pcall(dodgeTick, dt, root, humanoid, target, now)
         if ok then dodging = result == true else warnOnce(result) end
     end
     if S.autoFarm and showingResults then
         if S.oldCharacter then releaseMovement() end
+    elseif portalTravel then
+        -- Native portal navigation owns the Humanoid until game relocation.
     elseif not dodging and S.autoFarm and target then
         local moveTarget = S.target and validTarget(S.target) and S.target or target
         local ok, err = pcall(farmTick, dt, root, humanoid, moveTarget, now)
         if not ok then warnOnce(err) end
     elseif not dodging and S.autoFarm and S.oldCharacter then
-        local ok, err = pcall(holdFarmPose, root, humanoid)
-        if not ok then warnOnce(err) end
+        -- Between stages, never hold Physics flight while a portal may need
+        -- the normal walking/Touched system. Genuine brief wave gaps still
+        -- retain their pose when a local encounter was just completed.
+        if S.nearestDistantEnemy and S.nearestDistantEnemy < HUGE then
+            releaseMovement()
+        else
+            local ok, err = pcall(holdFarmPose, root, humanoid)
+            if not ok then warnOnce(err) end
+        end
+    end
+    if S.movementStatusLabel and now-(S.movementStatusShownAt or -HUGE)>0.5 then
+        S.movementStatusShownAt = now
+        pcall(function() S.movementStatusLabel:SetValue(S.movementStatus) end)
     end
 end)
 
 S.connections[#S.connections+1] = player.CharacterAdded:Connect(function()
+    S.characterParts = nil
+    S.cachedResultUI = nil
+    S.cachedBossHealthFrame = nil
     releaseMovement()
     resetTarget()
     S.attackNumber = 0
@@ -5419,6 +6202,10 @@ S.connections[#S.connections+1] = player.CharacterAdded:Connect(function()
     S.lastSafetyRecovery = -HUGE
     S.lastScriptPosition = nil
     S.lastSpatialRebase = -HUGE
+    S.divineArena = nil
+    S.divineLastFailedTarget = nil
+    S.safeArena = nil
+    S.lastMotionStepAt = -HUGE
     S.dodgeGoal, S.dodgeLastClear = nil, nil
     S.poseHeading = nil
     clearHazardTracking()
@@ -5428,8 +6215,10 @@ end)
 -- After the UI is available, run exactly one scheduler for all special modes.
 task.spawn(function()
     while S.alive do
-        if inLobby() and type(S.refreshLoadoutChoices)=="function" then
-            -- The collection might load after UI creation or in the Raid Lobby.
+        if inLobby() and type(S.refreshLoadoutChoices)=="function"
+            and (not S.mobileOptimized or os.clock() - S.lastRosterRefresh >= 6) then
+            S.lastRosterRefresh = os.clock()
+            -- Never block the mode scheduler for frequent full inventory scans.
             local refreshOK,refreshErr=pcall(S.refreshLoadoutChoices)
             if not refreshOK then warnOnce("Character list refresh: "..tostring(refreshErr)) end
         end
@@ -5458,7 +6247,7 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
 local priorBoot = env.HollowMoonADStartupV48
-local newVersion = 55
+local newVersion = 59
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId
     and priorBoot.jobId == game.JobId then
     -- Two copies of THIS version must not run simultaneously. But allow
@@ -5557,13 +6346,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v56] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v60] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v56] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v60] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -5573,12 +6362,12 @@ boot.status = "starting"
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v56] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v60] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v56] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v60] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
 -- One stable core cache per game. Create the game folder only if the
@@ -5619,7 +6408,7 @@ if type(writefile) == "function" then
     if overwrite then
         local okWrite = pcall(writefile, cachePath, CORE)
         if not okWrite then
-            warn("[HollowMoonHub AD v56] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
+            warn("[HollowMoonHub AD v60] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
         end
     end
 end
