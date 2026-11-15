@@ -1,12 +1,12 @@
--- HMH_ANIME_DIMENSIONS_V65
--- HollowMoonHub | Anime Dimensions v65 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V66
+-- HollowMoonHub | Anime Dimensions v66 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V65
--- HMH_AD_CORE_ADLER32:c210f61f
--- HollowMoonHub | Anime Dimensions v65 (five-second no-farm respawn recovery) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V66
+-- HMH_AD_CORE_ADLER32:7e7170f9
+-- HollowMoonHub | Anime Dimensions v66 (mobile enemy indexing and physics-step NoClip) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -39,6 +39,8 @@ local S = {
     lastRosterRefresh = -math.huge,
     noclipCharacter = nil,
     noclipConnection = nil,
+    noclipStepConnection = nil, -- continuous pre-physics collision enforcement
+
     -- Lobby / results workflow (persisted when the executor supports files)
     mapChoice = "Hardest", -- internal map name or "Hardest"
     v30MapReviewed = false, -- one-time migration of stale Halloween map selection
@@ -340,7 +342,7 @@ local function savePreferences()
     local wrote = pcall(writefile, STATE_FILE, encoded)
     if not wrote and not S.dataFolderWarningShown then
         S.dataFolderWarningShown = true
-        warn("[HollowMoonHub AD v65] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
+        warn("[HollowMoonHub AD v66] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
     end
     return wrote
 end
@@ -381,7 +383,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v65] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v66] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -394,7 +396,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v65] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v66] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -486,10 +488,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v65 or newer; reject old cached builds that lack
+-- GitHub must host v66 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V65"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V66"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -501,7 +503,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v65 main entry adds a second gate for
+        -- until player stats load; the v66 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -517,7 +519,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v65] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v66] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -541,7 +543,7 @@ local function installTeleportBootstrap()
         -- First try GitHub with a fresh cache key, then the plain URL for
         -- executors that do not accept cache-busting query strings.
         local fetchOK, code = pcall(function()
-            return game:HttpGet(url .. "?hmh_ad_v65=" .. tostring(os.time()), true)
+            return game:HttpGet(url .. "?hmh_ad_v66=" .. tostring(os.time()), true)
         end)
         if not fetchOK or type(code) ~= "string" or #code == 0 then
             fetchOK, code = pcall(function() return game:HttpGet(url) end)
@@ -563,7 +565,7 @@ local function installTeleportBootstrap()
             local header = source:sub(1, 4096):gsub("^%s+", "")
             local firstLine = header:match("^[^\r\n]+") or "<empty>"
             local version = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-            local supported = version ~= nil and version >= 65
+            local supported = version ~= nil and version >= 66
                 and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
                 and header:find("6938803436", 1, true) ~= nil
                 and header:find("6990129309", 1, true) ~= nil
@@ -586,11 +588,11 @@ local function installTeleportBootstrap()
             local validLocal = localOK and acceptedHeader(localCode, true)
             if validLocal then
                 code = localCode
-                warn("[HollowMoonHub AD v65] GitHub returned " .. remoteHeader
-                    .. "; using verified local v65 core. Update the GitHub testing file to v65.")
+                warn("[HollowMoonHub AD v66] GitHub returned " .. remoteHeader
+                    .. "; using verified local v66 core. Update the GitHub testing file to v66.")
             else
-                warn("[HollowMoonHub AD v65] GitHub returned " .. remoteHeader
-                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v65.")
+                warn("[HollowMoonHub AD v66] GitHub returned " .. remoteHeader
+                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v66.")
                 return
             end
         end
@@ -612,17 +614,17 @@ local function installTeleportBootstrap()
             task.wait(0.2)
         end
         if not localReady then
-            warn("[HollowMoonHub AD v65] Auto Execute aborted: character/client library not ready")
+            warn("[HollowMoonHub AD v66] Auto Execute aborted: character/client library not ready")
             return
         end
         task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v65] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v66] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v65] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v66] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -641,7 +643,10 @@ local MAX_TARGET_DISTANCE = 10000 -- discovery, not a claim of infinite server a
 -- Do not chase enemies in distant arenas/through map portals; the game itself
 -- must relocate the player between rooms. Oversized bosses can still be used
 -- when a large visible body part is physically close to the character.
-S.localFarmRange = 220
+-- Mobile often receives a smaller streamed section of the map. Consider more
+-- already-replicated targets within the same encounter, but never try to
+-- move toward a distant stage (thousands of studs away).
+S.localFarmRange = S.mobileOptimized and 320 or 220
 -- Bosses shown by the native HUD can be visible across a nearby courtyard.
 -- That is an approach distance, NOT permission to cross a far-away stage.
 S.localTransitionRange = 340
@@ -2548,12 +2553,28 @@ local function bindMonsterIndex()
         if item:IsA("Humanoid") then
             trackHumanoid(item)
         elseif item:IsA("BasePart") then
-            -- The rig's root may spawn AFTER the Humanoid.
+            -- Streaming may deliver the visible body before HumanoidRootPart.
+            -- Upgrade an indexed target immediately when its real combat root
+            -- arrives instead of continuing to follow a temporary torso/head.
             local rig = item:FindFirstAncestorOfClass("Model")
             if rig then
                 local hum = rig:FindFirstChildOfClass("Humanoid")
-                if hum and S.pendingHumanoids[hum] then trackHumanoid(hum) end
+                if hum then
+                    if S.pendingHumanoids[hum] then trackHumanoid(hum) end
+                    local entry = S.indexedTargets[hum]
+                    if entry and item.Name == "HumanoidRootPart"
+                        and item:IsDescendantOf(entry.target.model) then
+                        entry.target.root = item
+                        entry.target.part = item
+                        entry.target.cachedBodyParts = nil
+                        S.lastTargetScan = -HUGE
+                    end
+                end
             end
+        elseif item:IsA("Model") then
+            -- Covers an already-assembled streamed rig added in one operation.
+            local hum = item:FindFirstChildWhichIsA("Humanoid", true)
+            if hum then trackHumanoid(hum) end
         end
     end)
     S.monsterWatch[#S.monsterWatch+1] = folder.DescendantRemoving:Connect(function(item)
@@ -2565,7 +2586,10 @@ end
 -- Humanoid/Root descendant event. Do not scan the whole Workspace or choose
 -- NPCs outside the game's Monsters folder.
 S.reconcileMonsterIndex = function(now, urgent)
-    local interval = urgent and (S.mobileOptimized and 1.75 or 1.1) or (S.mobileOptimized and 10 or 7)
+    -- When a phone streams a wave in piece by piece, promptly repair any
+    -- missed entries. Idle reconciliation is throttled to keep mobile FPS sane.
+    local interval = urgent and (S.mobileOptimized and 0.9 or 1.1)
+        or (S.mobileOptimized and 6 or 7)
     if now - (S.lastMonsterReconcileAt or -HUGE) < interval then return end
     S.lastMonsterReconcileAt = now
     bindMonsterIndex()
@@ -3869,6 +3893,7 @@ end
 
 releaseMovement = function(resetFacing)
     if S.noclipConnection then S.noclipConnection:Disconnect(); S.noclipConnection = nil end
+    if S.noclipStepConnection then S.noclipStepConnection:Disconnect(); S.noclipStepConnection = nil end
     S.noclipCharacter = nil
     -- Land while Physics/noclip is still owned by the farm controller.
     -- Do not simply turn off PlatformStand in the air: Roblox gravity will
@@ -3990,11 +4015,30 @@ end
 local function makeNoClip(character)
     local function noclipPart(part)
         if not part:IsA("BasePart") then return end
+        -- Remember original collision values for all character BaseParts,
+        -- including the accessories that may stream in after the body.
         if S.oldCollisions[part] == nil then S.oldCollisions[part] = part.CanCollide end
         if part.CanCollide then part.CanCollide = false end
     end
+    local function enforceNoClip()
+        if not (S.alive and S.autoFarm and S.farmMethod ~= "Legit"
+            and player.Character == character and S.noclipCharacter == character) then
+            return
+        end
+        -- Stepped fires before simulation, preventing the mobile humanoid
+        -- controller / game scripts from re-enabling collision between scans.
+        -- Only inspect cached character parts; do not scan Workspace per frame.
+        for part in pairs(S.oldCollisions) do
+            if part.Parent and part:IsDescendantOf(character) then
+                if part.CanCollide then part.CanCollide = false end
+            else
+                S.oldCollisions[part] = nil
+            end
+        end
+    end
     if S.noclipCharacter ~= character then
-        if S.noclipConnection then S.noclipConnection:Disconnect() end
+        if S.noclipConnection then S.noclipConnection:Disconnect(); S.noclipConnection = nil end
+        if S.noclipStepConnection then S.noclipStepConnection:Disconnect(); S.noclipStepConnection = nil end
         S.noclipCharacter = character
         for _, part in ipairs(character:GetDescendants()) do noclipPart(part) end
         S.noclipConnection = character.DescendantAdded:Connect(function(part)
@@ -4003,11 +4047,9 @@ local function makeNoClip(character)
                 noclipPart(part)
             end
         end)
+        S.noclipStepConnection = RunService.Stepped:Connect(enforceNoClip)
     else
-        -- Some game scripts can toggle collision back on after we set it.
-        for part in pairs(S.oldCollisions) do
-            if part.Parent and part.CanCollide then part.CanCollide = false end
-        end
+        enforceNoClip()
     end
 end
 
@@ -4215,6 +4257,7 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
 
     if S.farmMethod == "Legit" then
         if S.noclipConnection then S.noclipConnection:Disconnect(); S.noclipConnection = nil end
+        if S.noclipStepConnection then S.noclipStepConnection:Disconnect(); S.noclipStepConnection = nil end
         S.noclipCharacter = nil
         S.lastScriptPosition = nil
         rememberGround(root, humanoid, character)
@@ -4239,7 +4282,10 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         humanoid:ChangeState(Enum.HumanoidStateType.Physics)
     end
     S.forcedPhysics = true
-    if now - S.lastClipCheck >= (S.mobileOptimized and 0.24 or 0.1) then
+    -- NoClip now enforces cached parts every physics frame. Only rebuilding
+    -- the membership cache is throttled, not the collision safety itself.
+    if S.noclipCharacter ~= character or not S.noclipStepConnection
+        or now - S.lastClipCheck >= (S.mobileOptimized and 0.22 or 0.15) then
         makeNoClip(character)
         S.lastClipCheck = now
     end
@@ -5105,7 +5151,7 @@ function S.Unload(manual)
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v65 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v66 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -6070,7 +6116,8 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
     local showingResults = resultScreenVisible(now)
     local target = nil
     if not showingResults then
-        local interval = S.mobileOptimized and 0.075 or 0.035
+        -- New streamed-in enemies also invalidate the cache immediately.
+        local interval = S.mobileOptimized and 0.050 or 0.035
         local stale = S.target ~= nil and not validTarget(S.target)
         if stale or now - (S.lastTargetScan or -HUGE) >= interval then
             -- New/dead monster events set lastTargetScan to -HUGE and
@@ -6104,7 +6151,7 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
                 and now - S.noTargetSince >= 12
                 and now - S.lastNoTargetDiagnosticAt >= 60 then
                 S.lastNoTargetDiagnosticAt = now
-                warnOnce("Auto Farm: no live monster rig is currently replicated; refreshing monster index while waiting for the next target")
+                warnOnce("Auto Farm: no live monster is currently replicated. Mobile Roblox streaming can hide distant enemies; waiting for a rig or 5s respawn recovery")
             end
         end
     end
@@ -6230,7 +6277,7 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
 local priorBoot = env.HollowMoonADStartupV48
-local newVersion = 65
+local newVersion = 66
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId
     and priorBoot.jobId == game.JobId then
     -- Two copies of THIS version must not run simultaneously. But allow
@@ -6329,13 +6376,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v65] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v66] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v65] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v66] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -6345,12 +6392,12 @@ boot.status = "starting"
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v65] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v66] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v65] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v66] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
 -- One stable core cache per game. Create the game folder only if the
@@ -6391,7 +6438,7 @@ if type(writefile) == "function" then
     if overwrite then
         local okWrite = pcall(writefile, cachePath, CORE)
         if not okWrite then
-            warn("[HollowMoonHub AD v65] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
+            warn("[HollowMoonHub AD v66] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
         end
     end
 end
