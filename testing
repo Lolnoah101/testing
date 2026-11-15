@@ -1,12 +1,12 @@
--- HMH_ANIME_DIMENSIONS_V63
--- HollowMoonHub | Anime Dimensions v63 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V64
+-- HollowMoonHub | Anime Dimensions v64 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V63
--- HMH_AD_CORE_ADLER32:b5070918
--- HollowMoonHub | Anime Dimensions v63 (direct ring tween and native entry) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V64
+-- HMH_AD_CORE_ADLER32:1fb56072
+-- HollowMoonHub | Anime Dimensions v64 (direct ring tween and native entry) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -167,6 +167,12 @@ local S = {
     stagePortalCandidates = {},
     stagePortalScanAt = -math.huge,
     stagePortalGoal = nil,
+    -- Session-only stage transition memory: prevent running back to used rings.
+    stagePortalConsumed = {},
+    stagePortalActiveCount = 0,
+    stagePortalNearestAny = math.huge,
+    stagePortalFloorCheckAt = -math.huge,
+    stagePortalFloorCache = nil,
     stagePortalLastTweenAt = -math.huge,
     stagePortalLastAction = -math.huge,
     approachLastCheckAt = -math.huge,
@@ -341,7 +347,7 @@ local function savePreferences()
     local wrote = pcall(writefile, STATE_FILE, encoded)
     if not wrote and not S.dataFolderWarningShown then
         S.dataFolderWarningShown = true
-        warn("[HollowMoonHub AD v63] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
+        warn("[HollowMoonHub AD v64] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
     end
     return wrote
 end
@@ -382,7 +388,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v63] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v64] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -395,7 +401,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v63] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v64] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -487,10 +493,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v63 or newer; reject old cached builds that lack
+-- GitHub must host v64 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V63"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V64"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -502,7 +508,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v63 main entry adds a second gate for
+        -- until player stats load; the v64 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -518,7 +524,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v63] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v64] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -542,7 +548,7 @@ local function installTeleportBootstrap()
         -- First try GitHub with a fresh cache key, then the plain URL for
         -- executors that do not accept cache-busting query strings.
         local fetchOK, code = pcall(function()
-            return game:HttpGet(url .. "?hmh_ad_v63=" .. tostring(os.time()), true)
+            return game:HttpGet(url .. "?hmh_ad_v64=" .. tostring(os.time()), true)
         end)
         if not fetchOK or type(code) ~= "string" or #code == 0 then
             fetchOK, code = pcall(function() return game:HttpGet(url) end)
@@ -564,7 +570,7 @@ local function installTeleportBootstrap()
             local header = source:sub(1, 4096):gsub("^%s+", "")
             local firstLine = header:match("^[^\r\n]+") or "<empty>"
             local version = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-            local supported = version ~= nil and version >= 63
+            local supported = version ~= nil and version >= 64
                 and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
                 and header:find("6938803436", 1, true) ~= nil
                 and header:find("6990129309", 1, true) ~= nil
@@ -587,11 +593,11 @@ local function installTeleportBootstrap()
             local validLocal = localOK and acceptedHeader(localCode, true)
             if validLocal then
                 code = localCode
-                warn("[HollowMoonHub AD v63] GitHub returned " .. remoteHeader
-                    .. "; using verified local v63 core. Update the GitHub testing file to v63.")
+                warn("[HollowMoonHub AD v64] GitHub returned " .. remoteHeader
+                    .. "; using verified local v64 core. Update the GitHub testing file to v64.")
             else
-                warn("[HollowMoonHub AD v63] GitHub returned " .. remoteHeader
-                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v63.")
+                warn("[HollowMoonHub AD v64] GitHub returned " .. remoteHeader
+                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v64.")
                 return
             end
         end
@@ -613,17 +619,17 @@ local function installTeleportBootstrap()
             task.wait(0.2)
         end
         if not localReady then
-            warn("[HollowMoonHub AD v63] Auto Execute aborted: character/client library not ready")
+            warn("[HollowMoonHub AD v64] Auto Execute aborted: character/client library not ready")
             return
         end
         task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v63] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v64] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v63] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v64] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -3157,7 +3163,7 @@ S.divineFloorHit = function(point, drop, expectedY)
     return nil
 end
 
--- v63: General boss-arena guard. Beast King (shown in the recording) is NOT
+-- v64: General boss-arena guard. Beast King (shown in the recording) is NOT
 -- Obsidian Guardian and therefore never used the older Divine-only guard.
 -- Capture the platform from a genuine nearby floor. Do not guess an arena from
 -- boss parts or a deep ground ray into the abyss. Boss fight movement retains
@@ -3440,7 +3446,7 @@ local function supportedEscapePoint(point)
     end
     local floorY = groundSupportAt(point)
     if not floorY then return false end
-    -- Reject 'safe' spots over pits / separate floors. The v63 version
+    -- Reject 'safe' spots over pits / separate floors. The v64 version
     -- accepted any floor within 460 studs, which causes the filmed fall.
     if S.safeMovement and S.groundBackup then
         local expected = S.groundBackup.Y - 4
@@ -3937,41 +3943,68 @@ releaseMovement = function(resetFacing)
     S.lastClipCheck = -HUGE
 end
 
--- v63: Verified from the battle-place TeleportRingModule/ClientTagModule.
--- SetUpTeleportRing tags the entrance using CollectionService; the game's
--- native loop teleports ONLY when HumanoidRootPart is <=8 studs from the ring.
--- Do not follow remote-stage enemies or call teleport() outside that radius.
+-- v64: The battle-place TeleportRingModule receives SetUpTeleportRing and
+-- registers actual BaseParts through ClientTagModule/CollectionService. Its
+-- built-in loop activates the destination when the character is <= 8 studs
+-- from the entrance. Navigation MUST target the tagged entrance, not an NPC.
+-- Never use PathfindingService or a distant enemy HRP for ring traversal.
 S.scanStagePortals = function(now)
-    if now - (S.stagePortalScanAt or -HUGE) < (S.mobileOptimized and 0.26 or 0.18) then return end
+    if now - (S.stagePortalScanAt or -HUGE) < (S.mobileOptimized and 0.24 or 0.16) then return end
     S.stagePortalScanAt = now
-    local found = {}
+    local found, total, closest = {}, 0, HUGE
+    local previous = S.stagePortalConsumed
     for _, part in ipairs(S.collectionService:GetTagged("TeleportRing")) do
         if part:IsA("BasePart") and part:IsDescendantOf(Workspace) then
-            found[#found+1] = {part=part}
+            total = total + 1
+            if not previous[part] then
+                found[#found + 1] = {part = part}
+            end
         end
     end
+    for part in pairs(previous) do
+        if not part.Parent or not S.collectionService:HasTag(part, "TeleportRing") then
+            previous[part] = nil
+        end
+    end
+    S.stagePortalActiveCount = total
     S.stagePortalCandidates = found
 end
 
 S.nearestStagePortal = function(root, target, now)
     S.scanStagePortals(now)
-    local best, distanceBest = nil, HUGE
+    local best, distanceBest, nearestAny = nil, HUGE, HUGE
     for _, row in ipairs(S.stagePortalCandidates) do
         local part = row.part
         if part and part.Parent and S.collectionService:HasTag(part, "TeleportRing") then
-            local distance = (root.Position-part.Position).Magnitude
-            -- Never path or fly to a portal in a separate, distant arena.
-            if distance <= 480 and distance < distanceBest then
+            local distance = (root.Position - part.Position).Magnitude
+            nearestAny = math.min(nearestAny, distance)
+            -- The ring is the ONLY cross-room navigation target. A large
+            -- distance here is not a license to fly 4000 studs to an enemy.
+            if distance <= 900 and distance < distanceBest then
                 best, distanceBest = row, distance
             end
         end
     end
+    S.stagePortalNearestAny = nearestAny
     return best, distanceBest
 end
 
--- v63: Stage-ring navigation is a direct, bounded Tween-style controller.
--- No PathfindingService and no movement toward remote-stage monster roots.
--- The native TeleportRingModule still owns the actual stage transition.
+-- The native module sometimes moves us before our next Heartbeat. Remember
+-- the ring we just entered so a still-tagged entrance cannot pull us back.
+S.markStagePortalUsed = function(part, now)
+    if not (part and part.Parent) then return end
+    S.stagePortalConsumed[part] = now
+    S.stagePortalGoal = nil
+    S.stagePortalLastTweenAt = -HUGE
+    S.stagePortalLastPosition = nil
+    S.stagePortalFloorCache = nil
+    S.stagePortalScanAt = -HUGE
+end
+
+-- One controlled CFrame step per Heartbeat. Floor probes are ADVISORY for
+-- active rings: the old controller stopped permanently whenever terrain/water
+-- or a staircase did not satisfy its boss-arena floor tests. Arena safety
+-- remains strict in regular farming/dodging; portals get their own traversal.
 S.tweenToStagePortal = function(root, humanoid, now, target)
     local portal, distance = S.nearestStagePortal(root, target, now)
     if not portal then return false end
@@ -3981,25 +4014,20 @@ S.tweenToStagePortal = function(root, humanoid, now, target)
     humanoid.AutoRotate = true
     if S.stagePortalGoal ~= part then
         S.stagePortalGoal = part
-        S.stagePortalLastTweenAt = now - 0.02
+        S.stagePortalLastTweenAt = now
         S.stagePortalLastPosition = root.Position
         S.stagePortalLastProgressAt = now
-        S.stagePortalStalledAt = nil
         S.stagePortalLastAction = -HUGE
-        S.stagePortalLastJump = -HUGE
+        S.stagePortalFloorCheckAt = -HUGE
+        S.stagePortalFloorCache = nil
+        S.stagePortalStalledAt = nil
     end
 
-    local label = string.format("%s (%d studs)", part.Name, math.floor(distance + 0.5))
-    -- The native client checks 3D distance to the tagged part's CENTER. Never
-    -- invoke its teleport function from outside the real activation radius.
-    if distance <= 7.5 then
-        S.movementStatus = "Entering active stage ring: " .. part.Name
-        S.stagePortalLastTweenAt = now
-        if now - (S.lastMoveTo or -HUGE) >= 0.35 then
-            humanoid:MoveTo(part.Position)
-            S.lastMoveTo = now
-        end
-        if now - (S.stagePortalLastAction or -HUGE) >= 3.3 then
+    -- The game checks root-to-ring CENTER distance, including Y. Be inside
+    -- the true radius before calling the game's own teleport function.
+    if distance <= 7.2 then
+        S.movementStatus = "Ring reached; activating: " .. part.Name
+        if now - (S.stagePortalLastAction or -HUGE) >= 0.85 then
             S.stagePortalLastAction = now
             local gui = player:FindFirstChildOfClass("PlayerGui")
             local mods = gui and gui:FindFirstChild("Modules")
@@ -4008,121 +4036,70 @@ S.tweenToStagePortal = function(root, humanoid, now, target)
                 local ok, module = pcall(require, scriptModule)
                 if ok and type(module) == "table" and type(module.teleport) == "function" then
                     local before = root.Position
-                    pcall(module.teleport, part)
-                    if (root.Position - before).Magnitude > 30 and S.rebaseSpatialState then
-                        S.rebaseSpatialState(root, now)
+                    local invoked = pcall(module.teleport, part)
+                    if invoked and (root.Position - before).Magnitude > 12 then
+                        S.markStagePortalUsed(part, now)
+                        if S.rebaseSpatialState then S.rebaseSpatialState(root, now) end
+                        S.movementStatus = "Stage transition completed"
                     end
                 end
             end
         end
+        -- Native TeleportRingModule also polls for entry every ~0.3 seconds.
         return true
     end
 
-    -- One small position change per mobile/PC movement budget, rather than
-    -- launching many TweenService instances or making long CFrame snaps.
-    local last = S.stagePortalLastTweenAt or now
-    local elapsed = now - last
-    if elapsed < (S.mobileOptimized and 0.045 or 0.018) then
-        S.movementStatus = "Tweening to stage ring: " .. label
+    local elapsed = now - (S.stagePortalLastTweenAt or now)
+    local interval = S.mobileOptimized and 0.04 or 0.018
+    if elapsed < interval then
+        S.movementStatus = string.format("Traveling to ring: %s (%d studs)",
+            part.Name, math.floor(distance + 0.5))
         return true
     end
     S.stagePortalLastTweenAt = now
-    elapsed = math.clamp(elapsed, 0, S.mobileOptimized and 0.065 or 0.05)
-    local offset = part.Position - root.Position
-    local horizontal = Vector3.new(offset.X, 0, offset.Z)
-    if horizontal.Magnitude <= 0.15 then
-        -- A very tall ring may require normal game physics to finish entry.
-        S.movementStatus = "Aligning with stage ring: " .. label
-        if now - (S.lastMoveTo or -HUGE) >= 0.35 then
-            humanoid:MoveTo(part.Position)
-            S.lastMoveTo = now
-        end
-        return true
-    end
-
-    -- Respect the user's Tween Speed preference, with a lower ceiling for
-    -- portal travel to avoid aggressive correction on slower mobile clients.
+    elapsed = math.clamp(elapsed, 0, S.mobileOptimized and 0.072 or 0.058)
     local speed = math.min(math.clamp(tonumber(S.tweenSpeed) or 120, 40, 650),
-        S.mobileOptimized and 76 or 105)
-    local step = math.min(horizontal.Magnitude, speed * elapsed,
-        S.mobileOptimized and 4.2 or 5.6)
-    local direction = horizontal.Unit
-    local horizontalNext = root.Position + direction * step
-    local floorHere = S.divineFloorHit(root.Position, 42)
-    local floorNext = S.divineFloorHit(horizontalNext + Vector3.new(0, 4, 0),
-        54, floorHere and floorHere.Position.Y or nil)
-    local supported = floorHere and floorNext
-        and math.abs(floorNext.Position.Y - floorHere.Position.Y) <= 5.5
-    local obstructed = false
-    local nextPos
+        S.mobileOptimized and 65 or 90)
+    local horizontal = Vector3.new(part.Position.X - root.Position.X, 0,
+        part.Position.Z - root.Position.Z)
+    local horizontalDistance = horizontal.Magnitude
+    local step = math.min(horizontalDistance, speed * elapsed,
+        S.mobileOptimized and 4.4 or 5.4)
+    local direction = horizontalDistance > 0.01 and horizontal.Unit or root.CFrame.LookVector
+    local nextXZ = root.Position + Vector3.new(direction.X, 0, direction.Z) * step
 
-    if supported then
-        local clearance = S.divineArenaClearance(root)
-        nextPos = Vector3.new(horizontalNext.X, floorNext.Position.Y + clearance,
-            horizontalNext.Z)
-        -- One short forward sweep, not a whole-map path computation. Ignore
-        -- mobs and transient effects, but do not CFrame through solid walls.
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.IgnoreWater = true
-        local excluded = {player.Character}
-        local folders = Workspace:FindFirstChild("Folders")
-        if folders then
-            local monsters = folders:FindFirstChild("Monsters")
-            local debris = folders:FindFirstChild("Debris")
-            if monsters then excluded[#excluded+1] = monsters end
-            if debris then excluded[#excluded+1] = debris end
-        end
-        params.FilterDescendantsInstances = excluded
-        local obstacle = Workspace:Raycast(root.Position + Vector3.new(0, 0.3, 0),
-            nextPos - root.Position, params)
-        obstructed = obstacle ~= nil and obstacle.Instance ~= part
-            and obstacle.Instance.CanCollide
+    -- When ground is available, follow it gently. When a floor probe misses,
+    -- maintain controlled altitude toward this VERIFIED active ring rather
+    -- than stopping forever at the lip of a stair, river or hollow terrain.
+    local clearance = S.divineArenaClearance(root)
+    local goalY = part.Position.Y + clearance
+    local nextY = root.Position.Y
+    if now - (S.stagePortalFloorCheckAt or -HUGE) >= (S.mobileOptimized and 0.16 or 0.11) then
+        S.stagePortalFloorCheckAt = now
+        S.stagePortalFloorCache = S.divineFloorHit(nextXZ + Vector3.new(0, 6, 0), 48)
     end
-
-    if supported and not obstructed then
-        root.CFrame = CFrame.lookAt(nextPos, nextPos + direction)
+    local floor = S.stagePortalFloorCache
+    if floor and math.abs(floor.Position.Y - root.Position.Y) < 22 then
+        -- Floor material/collision is useful when present, not mandatory.
+        goalY = floor.Position.Y + clearance
+    elseif horizontalDistance > 14 then
+        -- Do not descend into a chasm on the way to a ring below us.
+        goalY = math.max(root.Position.Y, goalY)
+    end
+    local maxYStep = math.max(0.55, speed * elapsed * 0.72)
+    nextY = nextY + math.clamp(goalY - nextY, -maxYStep, maxYStep)
+    local nextPos = Vector3.new(nextXZ.X, nextY, nextXZ.Z)
+    local delta = nextPos - root.Position
+    if delta.Magnitude > 0.06 then
+        local facing = Vector3.new(direction.X, 0, direction.Z)
+        if facing.Magnitude < 0.1 then facing = Vector3.new(0, 0, -1) end
+        root.CFrame = CFrame.lookAt(nextPos, nextPos + facing.Unit)
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
-        S.lastScriptPosition = nextPos -- distinguish our motion from native teleport
-        S.stagePortalStalledAt = nil
-        S.movementStatus = "Tweening to stage ring: " .. label
-        return true
+        S.lastScriptPosition = nextPos
     end
-
-    -- Slopes, steps, temporary geometry and streaming can defeat a strict
-    -- floor ray. Use simple native walking as a local fallback, NOT pathfinding.
-    -- If the next span is an actual gap and Safe Movement is on, hold at the
-    -- ledge rather than CFrame-flying into the void or across map sections.
-    local gap = floorHere ~= nil and floorNext == nil
-    if gap and S.safeMovement then
-        S.movementStatus = "Stage ring across unsupported floor: " .. label
-        if now - (S.lastMoveTo or -HUGE) >= 0.4 then
-            humanoid:MoveTo(root.Position)
-            S.lastMoveTo = now
-        end
-    else
-        S.movementStatus = "Walking over uneven ground to ring: " .. label
-        if now - (S.lastMoveTo or -HUGE) >= 0.32 then
-            humanoid:MoveTo(part.Position)
-            S.lastMoveTo = now
-        end
-        if now - (S.stagePortalLastProgressAt or -HUGE) >= 1.3 then
-            if S.stagePortalLastPosition and
-                (root.Position - S.stagePortalLastPosition).Magnitude < 1.1 then
-                S.stagePortalStalledAt = S.stagePortalStalledAt or now
-            else
-                S.stagePortalStalledAt = nil
-            end
-            S.stagePortalLastPosition = root.Position
-            S.stagePortalLastProgressAt = now
-        end
-        if S.stagePortalStalledAt and now - S.stagePortalStalledAt > 1.3
-            and now - (S.stagePortalLastJump or -HUGE) > 1.5 then
-            humanoid.Jump = true
-            S.stagePortalLastJump = now
-        end
-    end
+    S.movementStatus = string.format("Traveling to ring: %s (%d studs)",
+        part.Name, math.floor(distance + 0.5))
     return true
 end
 
@@ -4390,7 +4367,7 @@ local function moveLegit(humanoid, root, target, now)
         end
         goal = safe.Position
     elseif S.safeMovement and (bossScore(target) >= 70 or S.activeBossTarget == target) then
-        -- v63: Legit walking must respect the same boss-arena safety as
+        -- v64: Legit walking must respect the same boss-arena safety as
         -- Teleport and Tween. Large boss HRPs are not walkable goal points.
         local arena = S.captureSafeBossArena(root, target)
         if not arena then
@@ -5404,7 +5381,7 @@ function S.Unload(manual)
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v63 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v64 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -5412,9 +5389,9 @@ end
 -- Oasis manages its own visual preferences, themes, favorites and keybinds.
 -- The script's existing JSON state remains the authority for automation
 -- because it persists across the lobby/battle place transition.
--- v63: OasisUI used "HollowMoonHub_AD_Oasis" until v54. v63 moved the
+-- v64: OasisUI used "HollowMoonHub_AD_Oasis" until v54. v64 moved the
 -- window folder but did not migrate its named UI configurations. This copies
--- the old profiles into the game folder WITHOUT overwriting new v63 profiles.
+-- the old profiles into the game folder WITHOUT overwriting new v64 profiles.
 -- Do not delete source files: the user can verify and remove them manually.
 S.migrateOasisFiles = function()
     if S.oasisMigrationAttempted then return end
@@ -6208,6 +6185,8 @@ S.rebaseSpatialState = function(root, now)
     S.safeArena=nil
     S.stagePortalGoal=nil
     S.stagePortalLastTweenAt=-HUGE
+    S.stagePortalFloorCache=nil
+    S.stagePortalFloorCheckAt=-HUGE
     S.stagePortalStalledAt=nil
     S.stagePortalLastPosition=nil
     S.stagePortalScanAt=-HUGE
@@ -6236,10 +6215,14 @@ S.rebaseSpatialState = function(root, now)
     resetTarget()
 end
 S.detectExternalArenaTeleport = function(root, now)
-    if not S.autoFarm or S.farmMethod=="Legit" then return end
+    if not S.autoFarm or (S.farmMethod=="Legit" and not S.stagePortalGoal) then return end
     local previous=S.lastScriptPosition
     if previous and (root.Position-previous).Magnitude > 45
         and now-S.lastSpatialRebase > 0.65 then
+        local entered = S.stagePortalGoal
+        if entered and (previous - entered.Position).Magnitude <= 15 then
+            S.markStagePortalUsed(entered, now)
+        end
         S.rebaseSpatialState(root,now)
     end
 end
@@ -6313,15 +6296,20 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
         end
     end
     if not showingResults then
+        -- A running stage-ring transfer owns movement. Do not let skill casts
+        -- interrupt the short, controlled approach to an active entrance.
+        local enteringRing = S.autoFarm and S.stagePortalGoal
+            and S.stagePortalGoal.Parent
+            and S.collectionService:HasTag(S.stagePortalGoal, "TeleportRing")
         local ok, err = pcall(function()
-            if S.autoAttack then
+            if S.autoAttack and not enteringRing then
                 if not S.autoFarm and target then faceFlat(root, target) end
                 if now - S.lastAttack >= S.attackDelay then
                     fireBasic(root, characterData(), now)
                 end
             end
             -- Only skill cooldown polling is budgeted, never attack movement.
-            if S.autoSkills and target
+            if S.autoSkills and target and not enteringRing
                 and now - (S.lastAbilityCheck or -HUGE) >= (S.mobileOptimized and 0.045 or 0.016) then
                 S.lastAbilityCheck = now
                 if not S.autoFarm then faceFlat(root, target) end
@@ -6334,18 +6322,24 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
     if S.autoFarm and not showingResults then
         local portal, portalDistance = S.nearestStagePortal(root,target,now)
         local combatDistance = target and effectiveDistance(target,root.Position) or HUGE
-        -- Active native portals outrank distant enemies. Keep farming nearby
-        -- actual enemies while they remain inside the current encounter.
+        -- A tag is applied by the game's SetUpTeleportRing transition event.
+        -- Once one is active, its entrance takes priority over ALL monster
+        -- movement; a large boss model may overlap the entrance spatially.
         local fightHere = target and validTarget(target) and combatDistance <= 48
-        if portal and (not fightHere or (portalDistance < 12 and combatDistance > 16)) then
+        if portal then
             portalTravel = S.tweenToStagePortal(root,humanoid,now,target)
         elseif S.safeMovement and target and not fightHere then
             portalTravel = S.walkGroundedToEncounter(root,humanoid,target,now)
         end
         if not portalTravel and not target then
-            S.movementStatus = (S.stagePortalCandidates and #S.stagePortalCandidates > 0)
-                and "Active portal beyond local travel area"
-                or "Waiting for active stage ring / next wave"
+            if S.stagePortalNearestAny and S.stagePortalNearestAny < HUGE then
+                S.movementStatus = "Tagged ring too far: "
+                    .. tostring(math.floor(S.stagePortalNearestAny)) .. " studs"
+            elseif (S.stagePortalActiveCount or 0) > 0 then
+                S.movementStatus = "Previous ring used; waiting for new stage"
+            else
+                S.movementStatus = "Waiting for SetUpTeleportRing / next wave"
+            end
             if S.oldCharacter then releaseMovement() end
         end
     end
@@ -6445,7 +6439,7 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local env = (type(getgenv) == "function" and getgenv()) or _G
 local priorBoot = env.HollowMoonADStartupV48
-local newVersion = 63
+local newVersion = 64
 if type(priorBoot) == "table" and priorBoot.placeId == game.PlaceId
     and priorBoot.jobId == game.JobId then
     -- Two copies of THIS version must not run simultaneously. But allow
@@ -6544,13 +6538,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v63] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v64] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v63] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v64] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -6560,12 +6554,12 @@ boot.status = "starting"
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v63] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v64] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v63] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v64] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
 -- One stable core cache per game. Create the game folder only if the
@@ -6606,7 +6600,7 @@ if type(writefile) == "function" then
     if overwrite then
         local okWrite = pcall(writefile, cachePath, CORE)
         if not okWrite then
-            warn("[HollowMoonHub AD v63] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
+            warn("[HollowMoonHub AD v64] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
         end
     end
 end
