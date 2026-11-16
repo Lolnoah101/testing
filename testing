@@ -1,12 +1,12 @@
--- HMH_ANIME_DIMENSIONS_V68
--- HollowMoonHub | Anime Dimensions v68 | Startup-safe executable
+-- HMH_ANIME_DIMENSIONS_V69
+-- HollowMoonHub | Anime Dimensions v69 | Startup-safe executable
 -- Runs in lobby and battle. Do not start the main script before player data
 -- and the character's game-specific systems have initialized.
 local CORE = [====[
 
--- HMH_ANIME_DIMENSIONS_V68
--- HMH_AD_CORE_ADLER32:b48ec2ad
--- HollowMoonHub | Anime Dimensions v68 (farm-spot hazard clearance, unified Tween dodge, nearby-enemy respawn guard) | Startup Readiness Gate
+-- HMH_ANIME_DIMENSIONS_V69
+-- HMH_AD_CORE_ADLER32:2a3108db
+-- HollowMoonHub | Anime Dimensions v69 (unbounded replicated enemy discovery, long-range farming, reset cooldown) | Startup Readiness Gate
 -- Lobby 6938803436 / battle 6990129309 | OasisUI v1.9.0 | No watchers
 -- Uses combat remote formats confirmed from the supplied ClientSkillModule/Cobalt captures.
 -- Server-side damage, hit detection, and cooldown checks remain authoritative.
@@ -170,6 +170,7 @@ local S = {
     -- game respawn instead of flying toward distant, separate stage enemies.
     autoRespawnOnStall = true,
     farmRecovery = nil, -- session-only; never persist a timer or character
+    lastFarmRecoveryResetAt = -math.huge, -- survives respawn; avoids repeated resets
     approachLastCheckAt = -math.huge,
     approachLastStart = nil,
     approachLastPose = nil,
@@ -344,7 +345,7 @@ local function savePreferences()
     local wrote = pcall(writefile, STATE_FILE, encoded)
     if not wrote and not S.dataFolderWarningShown then
         S.dataFolderWarningShown = true
-        warn("[HollowMoonHub AD v68] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
+        warn("[HollowMoonHub AD v69] Could not save settings to " .. STATE_FILE .. "; check executor folder/file support")
     end
     return wrote
 end
@@ -385,7 +386,7 @@ S.saveToggleIntent = function()
     if type(writefile) ~= "function" then
         if not S.toggleIntentStorageWarned then
             S.toggleIntentStorageWarned = true
-            warn("[HollowMoonHub AD v68] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
+            warn("[HollowMoonHub AD v69] Settings storage unavailable: Auto Start/Retry may reset after teleports. Enable executor file support and Auto Execute.")
         end
         return false
     end
@@ -398,7 +399,7 @@ S.saveToggleIntent = function()
     local wrote = pcall(writefile, S.toggleIntentFile, json)
     if not wrote and not S.toggleIntentStorageWarned then
         S.toggleIntentStorageWarned = true
-        warn("[HollowMoonHub AD v68] Could not write Auto Start/Retry settings; choices may not survive teleports")
+        warn("[HollowMoonHub AD v69] Could not write Auto Start/Retry settings; choices may not survive teleports")
     end
     return wrote
 end
@@ -490,10 +491,10 @@ local function statsReady()
 end
 
 -- Auto Execute runs only on subsequent teleports, never immediately on toggle.
--- GitHub must host v68 or newer; reject old cached builds that lack
+-- GitHub must host v69 or newer; reject old cached builds that lack
 -- the owned-character refresh and loadout restoration safeguards.
 local GITHUB_LOADER = "https://raw.githubusercontent.com/Lolnoah101/testing/refs/heads/main/testing"
-local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V68"
+local AUTOEXEC_MARKER = "HMH_ANIME_DIMENSIONS_V69"
 local function getQueueFunction()
     return (type(queue_on_teleport) == "function" and queue_on_teleport)
         or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
@@ -505,7 +506,7 @@ local function installTeleportBootstrap()
     if not queue then return false end
     local snippet = [===[
         -- Queued in the destination place.  Never execute application code
-        -- until player stats load; the v68 main entry adds a second gate for
+        -- until player stats load; the v69 main entry adds a second gate for
         -- modules and character stability.
         if not game:IsLoaded() then game.Loaded:Wait() end
         local players = game:GetService("Players")
@@ -521,7 +522,7 @@ local function installTeleportBootstrap()
             task.wait(0.25)
         end
         if not ready then
-            warn("[HollowMoonHub AD v68] Auto Execute skipped: game data never finished loading; no automation started")
+            warn("[HollowMoonHub AD v69] Auto Execute skipped: game data never finished loading; no automation started")
             return
         end
         -- Respect the user's toggle even if it was switched off after queuing.
@@ -545,7 +546,7 @@ local function installTeleportBootstrap()
         -- First try GitHub with a fresh cache key, then the plain URL for
         -- executors that do not accept cache-busting query strings.
         local fetchOK, code = pcall(function()
-            return game:HttpGet(url .. "?hmh_ad_v68=" .. tostring(os.time()), true)
+            return game:HttpGet(url .. "?hmh_ad_v69=" .. tostring(os.time()), true)
         end)
         if not fetchOK or type(code) ~= "string" or #code == 0 then
             fetchOK, code = pcall(function() return game:HttpGet(url) end)
@@ -567,7 +568,7 @@ local function installTeleportBootstrap()
             local header = source:sub(1, 4096):gsub("^%s+", "")
             local firstLine = header:match("^[^\r\n]+") or "<empty>"
             local version = tonumber(firstLine:match("^%-%- HMH_ANIME_DIMENSIONS_V(%d+)%s*$"))
-            local supported = version ~= nil and version >= 68
+            local supported = version ~= nil and version >= 69
                 and header:find("HollowMoonHub | Anime Dimensions", 1, true) ~= nil
                 and header:find("6938803436", 1, true) ~= nil
                 and header:find("6990129309", 1, true) ~= nil
@@ -590,11 +591,11 @@ local function installTeleportBootstrap()
             local validLocal = localOK and acceptedHeader(localCode, true)
             if validLocal then
                 code = localCode
-                warn("[HollowMoonHub AD v68] GitHub returned " .. remoteHeader
-                    .. "; using verified local v68 core. Update the GitHub testing file to v68.")
+                warn("[HollowMoonHub AD v69] GitHub returned " .. remoteHeader
+                    .. "; using verified local v69 core. Update the GitHub testing file to v69.")
             else
-                warn("[HollowMoonHub AD v68] GitHub returned " .. remoteHeader
-                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v68.")
+                warn("[HollowMoonHub AD v69] GitHub returned " .. remoteHeader
+                    .. "; no valid local backup. Replace the GitHub testing file (main branch) with v69.")
                 return
             end
         end
@@ -616,17 +617,17 @@ local function installTeleportBootstrap()
             task.wait(0.2)
         end
         if not localReady then
-            warn("[HollowMoonHub AD v68] Auto Execute aborted: character/client library not ready")
+            warn("[HollowMoonHub AD v69] Auto Execute aborted: character/client library not ready")
             return
         end
         task.wait(2) -- let character scripts finish their post-spawn initialization
         local f, compileErr = loadstring(code)
         if not f then
-            warn("[HollowMoonHub AD v68] Invalid GitHub Lua: " .. tostring(compileErr))
+            warn("[HollowMoonHub AD v69] Invalid GitHub Lua: " .. tostring(compileErr))
             return
         end
         local success, execErr = pcall(f)
-        if not success then warn("[HollowMoonHub AD v68] Auto Execute failed: " .. tostring(execErr)) end
+        if not success then warn("[HollowMoonHub AD v69] Auto Execute failed: " .. tostring(execErr)) end
     ]===]
     local ok = pcall(queue, snippet)
     S.queuedAutoExecute = ok
@@ -641,17 +642,14 @@ local lastModuleCheck = -math.huge
 local lastSettingsCheck = -math.huge
 local SCAN_PERIOD = 0 -- target validity / selection checked every Heartbeat
 local COMBAT_PERIOD = 0 -- skill cooldown readiness checked every Heartbeat
-local MAX_TARGET_DISTANCE = 10000 -- discovery, not a claim of infinite server attack range
--- Do not chase enemies in distant arenas/through map portals; the game itself
--- must relocate the player between rooms. Oversized bosses can still be used
--- when a large visible body part is physically close to the character.
--- Mobile often receives a smaller streamed section of the map. Consider more
--- already-replicated targets within the same encounter, but never try to
--- move toward a distant stage (thousands of studs away).
-S.localFarmRange = S.mobileOptimized and 320 or 220
--- Bosses shown by the native HUD can be visible across a nearby courtyard.
--- That is an approach distance, NOT permission to cross a far-away stage.
-S.localTransitionRange = 340
+-- Scan every *replicated* monster in the indexed folder, irrespective of
+-- distance.  Detection cannot discover Roblox models not streamed to a client.
+-- Separate combat target acquisition from travel safety: direct travel never
+-- makes the old 4,000-stud leap to a different stage.  The normal selected
+-- movement speed still owns all reachable travel, including long approaches.
+S.localFarmRange = math.huge -- discovery is not artificially cut off at 220/320
+S.farmTravelSafetyLimit = 3200 -- movement ceiling only, NOT a detection radius
+S.localTransitionRange = 340 -- retained for local boss arena analysis only
 S.localBossPriorityRange = 140
 local SKILL_RANGE = 25
 -- The native cooldown result remains authoritative. This faster retry guard
@@ -2691,15 +2689,15 @@ end
 S.targetInCurrentArea = function(t, root)
     if not validTarget(t) then return false end
     local dist = (t.root.Position - root.Position).Magnitude
-    if dist <= S.localFarmRange then return true end
-    -- An identified nearby boss can be approached over verified floor, not
-    -- chased for thousands of studs because it was the last live rig.
-    if S.safeMovement and dist <= S.localTransitionRange
-        and bossScore(t) >= 70 then return true end
-    if dist <= 900 and effectiveDistance(t,root.Position) <= 55 then return true end
-    -- A giant boss may have an offset root and a nearby, attackable body.
-    return dist <= S.localFarmRange + 90
-        and effectiveDistance(t, root.Position) <= 45
+    -- There is no near-only target filter anymore.  Prefer every living rig
+    -- within safe continuous travel, whether the phone sees it at 10 or 2500 st.
+    if dist <= S.farmTravelSafetyLimit then return true end
+    -- Only giant/boss rigs need the more expensive body-surface check.
+    -- Normal future-stage monsters stay indexed, but are not flown toward.
+    if bossScore(t) >= 70 then
+        return effectiveDistance(t, root.Position) <= 55
+    end
+    return false
 end
 S.bossWithinCurrentArea = function(t, root)
     if not S.targetInCurrentArea(t,root) then return false end
@@ -2726,21 +2724,29 @@ local function findTarget(root)
         if validTarget(candidate) and candidate.model:IsDescendantOf(folder)
             and S.targetInCurrentArea(candidate, root) then
             localCount = localCount + 1
-            local hp = math.max(0, tonumber(candidate.hum.MaxHealth) or 0)
-            if hp > hpLeaderHealth then
-                hpRunnerUp = hpLeaderHealth
-                hpLeaderHealth = hp
-                hpLeader = candidate
-            elseif hp > hpRunnerUp then
-                hpRunnerUp = hp
+            local candidateDistance = (candidate.root.Position - root.Position).Magnitude
+            -- Only evaluate close encounter rigs for the unmarked boss HP
+            -- heuristic. A far future-stage boss must not steal combat focus.
+            if candidateDistance <= 550 then
+                local hp = math.max(0, tonumber(candidate.hum.MaxHealth) or 0)
+                if hp > hpLeaderHealth then
+                    hpRunnerUp = hpLeaderHealth
+                    hpLeaderHealth = hp
+                    hpLeader = candidate
+                elseif hp > hpRunnerUp then
+                    hpRunnerUp = hp
+                end
             end
             local score = bossScore(candidate)
             if score >= 70 or (bossBarShowing and score >= 25) then
-                local dist = (candidate.root.Position - root.Position).Magnitude
-                if not bestBoss or score > bestBossScore
+                local dist = candidateDistance
+                -- A distant future-stage boss must not steal priority while
+                -- this stage still has closer enemies to clear.
+                if (dist <= 550 or effectiveDistance(candidate, root.Position) <= 55)
+                    and (not bestBoss or score > bestBossScore
                     or (score == bestBossScore and candidate == current)
                     or (score == bestBossScore and bestBoss ~= current
-                        and dist < bestBossDistance) then
+                        and dist < bestBossDistance)) then
                     bestBoss, bestBossScore, bestBossDistance = candidate, score, dist
                 end
             end
@@ -2773,6 +2779,10 @@ local function findTarget(root)
         end
     end
     if current and S.targetInCurrentArea(current,root) and current.model:IsDescendantOf(folder)
+        -- Hold a nearby target until dead; a far-away target must not keep
+        -- focus when a new enemy streams in much closer.
+        and ((current.root.Position - root.Position).Magnitude <= 140
+            or effectiveDistance(current, root.Position) <= 45)
         and (not prioritizeBoss or
             (highestBoss > 0 and S.bossWithinCurrentArea(current,root)
                 and bossScore(current) >= highestBoss) or
@@ -2810,9 +2820,9 @@ local function findTarget(root)
             removeIndexedHumanoid(hum)
         end
     end
-    -- Far stages are transitioned by the game, not by flying toward remote
-    -- HumanoidRootParts. If no target is in the local encounter, release
-    -- movement and optionally use a verified physical portal below.
+    -- Every replicated enemy is checked, even if too far away to chase.
+    -- If all remaining enemies are in a remote stage, keep their nearest
+    -- distance for status/recovery instead of flying 4,000 studs into the void.
     local best = localBest
     S.nearestDistantEnemy = nearestDistant
     if S.target ~= best then setTarget(best) end
@@ -4161,7 +4171,8 @@ local function moveLegit(humanoid, root, target, now)
     local dist = (target.root.Position - root.Position).Magnitude
     if S.safeMovement and dist > 92
         and effectiveDistance(target,root.Position) > 55
-        and not S.isDivineGuardianTarget(target) then
+        and not S.isDivineGuardianTarget(target)
+        and (bossScore(target) >= 70 or S.activeBossTarget == target) then
         local safe = S.safeBossApproachPose(root, target, now)
         if not safe then
             humanoid:MoveTo(root.Position)
@@ -4272,8 +4283,12 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
     if not character then return end
     local dist = (target.root.Position-root.Position).Magnitude
     local realDistance = effectiveDistance(target,root.Position)
-    if S.safeMovement and dist > S.localTransitionRange and realDistance > 55 then
-        S.movementStatus = "Waiting for current-stage transition"
+    -- This guard is independent of Safe Movement. It prevents another
+    -- 4,000-stud trip into a separate encounter while permitting any enemy
+    -- in a large, reachable map to be approached at the selected speed.
+    if dist > S.farmTravelSafetyLimit and realDistance > 55 then
+        S.movementStatus = string.format(
+            "Enemy detected %.0f studs away: waiting for game stage change", dist)
         if S.oldCharacter then releaseMovement() end
         return
     end
@@ -4284,7 +4299,14 @@ farmTick = function(dt, root, humanoid, target, now, dodgeOverride)
         -- validates the boss landing, it does not navigate using waypoints.
         S.movementStatus = "Boss approach (direct movement / arena guard)"
     else
-        S.movementStatus = "Farming nearby enemy"
+        if dist > S.localTransitionRange then
+            if now - (S.lastFarmDistanceStatusAt or -HUGE) >= 0.5 then
+                S.lastFarmDistanceStatusAt = now
+                S.movementStatus = string.format("Traveling to enemy: %.0f studs", dist)
+            end
+        else
+            S.movementStatus = "Farming enemy"
+        end
     end
     if S.oldCharacter ~= character then
         releaseMovement()
@@ -5145,7 +5167,7 @@ function S.Unload(manual)
 end
 
 -- ================================================================
--- HOLLOWMOONHUB | OASISUI v1.9.0 | v68 script
+-- HOLLOWMOONHUB | OASISUI v1.9.0 | v69 script
 -- Native OasisUI tabs, sub-tabs, module cards and sections.
 -- Gameplay workers, callbacks, saved settings and teleport behavior remain
 -- in the original Anime Dimensions core.
@@ -6047,6 +6069,7 @@ S.farmRecoveryTick = function(root, humanoid, target, now, showingResults)
         if recovery.target == target then
             if recovery.health and health < recovery.health - 0.01 then
                 progress = true -- actual replicated enemy HP decreased
+                S.lastFarmRecoveryResetAt = -HUGE -- completed an engagement; rearm fallback
             elseif recovery.distance and recovery.position
                 and distance + 1.5 < recovery.distance
                 and (root.Position - recovery.position).Magnitude > 1.5 then
@@ -6083,16 +6106,25 @@ S.farmRecoveryTick = function(root, humanoid, target, now, showingResults)
         end
         return
     end
+    -- Do not death-loop when a stage has distant or unstreamed monsters.
+    -- The original 5s inactivity check still applies, but repeat resets are
+    -- cooled down after a request. This timestamp survives CharacterAdded.
+    if now - (S.lastFarmRecoveryResetAt or -HUGE) < 25 then
+        S.movementStatus = "Waiting for enemy / recovery cooldown"
+        return
+    end
     -- Release forced Physics/NoClip first so the game's death/respawn routine
     -- isn't held in place by the farm's CFrame mover.
     if S.oldCharacter then releaseMovement() end
     recovery.waitingForRespawn = true
     recovery.requestAt = now
+    S.lastFarmRecoveryResetAt = now
     S.movementStatus = "5s without farming: respawning"
     local ok, err = pcall(function() humanoid.Health = 0 end)
     if not ok then
         recovery.waitingForRespawn = false
         recovery.lastProgressAt = now
+        S.lastFarmRecoveryResetAt = -HUGE
         warnOnce("Auto Respawn could not use the game's reset behavior: " .. tostring(err))
     end
 end
@@ -6171,7 +6203,7 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
                 and now - S.noTargetSince >= 12
                 and now - S.lastNoTargetDiagnosticAt >= 60 then
                 S.lastNoTargetDiagnosticAt = now
-                warnOnce("Auto Farm: no live monster is currently replicated. Mobile Roblox streaming can hide distant enemies; waiting for a rig or 5s respawn recovery")
+                warnOnce("Auto Farm: no live monster is currently replicated. Streaming can hide far enemies; infinite discovery covers only models loaded by Roblox, with 5s recovery and a cooldown between resets")
             end
         end
     end
@@ -6193,8 +6225,8 @@ S.connections[#S.connections+1] = RunService.Heartbeat:Connect(function(dt)
         end)
         if not ok then warnOnce(err) end
     end
-    -- v65: never follow a ring or a distant-stage NPC. The normal game reset
-    -- places the character at the game's current spawn if farming stalls.
+    -- No automated ring navigation. Search the entire replicated enemy index,
+    -- but don't cross an obviously separate (4,000+ stud) map by direct CFrame.
     if S.autoFarm and not showingResults and not target then
         S.movementStatus = "Waiting for enemy / farm recovery"
         if S.oldCharacter then releaseMovement() end
@@ -6396,13 +6428,13 @@ while os.clock() < untilTime do
     end
     if not noticeShown and os.clock() - bootStartedAt > 10 then
         noticeShown = true
-        warn("[HollowMoonHub AD v68] Waiting for Anime Dimensions data: " .. tostring(lastReason))
+        warn("[HollowMoonHub AD v69] Waiting for Anime Dimensions data: " .. tostring(lastReason))
     end
     task.wait(0.2)
 end
 if not cleared then
     boot.status = "failed"
-    warn("[HollowMoonHub AD v68] Startup cancelled: " .. tostring(lastReason)
+    warn("[HollowMoonHub AD v69] Startup cancelled: " .. tostring(lastReason)
         .. " never became ready. No UI, combat, auto start or reconnect was started.")
     return
 end
@@ -6412,12 +6444,12 @@ boot.status = "starting"
 local fn, err = loadstring(CORE)
 if not fn then
     boot.status = "failed"
-    error("[HollowMoonHub AD v68] Compile failure: " .. tostring(err))
+    error("[HollowMoonHub AD v69] Compile failure: " .. tostring(err))
 end
 local ok, runErr = pcall(fn)
 if not ok then
     boot.status = "failed"
-    error("[HollowMoonHub AD v68] Initialization failure: " .. tostring(runErr))
+    error("[HollowMoonHub AD v69] Initialization failure: " .. tostring(runErr))
 end
 boot.status = "running"
 -- One stable core cache per game. Create the game folder only if the
@@ -6458,7 +6490,7 @@ if type(writefile) == "function" then
     if overwrite then
         local okWrite = pcall(writefile, cachePath, CORE)
         if not okWrite then
-            warn("[HollowMoonHub AD v68] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
+            warn("[HollowMoonHub AD v69] Local core backup unavailable; GitHub Auto Execute remains available. Check executor folder/file support.")
         end
     end
 end
